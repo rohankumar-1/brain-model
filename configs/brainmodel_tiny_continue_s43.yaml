@@ -1,0 +1,82 @@
+# Control for brainmodel_tiny_predict.yaml: continue the trained dense model with the same schedule, no predictive term.
+# Weights come from output.init_from (fresh optimizer and schedule); the predictor starts random.
+# This is the control: the same schedule with loss.predict.weight 0.
+#
+# 3D LeJEPA on native-grid crops with a dense (token-level) objective.
+#
+# Crops lie on the volume's own token grid, so crops that overlap share tokens exactly. Two global crops
+# agree on their pooled embedding (the 2D recipe) and, token by token, wherever they overlap. Small crops
+# lie inside a global crop and agree with it at their own location; "fine" crops use 8x8x4 patches and
+# average into the coarse token that contains them. SigReg regularizes both pooled and token embeddings.
+# One extra crop is seen under two windows. Crops also get noise, blur and slow intensity drift.
+# Air is dropped by a threshold. Nothing is masked for reconstruction.
+
+seed: 43
+
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  default_origin_mm: [0.0, 0.0, 0.0]
+  volume_size_xyz: [256, 256, 128]
+  num_workers: 10
+  balance_alpha: 0.5     # family sampling mass ~ n**alpha (1 = natural mix, ~60% RSNA CT)
+
+model:
+  size: tiny
+  in_chans: 1
+  proj_dim: 128
+  proj_hidden: 2048
+  qk_norm: true
+  rope_base_mm: 100.0
+  checkpoint: true
+  proj_norm: batch
+  length_buckets: 4
+  dense_dim: 128
+  dense_hidden: 512
+
+views:
+  patch_xyz: [16, 16, 8]
+  global: {n: 2, size_xyz: [128, 128, 64]}
+  local: {n: 2, size_xyz: [64, 64, 32]}
+  fine: {n: 2, size_xyz: [32, 32, 16], patch_xyz: [8, 8, 4]}
+  nested: true
+  fg_min: 0.15
+  retries: 8
+  gate: {ct_hu: [-500.0, 200.0], mri_lo: -5.5}
+
+aug:
+  window: {mode: random, mix: brain}
+  noise: {p: 0.5, sigma: [0.02, 0.15]}
+  blur: {p: 0.3, sigma_vox: [0.5, 1.5]}
+  drift: {p: 0.3, amp: 0.25}
+
+loss:
+  lamb: 0.02
+  win_weight: 1.0
+  local_pooled: false
+  n_proj: 256
+  gather_ddp: true
+  dense: {weight: 1.0, tokens_per_view: 4}
+  # Hide 3 random blocks (3-6 tokens a side, ~40% of the kept tokens) of each global crop. The predictor
+  # regresses every hidden token's own full-crop embedding (context) and the 2x2x2 cell means of every kept
+  # patch's voxels (local detail), after a 1000-step ramp.
+  predict: {weight: 0.0, pixel_weight: 0.5, pixel_cells: [2, 2, 2], blocks: 3, block_tokens: [3, 6], depth: 4, ramp_steps: 1000}
+
+optim:
+  lr: 0.0002
+  weight_decay: 0.05
+  warmup_steps: 500
+  clip_grad: 1.0
+  batch_size: 192
+
+train:
+  max_steps: 8000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 2000
+
+output:
+  out_dir: runs/continue_8k_s43
+  init_from: runs/brainmodel_tiny_dense/last.pt

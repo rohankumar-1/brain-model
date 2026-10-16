@@ -1,0 +1,17 @@
+Seg-CQ500/
+artifact-cleaner/nnunet_data/
+artifact-cleaner/.venv/
+artifact-cleaner/predictions/
+artifact-cleaner/**/__pycache__/
+data/totalseg_out/
+data/raw/
+data/processed/
+runs
+**/__pycache__/
+*.pt
+__MACOSX/
+_MACOSX/
+logs
+*.whl
+data/inspect_preview/jepa_batch/
+.ipynb_checkpoints/

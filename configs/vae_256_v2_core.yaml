@@ -1,0 +1,40 @@
+# ConvVAE on finished non-RSNA volumes while RSNA preprocessing continues.
+# Same model as vae_256_v2.yaml. Slice index is built from existing zips
+# and the splits already stored in volumes.csv.
+
+seed: 42
+
+data:
+  slices_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_core
+  augment:
+    enabled: true
+    hflip: 0.5
+    translate: 0.05
+    crop_scale: [0.85, 1.0]
+    intensity: 0.1
+    noise_std: 0.01
+
+model:
+  latent_dim: 128
+
+optim:
+  lr: 0.0003
+  weight_decay: 0.00001
+  beta: 0.0005
+  batch_size: 96
+  num_workers: 8
+  prefetch_factor: 2
+  scheduler:
+    enabled: true
+    factor: 0.5
+    patience: 3
+    min_lr: 1.0e-6
+
+train:
+  max_epochs: 1000
+  patience: 10
+  min_delta: 0.000001
+
+output:
+  out_dir: runs/vae_256_v2_core
+  save_recon_grid: true

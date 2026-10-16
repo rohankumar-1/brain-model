@@ -1,0 +1,34 @@
+# ConvVAE training config (256×256 multimodal slices)
+# Usage: python train_vae.py --config configs/vae_256.yaml
+
+seed: 42
+
+data:
+  slices_root: data/processed/slices_zarr
+# Native preprocess splits are train/val/test (75/10/15).
+  augment:
+    enabled: true
+    hflip: 0.5
+    translate: 0.05
+    crop_scale: [0.85, 1.0]
+    intensity: 0.1
+    noise_std: 0.01
+
+model:
+  latent_dim: 64
+
+optim:
+  lr: 0.001
+  beta: 0.001
+  batch_size: 64
+  num_workers: 8
+  prefetch_factor: 2
+
+train:
+  max_epochs: 1000
+  patience: 8
+  min_delta: 0.0
+
+output:
+  out_dir: runs/vae_256
+  save_recon_grid: true
