@@ -193,6 +193,37 @@ def test_fine_pooled_tokens_land_on_the_coarse_grid():
     assert not torch.allclose(pooled, coarse, atol=1e-3)
 
 
+def test_fine_grid_tokens_keep_the_native_grid():
+    from brainmodel.config import DEFAULT_CONFIG
+    from brainmodel.train.train_ssl import build_encoder
+    from downstream.embed3d import FrozenEncoder3D
+
+    cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
+    enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), (256, 256, 128), (1.0, 1.0, 1.0))
+    vol = _vol()
+    native, _, fg = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_grid=True, fine_pool=False)
+    pooled, _, _ = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_pool=True, fine_grid=False)
+    assert native.shape[0] == 32 ** 3 and fg.shape == (32 ** 3,)
+    assert enc.patch_xyz == (16, 16, 8)
+    d = native.shape[-1]
+    avg = native.float().view(16, 2, 16, 2, 16, 2, d).mean(dim=(1, 3, 5)).reshape(-1, d)
+    assert torch.allclose(avg, pooled.float(), atol=1e-3, rtol=1e-3)
+    assert float(native[~fg].abs().sum()) == 0.0 and float(native[fg].abs().sum()) > 0.0
+
+
+def test_lesion_grid_and_pixel_on_the_fine_grid():
+    m = np.zeros((128, 256, 256), np.uint8)
+    m[0:4, 0:8, 0:8] = 1
+    g = P.lesion_grid(m, "atlas", grid=P.FINE_GRID, patch_xyz=P.FINE_PATCH_XYZ)
+    assert g.shape == (32768,) and g[0] == 1.0 and g[1] == 0.0
+    pos = P.token_positions(P.FINE_GRID)
+    assert pos.shape == (32768, 3)
+    assert pos[1, 2] > pos[0, 2] and pos[32, 1] > pos[0, 1] and pos[32 * 32, 0] > pos[0, 0]
+    feat, fg = P.Pixel(patch_xyz=P.FINE_PATCH_XYZ, grid=P.FINE_GRID).tokens(_vol(), "mri")
+    assert feat.shape == (32768, 4) and fg.shape == (32768,)
+    assert 0.1 < fg.float().mean() < 0.9
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

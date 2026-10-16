@@ -176,7 +176,9 @@ def load_or_build_embeddings(
 ) -> dict:
     is3d = peek_is_brain3d(ckpt)
     tag = "" if is3d or max_slices == UNIFORM_SLICES else f"_s{max_slices}"
-    if is3d and os.environ.get("BRAIN_FINE_POOL", "") == "1":
+    if is3d and os.environ.get("BRAIN_FINE_GRID", "") == "1":
+        tag += "_finegrid"
+    elif is3d and os.environ.get("BRAIN_FINE_POOL", "") == "1":
         tag += "_finepool"
     win = (window or "canonical").lower()
     ver = CACHE_VERSION_3D if is3d else CACHE_VERSION
@@ -190,8 +192,10 @@ def load_or_build_embeddings(
             z = data["z"] if "z" in data.files else slot_z(len(ids), max_slices)
             z = np.asarray(z, dtype=np.float32 if getattr(z, "ndim", 2) == 3 else np.int16)
             n_tok = int(data["mus"].shape[1])
+            mus = data["mus"]
+            mus = mus if (n_tok > 8192 or mus.dtype == np.float32) else mus.astype(np.float32)
             return {
-                "volume_ids": ids, "mus": data["mus"].astype(np.float32), "mask": data["mask"],
+                "volume_ids": ids, "mus": mus, "mask": data["mask"],
                 "z": z, "latent_dim": int(data["latent_dim"]),
                 "max_slices": n_tok if spatial else max_slices,
                 "representation": str(data["representation"]), "cache_path": path,
@@ -206,11 +210,13 @@ def load_or_build_embeddings(
     spatial = getattr(enc, "representation", "") == "tokens"
     z_save = np.asarray(z, dtype=np.float16 if spatial else np.int16)
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        path, volume_ids=np.asarray(ids), mus=mus.astype(np.float16), mask=mask, z=z_save,
+    payload = dict(
+        volume_ids=np.asarray(ids), mus=mus.astype(np.float16), mask=mask, z=z_save,
         latent_dim=np.int32(mus.shape[-1]), max_slices=np.int32(mus.shape[1] if spatial else max_slices),
         representation=np.asarray(enc.representation), window=np.asarray(win),
     )
+    # Uncompressed for the 32^3 grid: compressing ~20 GB of embeddings is slower than the encode.
+    (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(path, **payload)
     return {
         "volume_ids": ids, "mus": mus, "mask": mask,
         "z": np.asarray(z, dtype=np.float32 if spatial else np.int16),

@@ -1,13 +1,13 @@
-"""Spatial readouts for a native 16×16×16 token grid.
+"""Spatial readouts for a cubic token grid (16³ coarse or 32³ native fine).
 
-The encoder returns one vector per 16×16×8 mm patch, flattened (Z, Y, X).
-A single mean over all 4096 tokens erases which plane the signal came from.
-These views keep that structure after a 16-component whitened PCA fit on the
+The encoder returns one vector per patch, flattened (Z, Y, X).
+A single mean over all tokens erases which plane the signal came from.
+These views keep that structure after a 16-component PCA fit on the
 training volumes only:
 
-- plane: mean and max inside each of the 16 axial slabs, shape (N, 16, 32)
-- grid: mean inside each cell of a 4×4×4 binning, flattened to (N, 1, 1024)
-- global: mean and max over every parenchyma token, shape (N, 1, 32)
+- plane: mean and max inside each axial slab
+- grid: mean inside each cell of a 4×4×4 binning
+- global: mean and max over every parenchyma token
 """
 
 from __future__ import annotations
@@ -17,9 +17,22 @@ from sklearn.decomposition import PCA
 
 # Conv flatten is (Z, Y, X) with X fastest. 256/16 × 256/16 × 128/8.
 GRID_ZYX = (16, 16, 16)
+FINE_GRID_ZYX = (32, 32, 32)
 NATIVE_Z = 128
 PCA_DIM = 16
 GRID_BINS = 4
+
+
+def token_grid_zyx(n_tok: int) -> tuple[int, int, int] | None:
+    """Cubic (Z, Y, X) grid for a flattened token count, or None if it is not a cube we know."""
+    n = int(n_tok)
+    for g in (GRID_ZYX, FINE_GRID_ZYX):
+        if int(np.prod(g)) == n:
+            return g
+    side = int(round(n ** (1.0 / 3.0)))
+    if side > 0 and side ** 3 == n:
+        return (side, side, side)
+    return None
 
 
 def _masked_mean(x: np.ndarray, mask: np.ndarray, axes: tuple[int, ...]) -> np.ndarray:
@@ -36,25 +49,30 @@ def _masked_max(x: np.ndarray, mask: np.ndarray, axes: tuple[int, ...]) -> np.nd
 
 
 def _fit_pca(train_x: np.ndarray, train_mask: np.ndarray, k: int, seed: int, max_rows: int = 32768) -> PCA:
-    flat = np.asarray(train_x, dtype=np.float32).reshape(-1, train_x.shape[-1])
+    n, t, d = train_x.shape
     keep = np.flatnonzero(np.asarray(train_mask).reshape(-1))
     if keep.size == 0:
         raise ValueError("training mask has no parenchyma tokens")
     rng = np.random.default_rng(seed)
     if keep.size > max_rows:
         keep = rng.choice(keep, size=max_rows, replace=False)
-    comps = min(int(k), flat.shape[-1], int(keep.size))
+    vi, ti = np.unravel_index(keep, (n, t))
+    sample = np.asarray(train_x[vi, ti], dtype=np.float32)
+    comps = min(int(k), d, int(keep.size))
     # Do not whiten. On this encoder the first component is most of the variance;
     # whitening would amplify the trailing noise directions up to that scale.
     pca = PCA(n_components=comps, whiten=False, random_state=seed)
-    pca.fit(flat[keep])
+    pca.fit(sample)
     return pca
 
 
-def _project(pca: PCA, x: np.ndarray) -> np.ndarray:
-    n, t, _ = x.shape
-    y = pca.transform(np.asarray(x, dtype=np.float32).reshape(-1, x.shape[-1]))
-    return y.reshape(n, t, -1).astype(np.float32)
+def _project(pca: PCA, x: np.ndarray, chunk: int = 8) -> np.ndarray:
+    n, t, d = x.shape
+    y = np.empty((n, t, pca.n_components_), dtype=np.float32)
+    for i in range(0, n, chunk):
+        sl = np.asarray(x[i:i + chunk], dtype=np.float32).reshape(-1, d)
+        y[i:i + chunk] = pca.transform(sl).reshape(-1, t, pca.n_components_)
+    return y
 
 
 def _planes(x: np.ndarray, mask: np.ndarray, grid_zyx: tuple[int, int, int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -1,7 +1,9 @@
 #!/bin/bash
 # Frozen-token probes (dense lesion, fingerprint, location) on 1 L40S.
 #   sbatch --export=ALL,CKPTS="runs/a.pt runs/b.pt",OUT=runs/probes/x.json jobs/probe3d.sbatch
+#   sbatch --export=ALL,CKPTS=runs/m.pt,OUT=runs/probes/x.json,EXTRA_ARGS=--fine-grid jobs/probe3d.sbatch
 # CONTROLS (default "--pixel --random-init") adds the pixel-statistics and random-init baselines.
+# EXTRA_ARGS is space-separated (commas are eaten by sbatch --export).
 
 #SBATCH -p pi_dbertsim
 #SBATCH --job-name=probe3d

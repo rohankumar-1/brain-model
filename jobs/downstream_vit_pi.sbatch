@@ -6,6 +6,7 @@
 # Submit:
 #   sbatch --export=ALL,CKPT=runs/brainmodel_tiny_predict/last.pt jobs/downstream_vit_pi.sbatch
 #   sbatch --export=ALL,CKPT=runs/vit_tiny_v4/last.pt,TASKS=oasis1_age:cq500 jobs/downstream_vit_pi.sbatch
+# Native 8x8x4 tokens (32^3, no 2x2x2 pool): BRAIN_FINE_GRID=1 (do not also set BRAIN_FINE_POOL).
 
 #SBATCH -p pi_dbertsim
 #SBATCH --job-name=vit-down

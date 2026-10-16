@@ -203,18 +203,49 @@ class AttnEnsemble:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.models: list[nn.Module] = []
 
-    def _t(self, a, dtype=torch.float32):
-        return torch.as_tensor(np.asarray(a), dtype=dtype, device=self.device)
+    def _host_tokens(self, n_tok: int) -> bool:
+        """32^3 grids are too large to pin in GPU memory; only minibatches move over."""
+        return bool(self.spatial) and int(n_tok) > 8192
 
-    def _z(self, z, n: int, s: int) -> torch.Tensor:
+    def _t(self, a, dtype=torch.float32, device=None):
+        device = self.device if device is None else device
+        arr = np.asarray(a)
+        same = isinstance(a, np.ndarray) and a.flags.c_contiguous and arr.dtype == {
+            torch.float16: np.float16, torch.float32: np.float32, torch.bool: np.bool_,
+        }.get(dtype)
+        try:
+            t = torch.from_numpy(a) if same else torch.as_tensor(arr, dtype=dtype)
+        except (ValueError, RuntimeError, TypeError):
+            t = torch.as_tensor(arr, dtype=dtype)
+        if t.dtype != dtype:
+            t = t.to(dtype)
+        return t if t.device == device else t.to(device)
+
+    def _z(self, z, n: int, s: int, device=None) -> torch.Tensor:
         if self.spatial:
             if z is None or np.asarray(z).ndim != 3:
                 raise ValueError("token attention needs (N, T, 3) coordinates")
-            return self._t(z)
+            return self._t(z, device=device)
         if z is None:
             from downstream.embeddings import slot_z
             z = slot_z(n, s)
-        return self._t(z)
+        return self._t(z, device=device)
+
+    def _gpu_batch(self, t: torch.Tensor, idx) -> torch.Tensor:
+        b = t[idx]
+        if b.device != self.device:
+            b = b.to(self.device)
+        if b.is_floating_point() and b.dtype != torch.float32:
+            b = b.float()
+        return b
+
+    def _logits(self, model: nn.Module, x, m, z) -> torch.Tensor:
+        outs = []
+        n = len(x)
+        for i in range(0, n, self.bs):
+            sl = slice(i, min(i + self.bs, n))
+            outs.append(model(self._gpu_batch(x, sl), self._gpu_batch(m, sl), self._gpu_batch(z, sl)))
+        return torch.cat(outs)
 
     def _fit_one(self, seed, x, y, m, z, xv, yv, mv, zv) -> nn.Module:
         torch.manual_seed(seed)
@@ -224,19 +255,21 @@ class AttnEnsemble:
         loss_fn = nn.MSELoss() if self.regression else nn.BCEWithLogitsLoss()
         n, steps = len(y), self.epochs * -(-len(y) // self.bs)
         best, best_state, bad, step = float("inf"), None, 0, 0
+        perm_dev = x.device
         for _ in range(self.epochs):
             model.train()
-            for idx in torch.randperm(n, device=self.device).split(self.bs):
+            for idx in torch.randperm(n, device=perm_dev).split(self.bs):
                 for g in opt.param_groups:
                     g["lr"] = lr_at(step, steps, self.lr, warmup=min(50, steps // 10))
-                loss = loss_fn(model(x[idx].float(), m[idx], z[idx]), y[idx])
+                loss = loss_fn(model(self._gpu_batch(x, idx), self._gpu_batch(m, idx), self._gpu_batch(z, idx)),
+                               self._gpu_batch(y, idx))
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 opt.step()
                 step += 1
             model.eval()
             with torch.no_grad():
-                v = float(loss_fn(model(xv.float(), mv, zv), yv))
+                v = float(loss_fn(self._logits(model, xv, mv, zv), self._gpu_batch(yv, slice(None))))
             if v < best - 1e-4:
                 best, bad = v, 0
                 best_state = {k: t.detach().clone() for k, t in model.state_dict().items()}
@@ -247,21 +280,22 @@ class AttnEnsemble:
 
     def fit(self, x, y, mask, x_val, y_val, mask_val, z=None, z_val=None) -> None:
         y, y_val = (np.asarray(a, dtype=np.float32).reshape(len(a), -1) for a in (y, y_val))
+        host = torch.device("cpu") if self._host_tokens(x.shape[1]) else self.device
         data = (
-            self._t(x, torch.float16 if self.half else torch.float32), self._t(y), self._t(mask, torch.bool), self._z(z, len(x), x.shape[1]),
-            self._t(x_val, torch.float16 if self.half else torch.float32), self._t(y_val), self._t(mask_val, torch.bool),
-            self._z(z_val, len(x_val), x_val.shape[1]),
+            self._t(x, torch.float16 if self.half else torch.float32, device=host), self._t(y, device=host),
+            self._t(mask, torch.bool, device=host), self._z(z, len(x), x.shape[1], device=host),
+            self._t(x_val, torch.float16 if self.half else torch.float32, device=host), self._t(y_val, device=host),
+            self._t(mask_val, torch.bool, device=host), self._z(z_val, len(x_val), x_val.shape[1], device=host),
         )
         self.models = [self._fit_one(self.seed + i, *data) for i in range(self.n_seeds)]
 
     @torch.no_grad()
     def predict_scores(self, x, mask, z=None) -> np.ndarray:
-        xt, mt, zt = self._t(x, torch.float16 if self.half else torch.float32), self._t(mask, torch.bool), \
-            self._z(z, len(x), x.shape[1])
-        logits = torch.stack([
-            torch.cat([m(xt[i:i + 64].float(), mt[i:i + 64], zt[i:i + 64]) for i in range(0, len(xt), 64)])
-            for m in self.models
-        ]).mean(0)
+        host = torch.device("cpu") if self._host_tokens(x.shape[1]) else self.device
+        xt = self._t(x, torch.float16 if self.half else torch.float32, device=host)
+        mt = self._t(mask, torch.bool, device=host)
+        zt = self._z(z, len(x), x.shape[1], device=host)
+        logits = torch.stack([self._logits(m, xt, mt, zt) for m in self.models]).mean(0)
         p = logits if self.regression else logits.sigmoid()
         p = p.cpu().numpy()
         return p.ravel() if self.regression or (not self.multilabel and p.shape[1] == 1) else p

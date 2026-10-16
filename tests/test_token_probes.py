@@ -28,6 +28,42 @@ def test_default_token_heads_are_tok_conv_only():
     assert [h.name for h in heads] == ["tok_conv"]
 
 
+def test_attn_ensemble_trains_a_large_grid_from_host_memory():
+    """32^3-scale token counts must not be copied onto the GPU as one tensor."""
+    n, t, d = 4, 8193, 4
+
+    class _Pool(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(d, 1)
+
+        def forward(self, x, mask, xyz):
+            return self.lin((x * mask.unsqueeze(-1).to(x.dtype)).mean(1))
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(n, t, d)).astype(np.float16)
+    y = (np.arange(n) % 2).astype(np.float32).reshape(-1, 1)
+    m = np.ones((n, t), bool)
+    z = np.zeros((n, t, 3), np.float32)
+    head = AttnEnsemble(d, 0, 1, False, 0, n_seeds=1, epochs=2, patience=2, batch_size=2,
+                        spatial=True, half=True, model_factory=_Pool)
+    head.fit(x, y, m, x, y, m, z=z, z_val=z)
+    scores = head.predict_scores(x, m, z=z)
+    assert scores.shape == (n,) and np.isfinite(scores).all()
+
+
+def test_conv_probe_accepts_the_fine_grid():
+    x = torch.zeros(2, 32768, 4)
+    m = torch.ones(2, 32768, dtype=torch.bool)
+    z = torch.zeros(2, 32768, 3)
+    out = ConvProbe(4, 1, grid_zyx=(32, 32, 32), width=8)(x, m, z)
+    assert out.shape == (2, 1) and bool(torch.isfinite(out).all())
+    from downstream.token_readout import token_grid_zyx
+    assert token_grid_zyx(4096) == (16, 16, 16)
+    assert token_grid_zyx(32768) == (32, 32, 32)
+    assert token_grid_zyx(100) is None
+
+
 def test_probes_shapes_and_masked_rows():
     x, _, m, z = (torch.from_numpy(a) for a in _data(4))
     m[0] = False  # a volume with no foreground token must not produce NaN

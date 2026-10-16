@@ -1,8 +1,9 @@
 """Frozen-token probes that measure what a pretrained encoder keeps, without a task head per dataset.
 
 Every volume is encoded once and every encoder reads the same volume, so the comparison is paired.
-The patch grid is the 3D encoder's native 16 x 16 x 16 grid of 16 x 16 x 8 voxel patches, flattened
-(Z, Y, X). The 2D slice model is averaged over 8 slices per patch to land on the same grid.
+The default patch grid is the 3D encoder's 16 x 16 x 16 grid of 16 x 16 x 8 voxel patches, flattened
+(Z, Y, X). ``--fine-grid`` keeps the tiled 8 x 8 x 4 encode on 32 x 32 x 32. The 2D slice model is
+averaged over 8 slices per coarse patch to land on the 16^3 grid.
 
 1. Dense lesion probe: from one token, is there lesion inside its patch? Linear and one-hidden-layer
    probes per held-out dataset, scored by average precision against the prevalence (lift) and AUROC.
@@ -40,6 +41,8 @@ from lib.windowing import asinh_window, windows_for
 
 PATCH_XYZ = (16, 16, 8)
 GRID = (16, 16, 16)  # (Z, Y, X) tokens
+FINE_PATCH_XYZ = (8, 8, 4)
+FINE_GRID = (32, 32, 32)
 N_TOK = 4096
 TILE_WINDOW = (128, 128, 64)  # the training global-crop size, in voxels (X, Y, Z)
 TILE_STRIDE = (64, 64, 32)
@@ -76,22 +79,23 @@ def load_cases(root: Path, families, split: str, n: int, seed: int, *, masked: b
     return out
 
 
-def lesion_grid(mask_zyx: np.ndarray, family: str) -> np.ndarray:
-    """Lesion fraction inside each patch, (4096,) in token order. WMH label 2 is not lesion."""
+def lesion_grid(mask_zyx: np.ndarray, family: str, grid: tuple[int, int, int] = GRID,
+                patch_xyz: tuple[int, int, int] = PATCH_XYZ) -> np.ndarray:
+    """Lesion fraction inside each patch, (prod(grid),) in token order. WMH label 2 is not lesion."""
     if family == "wmh":
         m = mask_zyx == 1
     elif family == "aisd":
         m = np.isin(mask_zyx, (1, 2, 3, 5))
     else:
         m = mask_zyx > 0
-    z, y, x = GRID
-    pz, py, px = PATCH_XYZ[2], PATCH_XYZ[1], PATCH_XYZ[0]
+    z, y, x = grid
+    pz, py, px = patch_xyz[2], patch_xyz[1], patch_xyz[0]
     return m.reshape(z, pz, y, py, x, px).mean(axis=(1, 3, 5)).reshape(-1).astype(np.float32)
 
 
-def token_positions() -> np.ndarray:
-    """(4096, 3) normalized (z, y, x) of each token in [0, 1]."""
-    zz, yy, xx = np.meshgrid(*[np.linspace(0, 1, n) for n in GRID], indexing="ij")
+def token_positions(grid: tuple[int, int, int] = GRID) -> np.ndarray:
+    """(prod(grid), 3) normalized (z, y, x) of each token in [0, 1]."""
+    zz, yy, xx = np.meshgrid(*[np.linspace(0, 1, n) for n in grid], indexing="ij")
     return np.stack([zz, yy, xx], -1).reshape(-1, 3).astype(np.float32)
 
 
@@ -101,6 +105,8 @@ class Provider:
     """``tokens(vol_xyz, modality) -> (T, D) float, (T,) bool`` for one encoder."""
 
     name: str
+    patch_xyz = PATCH_XYZ
+    grid = GRID
 
     def tokens(self, vol: torch.Tensor, modality: str) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
@@ -109,13 +115,20 @@ class Provider:
 class Brain3D(Provider):
     """3D encoder tokens. With ``window`` the volume is encoded as overlapping training-size windows."""
 
-    def __init__(self, enc, name: str, window=None, stride=None, fine_pool: bool | None = None):
-        self.enc, self.name, self.window, self.stride, self.fine_pool = enc, name, window, stride, fine_pool
+    def __init__(self, enc, name: str, window=None, stride=None, fine_pool: bool | None = None,
+                 fine_grid: bool | None = None):
+        self.enc, self.name, self.window, self.stride = enc, name, window, stride
+        self.fine_pool, self.fine_grid = fine_pool, fine_grid
+        if fine_grid:
+            self.patch_xyz, self.grid = FINE_PATCH_XYZ, FINE_GRID
+        else:
+            self.patch_xyz, self.grid = PATCH_XYZ, GRID
 
     def tokens(self, vol, modality):
         seqs, _, fg = self.enc.embed_windows(
             vol, windows_for("canonical", modality), modality=modality,
-            window_xyz=self.window, stride_xyz=self.stride, fine_pool=self.fine_pool)
+            window_xyz=self.window, stride_xyz=self.stride,
+            fine_pool=self.fine_pool, fine_grid=self.fine_grid)
         return torch.cat(list(seqs), -1), fg
 
 
@@ -146,21 +159,26 @@ class Pixel(Provider):
 
     name = "control/pixel"
 
+    def __init__(self, name: str = "control/pixel", patch_xyz=PATCH_XYZ, grid=GRID):
+        self.name = name
+        self.patch_xyz, self.grid = tuple(patch_xyz), tuple(grid)
+
     @torch.no_grad()
     def tokens(self, vol, modality):
-        v = _crop_to_patch(vol.float(), PATCH_XYZ)[0]
-        fg = token_gate(v, modality, PATCH_XYZ)
-        z, y, x = GRID
+        px, py, pz = self.patch_xyz
+        z, y, x = self.grid
+        v = _crop_to_patch(vol.float(), self.patch_xyz)[0]
+        fg = token_gate(v, modality, self.patch_xyz)
         feats = []
         for c, w in windows_for("canonical", modality):
-            p = asinh_window(v, c, w).permute(2, 1, 0).reshape(z, 8, y, 16, x, 16)
-            p = p.permute(0, 2, 4, 1, 3, 5).reshape(N_TOK, -1)
+            p = asinh_window(v, c, w).permute(2, 1, 0).reshape(z, pz, y, py, x, px)
+            p = p.permute(0, 2, 4, 1, 3, 5).reshape(z * y * x, -1)
             feats.append(torch.stack([p.mean(1), p.std(1), p.amin(1), p.amax(1)], -1))
         return torch.cat(feats, -1), fg
 
 
 def build_providers(ckpts, device, *, pixel: bool, random_init: bool, tiled: bool = False,
-                    fine: bool = False) -> list[Provider]:
+                    fine: bool = False, fine_grid: bool = False) -> list[Provider]:
     from downstream.embed3d import FrozenEncoder3D, load_brain3d
 
     out, first3d = [], None
@@ -168,20 +186,29 @@ def build_providers(ckpts, device, *, pixel: bool, random_init: bool, tiled: boo
         enc = load_frozen_encoder(Path(path), device)
         name = f"{Path(path).parent.name}/{Path(path).stem}"
         if isinstance(enc, FrozenEncoder3D):
-            out.append(Brain3D(enc, name, fine_pool=False))
+            out.append(Brain3D(enc, name, fine_pool=False, fine_grid=False))
             if fine:
-                out.append(Brain3D(enc, name + "@fine", fine_pool=True))
+                out.append(Brain3D(enc, name + "@fine", fine_pool=True, fine_grid=False))
+            if fine_grid:
+                out.append(Brain3D(enc, name + "@finegrid", fine_pool=False, fine_grid=True))
             if tiled:
-                out.append(Brain3D(enc, name + "@tiled", TILE_WINDOW, TILE_STRIDE))
+                out.append(Brain3D(enc, name + "@tiled", TILE_WINDOW, TILE_STRIDE, fine_pool=False, fine_grid=False))
             first3d = first3d or Path(path)
         else:
             out.append(Slice2D(enc, name))
     if random_init and first3d is not None:
         ckpt = torch.load(first3d, map_location=device, weights_only=False)
         torch.manual_seed(0)
-        out.append(Brain3D(load_brain3d(ckpt, device, pretrained=False), "control/random3d"))
+        out.append(Brain3D(load_brain3d(ckpt, device, pretrained=False), "control/random3d",
+                           fine_pool=False, fine_grid=False))
+        if fine_grid:
+            torch.manual_seed(0)
+            out.append(Brain3D(load_brain3d(ckpt, device, pretrained=False), "control/random3d@finegrid",
+                               fine_pool=False, fine_grid=True))
     if pixel:
         out.append(Pixel())
+        if fine_grid:
+            out.append(Pixel(name="control/pixel@finegrid", patch_xyz=FINE_PATCH_XYZ, grid=FINE_GRID))
     return out
 
 
@@ -194,6 +221,7 @@ class Volume:
     frac: np.ndarray | None  # (n_fg,) lesion fraction
     idx: np.ndarray  # (n_fg,) token index
     pooled: np.ndarray  # (D,) mean over foreground tokens
+    grid: tuple[int, int, int] = GRID
 
 
 def extract(providers: list[Provider], cases: list[Case], device) -> dict[str, list[Volume]]:
@@ -202,15 +230,24 @@ def extract(providers: list[Provider], cases: list[Case], device) -> dict[str, l
     t0 = time.time()
     for i, c in enumerate(cases):
         vol = torch.from_numpy(np.ascontiguousarray(read_volume_xyz(c.image))).to(device)
-        frac = lesion_grid(store.read(c.mask, "mask"), c.family) if c.mask is not None else None
+        mask = store.read(c.mask, "mask") if c.mask is not None else None
+        frac_by: dict[tuple, np.ndarray] = {}
         for p in providers:
             feat, fg = p.tokens(vol, c.modality)
             keep = fg.bool().cpu().numpy()
             idx = np.flatnonzero(keep)
             if idx.size == 0:
                 continue
+            if mask is not None:
+                key = (p.grid, p.patch_xyz)
+                if key not in frac_by:
+                    frac_by[key] = lesion_grid(mask, c.family, grid=p.grid, patch_xyz=p.patch_xyz)
+                frac = frac_by[key]
+            else:
+                frac = None
             f = feat[torch.from_numpy(idx).to(device)]
-            out[p.name].append(Volume(c, f.half(), None if frac is None else frac[idx], idx, f.float().mean(0).cpu().numpy()))
+            out[p.name].append(Volume(c, f.half(), None if frac is None else frac[idx], idx,
+                                      f.float().mean(0).cpu().numpy(), grid=p.grid))
         if (i + 1) % 50 == 0 or i + 1 == len(cases):
             print(f"[probe] {i + 1}/{len(cases)} volumes, {time.time() - t0:.0f}s", flush=True)
     return out
@@ -271,7 +308,7 @@ def fingerprint_probe(vols: list[Volume], seed: int = 0) -> dict:
 
 
 def location_probe(vols: list[Volume], per_volume: int = 200, seed: int = 0) -> dict:
-    rng, pos = np.random.default_rng(seed), token_positions()
+    rng, pos = np.random.default_rng(seed), token_positions(vols[0].grid if vols else GRID)
     xs, ys, groups = [], [], []
     for i, v in enumerate(vols):
         pick = rng.choice(len(v.idx), min(per_volume, len(v.idx)), replace=False)
@@ -423,6 +460,8 @@ def main() -> None:
                     help="also embed each 3D ckpt as overlapping training-size windows (train/test context diagnostic)")
     ap.add_argument("--fine", action="store_true",
                     help="also embed each 3D ckpt with half-size patches (tiled), averaged onto the coarse grid")
+    ap.add_argument("--fine-grid", action="store_true",
+                    help="also embed each 3D ckpt with tiled 8x8x4 patches kept on the 32x32x32 grid")
     ap.add_argument("--n-train", type=int, default=100)
     ap.add_argument("--n-test", type=int, default=60)
     ap.add_argument("--n-fingerprint", type=int, default=20, help="test volumes per dataset family")
@@ -434,7 +473,8 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cuda.matmul.allow_tf32 = True
-    providers = build_providers(args.ckpt, device, pixel=args.pixel, random_init=args.random_init, tiled=args.tiled, fine=args.fine)
+    providers = build_providers(args.ckpt, device, pixel=args.pixel, random_init=args.random_init,
+                                tiled=args.tiled, fine=args.fine, fine_grid=args.fine_grid)
     fams = LESION_FAMILIES + SEEN_FAMILIES
     train = load_cases(args.root, fams, "train", args.n_train, args.seed, masked=True)
     test = load_cases(args.root, fams, "test", args.n_test, args.seed, masked=True)

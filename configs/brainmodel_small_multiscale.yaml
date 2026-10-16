@@ -10,8 +10,8 @@
 #   aug.window.mix tissue, dense.stopgrad_mean
 # Do not start this while runs/brainmodel_small_fomo is still writing last.pt.
 #
-# Queue after the 30k job finishes (one full node, 4x L40S, 2-day wall). Per-GPU batch stays 96
-# (global 384); lr is linear from 2.5e-4 @ 192.
+# Resume from runs/brainmodel_small_multiscale/last.pt (step 15k → 35k). Cosine is over max_steps,
+# so lr steps back up from the 15k floor, then decays. Do not set NO_RESUME.
 #   sbatch --export=ALL,CONFIG=configs/brainmodel_small_multiscale.yaml jobs/train_brainmodel_pi4.sbatch
 
 seed: 42
@@ -81,7 +81,7 @@ optim:
   batch_size: 96
 
 train:
-  max_steps: 15000
+  max_steps: 35000
   log_every: 50
   eval_every: 1000
   ckpt_every: 500

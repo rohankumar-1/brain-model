@@ -28,6 +28,15 @@ def fine_pool_on() -> bool:
     return os.environ.get("BRAIN_FINE_POOL", "") == "1"
 
 
+def fine_grid_on() -> bool:
+    """``BRAIN_FINE_GRID=1`` keeps the native 8x8x4 token grid (no 2x2x2 pool onto 16^3)."""
+    return os.environ.get("BRAIN_FINE_GRID", "") == "1"
+
+
+def fine_patch_xyz(coarse: tuple[int, int, int]) -> tuple[int, int, int]:
+    return tuple(max(1, int(p) // 2) for p in coarse)
+
+
 def token_gate(cropped_xyz: torch.Tensor, modality: str, patch_xyz: tuple[int, int, int],
                gate: dict | None = None) -> torch.Tensor:
     """Foreground flag per patch token, (T,), in the encoder's (Z, Y, X) token order."""
@@ -66,7 +75,7 @@ class FrozenEncoder3D:
     def embed_tokens(
         self, vol_xyz: torch.Tensor, c: float, w: float, modality: str = "mri",
         window_xyz: tuple[int, int, int] | None = None, stride_xyz: tuple[int, int, int] | None = None,
-        fine_pool: bool | None = None,
+        fine_pool: bool | None = None, fine_grid: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Native-grid tokens. ``vol_xyz`` is (X, Y, Z). Returns ``(T, D)``, normalized centers, the keep mask.
 
@@ -76,8 +85,15 @@ class FrozenEncoder3D:
         With ``fine_pool`` (default: ``BRAIN_FINE_POOL``) the volume is encoded with patches half as large on
         every axis, as tiled training-size windows, and the 2 x 2 x 2 fine tokens under each coarse position are
         averaged (the way training ties its fine crops to a coarse position). The result lies on the usual grid.
+
+        With ``fine_grid`` (default: ``BRAIN_FINE_GRID``) the same tiled 8 x 8 x 4 encode is kept on the
+        32 x 32 x 32 grid. ``fine_grid`` wins if both flags are set.
         """
-        if (fine_pool_on() if fine_pool is None else fine_pool) and window_xyz is None:
+        use_grid = fine_grid_on() if fine_grid is None else fine_grid
+        use_pool = fine_pool_on() if fine_pool is None else fine_pool
+        if use_grid and window_xyz is None:
+            return self._embed_fine_native(vol_xyz, c, w, modality)
+        if use_pool and window_xyz is None:
             return self._embed_fine_pooled(vol_xyz, c, w, modality)
         native = vol_xyz.float()
         cropped, start, size = _crop_to_patch(native, self.patch_xyz)
@@ -90,16 +106,29 @@ class FrozenEncoder3D:
         lo, hi = coords.min(dim=0).values, coords.max(dim=0).values
         return tokens, (coords - lo) / (hi - lo).clamp_min(1e-6), fg
 
-    def _embed_fine_pooled(self, vol_xyz, c, w, modality):
+    def _embed_fine_tiled(self, vol_xyz, c, w, modality):
+        """Tiled 8x8x4 tokens on the native fine grid. Restores ``patch_xyz``."""
         coarse = self.patch_xyz
-        fine = tuple(max(1, p // 2) for p in coarse)
-        cropped, start, size = _crop_to_patch(vol_xyz.float(), coarse)
-        fg = token_gate(cropped, modality, coarse, self.gate)
+        fine = fine_patch_xyz(coarse)
+        cropped, _, _ = _crop_to_patch(vol_xyz.float(), fine)
         self.patch_xyz = fine
         try:
-            tok, _, _ = self.embed_tokens(cropped, c, w, modality, window_xyz=FINE_TILE[0], stride_xyz=FINE_TILE[1])
+            return self.embed_tokens(
+                cropped, c, w, modality, window_xyz=FINE_TILE[0], stride_xyz=FINE_TILE[1],
+                fine_pool=False, fine_grid=False,
+            )
         finally:
             self.patch_xyz = coarse
+
+    def _embed_fine_native(self, vol_xyz, c, w, modality):
+        return self._embed_fine_tiled(vol_xyz, c, w, modality)
+
+    def _embed_fine_pooled(self, vol_xyz, c, w, modality):
+        coarse = self.patch_xyz
+        fine = fine_patch_xyz(coarse)
+        cropped, start, size = _crop_to_patch(vol_xyz.float(), coarse)
+        fg = token_gate(cropped, modality, coarse, self.gate)
+        tok, _, _ = self._embed_fine_tiled(cropped, c, w, modality)
         nx, ny, nz = (size[0] // coarse[0], size[1] // coarse[1], size[2] // coarse[2])
         sx, sy, sz = coarse[0] // fine[0], coarse[1] // fine[1], coarse[2] // fine[2]
         d = tok.shape[-1]
@@ -181,7 +210,10 @@ class FrozenEncoder3D:
         fine = kwargs.get("fine_pool")
         if fine is None:
             fine = fine_pool_on()
-        if tiled or fine or len(windows) <= 1:
+        grid = kwargs.get("fine_grid")
+        if grid is None:
+            grid = fine_grid_on()
+        if tiled or fine or grid or len(windows) <= 1:
             for c, w in windows:
                 seq, xyz, fg = self.embed_tokens(vol_xyz, c, w, modality=modality, **kwargs)
                 seqs.append(seq)
@@ -322,7 +354,8 @@ def extract_volume_embeddings_3d(
         feat = torch.cat(list(seqs), dim=-1)
         if embs is None:
             n, t, d = len(volume_ids), feat.shape[0], feat.shape[1]
-            embs = np.zeros((n, t, d), dtype=np.float32)
+            dtype = np.float16 if t > 8192 else np.float32
+            embs = np.zeros((n, t, d), dtype=dtype)
             coords = np.zeros((n, t, 3), dtype=np.float32)
             mask = np.ones((n, t), dtype=bool)
         embs[i] = feat.detach().cpu().numpy()

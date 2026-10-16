@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
 from downstream.embeddings import UNIFORM_SLICES, load_or_build_embeddings, resolve_path
 from downstream.heads import DEFAULT_HEADS, build_heads, make_logreg_pool, make_ridge
 from downstream.token_probes import make_token_heads
-from downstream.token_readout import token_readout_views
+from downstream.token_readout import token_grid_zyx, token_readout_views
 from downstream.metrics import HEADLINE, binary_metrics, bootstrap_ci, multilabel_metrics, regression_metrics
 from downstream.results import eval_banner, finalize_run, new_run_dir, print_head_table, save_head_result, write_json
 from downstream.tasks import (
@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=True,
                    help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid")
     p.add_argument("--readout", choices=["axial", "raw"], default="axial",
-                   help="axial: PCA, then per-plane and 4x4x4 probes on a 4096-token grid; raw: pool every token")
+                   help="axial: PCA, then per-plane and 4x4x4 probes on a cubic token grid; raw: pool every token")
     return p.parse_args()
 
 
@@ -224,20 +224,18 @@ def main() -> None:
     print("[split] " + " ".join(f"{s}={len(p['volume_ids'])}" for s, p in packs.items()))
 
     multilabel = task.task_type == "multilabel"
-    use_readout = (
-        args.readout == "axial"
-        and emb["representation"] == "tokens"
-        and emb["mus"].shape[1] == 4096
-    )
+    grid = token_grid_zyx(emb["mus"].shape[1]) if emb["representation"] == "tokens" else None
+    use_readout = args.readout == "axial" and grid is not None
     if use_readout:
-        views = token_readout_views(packs, seed=args.seed)
-        print(f"[readout] pca={views['pca_dim']} explained={views['explained_variance']:.3f} "
-              f"plane={views['plane']['train']['mus'].shape} grid={views['grid']['train']['mus'].shape}")
+        views = token_readout_views(packs, seed=args.seed, grid_zyx=grid)
+        print(f"[readout] grid={grid} pca={views['pca_dim']} explained={views['explained_variance']:.3f} "
+              f"plane={views['plane']['train']['mus'].shape} bins={views['grid']['train']['mus'].shape}")
         head_sets = readout_head_sets(task, views, args.seed)
         if args.token_heads:
             n_out = len(task.label_names) if multilabel else 1
             head_sets.append(("tokens", packs, make_token_heads(
-                emb["mus"].shape[-1], n_out, multilabel, args.seed, task.task_type == "regression")))
+                emb["mus"].shape[-1], n_out, multilabel, args.seed, task.task_type == "regression",
+                grid_zyx=grid)))
     else:
         heads = build_heads(latent_dim=emb["latent_dim"], max_slices=emb["max_slices"],
                             n_out=len(task.label_names) if multilabel else 1, multilabel=multilabel,

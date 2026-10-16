@@ -69,9 +69,17 @@ class ConvProbe(nn.Module):
         return self.out(torch.cat([h.mean(-1), h.amax(-1)], dim=-1))
 
 
-def make_token_heads(dim: int, n_out: int, multilabel: bool, seed: int, regression: bool) -> list[AttnEnsemble]:
+def make_token_heads(dim: int, n_out: int, multilabel: bool, seed: int, regression: bool,
+                     grid_zyx: tuple[int, int, int] = GRID_ZYX) -> list[AttnEnsemble]:
     """3D conv over the token grid. ``AttnProbe`` remains available as ``tok_attn`` if wired back in."""
+    grid = tuple(int(v) for v in grid_zyx)
+    n_tok = 1
+    for s in grid:
+        n_tok *= int(s)
+    # 32^3 x multi-window dims cannot sit on the GPU; smaller batches keep Conv3d activations in range.
+    bs = 32 if n_tok <= 4096 else 8
     h = AttnEnsemble(dim, 0, n_out, multilabel, seed, regression=regression, spatial=True,
-                     model_factory=lambda: ConvProbe(dim, n_out), half=True)
+                     model_factory=lambda: ConvProbe(dim, n_out, grid_zyx=grid), half=True,
+                     batch_size=bs)
     h.name = "tok_conv"
     return [h]
