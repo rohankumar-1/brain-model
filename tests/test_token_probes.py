@@ -3,8 +3,8 @@
 import numpy as np
 import torch
 
-from downstream.heads import AttnEnsemble
-from downstream.token_probes import AttnProbe, ConvProbe, GRID_ZYX, make_token_heads
+from brain.downstream.heads import AttnEnsemble
+from brain.downstream.token_probes import AttnProbe, ConvProbe, GRID_ZYX, make_token_heads
 
 
 def _data(n, dim=16, seed=0):
@@ -58,7 +58,7 @@ def test_conv_probe_accepts_the_fine_grid():
     z = torch.zeros(2, 32768, 3)
     out = ConvProbe(4, 1, grid_zyx=(32, 32, 32), width=8)(x, m, z)
     assert out.shape == (2, 1) and bool(torch.isfinite(out).all())
-    from downstream.token_readout import token_grid_zyx
+    from brain.downstream.token_readout import token_grid_zyx
     assert token_grid_zyx(4096) == (16, 16, 16)
     assert token_grid_zyx(32768) == (32, 32, 32)
     assert token_grid_zyx(100) is None

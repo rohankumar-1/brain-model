@@ -17,25 +17,7 @@
 
 set -euo pipefail
 
-cd /home/roku/brain-model
-mkdir -p logs
-
-unset PYTHONPATH
-export PYTHONNOUSERSITE=True
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1
-export BLOSC_NTHREADS=1
-
-PY=/home/roku/.conda/envs/ml-torch/bin/python
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-
-NVIDLIBS=$(find \
-  /home/roku/.conda/envs/ml-torch/lib/python3.12/site-packages/nvidia \
-  /home/roku/.local/lib/python3.12/site-packages/nvidia \
-  -type d -name lib 2>/dev/null | paste -sd:)
-export LD_LIBRARY_PATH="${NVIDLIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 
 echo "[host] $(hostname) $(date -Is)"
 "$PY" - <<'PY'
@@ -44,7 +26,7 @@ print(f"[torch] {torch.__version__} cuda={torch.cuda.is_available()} "
       f"device={torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'}")
 PY
 
-CKPT="${CKPT:-runs/vit_tiny/last.pt}"
+CKPT="${CKPT:-runs/lejepa2d/last.pt}"
 WINDOW="${WINDOW:-multi}"
 # Colon-separated. Commas are eaten by sbatch --export.
 if [ -n "${TASKS:-}" ]; then
@@ -61,7 +43,7 @@ else
 fi
 for t in "${TASK_LIST[@]}"; do
   echo "[task-start] $t $(date -Is)"
-  "$PY" -u -m downstream.run_suite --task "$t" --ckpt "$CKPT" --window "$WINDOW" ${RUN_ARGS:-}
+  "$PY" -u -m brain.downstream.run_suite --task "$t" --ckpt "$CKPT" --window "$WINDOW" ${RUN_ARGS:-}
   echo "[task-done] $t $(date -Is)"
 done
 echo "[done] $(date -Is)"

@@ -1,0 +1,20 @@
+# Shared environment for every job. Source it; do not submit it.
+#   export BRAIN_REPO=/path/to/brain-model   # default below
+#   source "$BRAIN_REPO/jobs/_env.sh"
+# Sets PY, PYTHONPATH, library paths and thread limits (override OMP_THREADS for CPU-heavy jobs), and cd's to the repo.
+
+BRAIN_REPO="${BRAIN_REPO:-/home/roku/brain-model}"
+BRAIN_ENV="${BRAIN_ENV:-/home/roku/.conda/envs/ml-torch}"
+BRAIN_USER_SITE="${BRAIN_USER_SITE:-/home/roku/.local/lib/python3.12/site-packages}"
+
+cd "$BRAIN_REPO"
+mkdir -p logs
+
+unset PYTHONPATH WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
+export PYTHONNOUSERSITE=True
+export OMP_NUM_THREADS="${OMP_THREADS:-1}" MKL_NUM_THREADS="${OMP_THREADS:-1}" OPENBLAS_NUM_THREADS="${OMP_THREADS:-1}"
+export NUMEXPR_NUM_THREADS=1 BLOSC_NTHREADS=1
+PY="$BRAIN_ENV/bin/python"
+export PYTHONPATH="$BRAIN_REPO:$BRAIN_USER_SITE"
+NVIDLIBS=$(find "$BRAIN_ENV/lib/python3.12/site-packages/nvidia" "$BRAIN_USER_SITE/nvidia" -type d -name lib 2>/dev/null | paste -sd:)
+export LD_LIBRARY_PATH="${NVIDLIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

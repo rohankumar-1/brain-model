@@ -13,16 +13,11 @@
 #SBATCH -e logs/segcache_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-unset PYTHONPATH
-export PYTHONNOUSERSITE=True OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 BLOSC_NTHREADS=1
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-PY=/home/roku/.conda/envs/ml-torch/bin/python
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 
 IFS=':' read -r -a TASK_LIST <<< "${TASKS:-brats2023_gli:brats2023_men}"
 for t in "${TASK_LIST[@]}"; do
   echo "[cache-start] $t $(date -Is)"
-  "$PY" -u -m downstream.run_suite --task "$t" --cache-only
+  "$PY" -u -m brain.downstream.run_suite --task "$t" --cache-only
   echo "[cache-done] $t $(date -Is)"
 done

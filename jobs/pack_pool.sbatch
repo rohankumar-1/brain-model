@@ -15,12 +15,7 @@
 #SBATCH -e logs/pack_pool_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-unset PYTHONPATH WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
-export PYTHONNOUSERSITE=True OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-PY=/home/roku/.conda/envs/ml-torch/bin/python
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 TREE="${TREE:?}"
 DEST="${DEST:?}"
 DELETE="${DELETE:-1}"
@@ -31,7 +26,7 @@ fi
 
 echo "[host] $(hostname) $(date -Is) $TREE -> $DEST delete=$DELETE"
 trap 'kill -TERM $pid 2>/dev/null; wait $pid' TERM
-"$PY" -u -m data.prep.archive --tree "$TREE" --dest "$DEST" "${EXTRA[@]}" \
+"$PY" -u -m brain.prep.archive --tree "$TREE" --dest "$DEST" "${EXTRA[@]}" \
   --workers "${SLURM_CPUS_PER_TASK:-16}" &
 pid=$!
 wait $pid

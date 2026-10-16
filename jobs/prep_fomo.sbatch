@@ -14,12 +14,7 @@
 #SBATCH -e logs/prep_fomo_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-unset PYTHONPATH WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
-export PYTHONNOUSERSITE=True OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-PY=/home/roku/.conda/envs/ml-torch/bin/python
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 STORE="${STORE:-/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr}"
 MATCH="${MATCH:?set MATCH (e.g. fomo_hbn)}"
 DATASETS="${DATASETS:-fomo}"
@@ -28,7 +23,7 @@ EXPECTED="${EXPECTED:-0}"
 
 echo "[host] $(hostname) $(date -Is) store=$STORE datasets=$DATASETS match=$MATCH manifest=$MANIFEST expected=$EXPECTED"
 
-"$PY" -u -m data.prep.run --root "$STORE" --datasets "$DATASETS" --match "$MATCH" \
+"$PY" -u -m brain.prep.run --root "$STORE" --datasets "$DATASETS" --match "$MATCH" \
   --manifest "$MANIFEST" --workers "${SLURM_CPUS_PER_TASK:-16}" --z-anchor auto
 
 N_DONE=$("$PY" -c "
@@ -40,7 +35,7 @@ print(0 if not p.exists() else pd.read_json(p, lines=True).drop_duplicates(['dat
 echo "[prep] $MATCH manifest rows=$N_DONE expected=$EXPECTED $(date -Is)"
 if [ "$EXPECTED" -gt 0 ] && [ "$N_DONE" -ge "$EXPECTED" ]; then
   echo "[done] $MATCH $N_DONE/$EXPECTED — JPEG-LS archive to pool, drop extracted"
-  "$PY" -u -m data.prep.archive --families "$MATCH" --delete-extracted \
+  "$PY" -u -m brain.prep.archive --families "$MATCH" --delete-extracted \
     --workers 8
 else
   echo "[partial] $MATCH $N_DONE/$EXPECTED — requeue to continue"

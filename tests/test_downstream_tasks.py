@@ -10,8 +10,8 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from downstream.run_suite import readout_head_sets
-from downstream.tasks import (
+from brain.downstream.run_suite import readout_head_sets
+from brain.downstream.tasks import (
     CLASSIFICATION_TASKS,
     CQ500_LABELS,
     DEFAULT_VOLUMES,
@@ -173,8 +173,8 @@ def test_load_task_covers_every_name():
         root = Path(tmp)
         msd = _write_clinical(root)
         with (
-            patch("downstream.tasks.DATASETS", root),
-            patch("downstream.tasks.build_rsna_volume_labels", return_value=_rsna_labels()),
+            patch("brain.downstream.tasks.DATASETS", root),
+            patch("brain.downstream.tasks.build_rsna_volume_labels", return_value=_rsna_labels()),
             patch("pandas.read_excel", return_value=xls),
         ):
             for name in TASK_NAMES:

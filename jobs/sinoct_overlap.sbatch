@@ -13,9 +13,5 @@
 #SBATCH -e logs/sinoct_overlap_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-unset PYTHONPATH
-export PYTHONNOUSERSITE=True OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-/home/roku/.conda/envs/ml-torch/bin/python -u -m data.download_sinoct --overlap --pull --workers "${SLURM_CPUS_PER_TASK:-16}"
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
+"$PY" -u -m brain.datasets.download_sinoct --overlap --pull --workers "${SLURM_CPUS_PER_TASK:-16}"

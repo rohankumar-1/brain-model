@@ -5,17 +5,17 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from lib.windowing import windows_for
-from downstream.embeddings import uniform_slice_indices
-from downstream.heads import (
+from brain.common.windowing import windows_for
+from brain.downstream.embeddings import uniform_slice_indices
+from brain.downstream.heads import (
     DEFAULT_HEADS, SliceAttnMLP, build_heads, make_logreg_pool, make_ridge, make_xgboost,
 )
-from downstream.tasks import (
+from brain.downstream.tasks import (
     AISD_REGIONS, CLASSIFICATION_TASKS, CQ500_LABELS, FOCAL_SLICE_TASKS, FROZEN_TASKS,
     ICH_REGIONS, REGRESSION_TASKS, SEGMENTATION_TASKS, TASK_NAMES, cq500_majority,
     load_aisd_task, load_instance_task,
 )
-from models.vit import VisionTransformer
+from brain.models.vit2d import VisionTransformer
 
 
 def test_windows_for_counts():
@@ -119,8 +119,8 @@ def test_optional_heads_still_build_when_requested():
 
 def test_aisd_task_pins_official_test_ids():
     import pandas as pd
-    from data.download_aisd import splits_for
-    from data.prep.sources import AISD_TEST_IDS
+    from brain.datasets.download_aisd import splits_for
+    from brain.prep.sources import AISD_TEST_IDS
 
     assert len(AISD_TEST_IDS) == 52 and len(set(AISD_TEST_IDS)) == 52
     s = splits_for(["0073410", "0000001", "0000002"])

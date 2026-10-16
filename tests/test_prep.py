@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import SimpleITK as sitk
 
-from data.prep import centering, geometry, intensity, pipeline
-from data.prep.sources import Case
+from brain.prep import centering, geometry, intensity, pipeline
+from brain.prep.sources import Case
 
 RNG = np.random.default_rng(0)
 
@@ -178,7 +178,7 @@ def test_coregistered_sequences_share_one_grid():
 def test_instance_pairs_data_and_label_folders():
     import tempfile
     from pathlib import Path
-    from data.prep.sources import instance
+    from brain.prep.sources import instance
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -196,7 +196,7 @@ def test_instance_pairs_data_and_label_folders():
 def test_msd_source_lists_labeled_train_cases():
     import tempfile
     from pathlib import Path
-    from data.prep.sources import msd
+    from brain.prep.sources import msd
 
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
@@ -214,7 +214,7 @@ def test_msd_source_lists_labeled_train_cases():
 def test_sinoct_source_groups_reconstructed_series(tmp_path=None):
     import tempfile
     from pathlib import Path
-    from data.prep.sources import sinoct
+    from brain.prep.sources import sinoct
 
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
@@ -235,7 +235,7 @@ def test_sinoct_source_groups_reconstructed_series(tmp_path=None):
 
 def test_sinoct_pixel_fingerprint_ignores_fov_pad_and_matches():
     import pandas as pd
-    from data.sinoct_overlap import canon_plane, fingerprints_from_hu, score_probe
+    from brain.datasets.sinoct_overlap import canon_plane, fingerprints_from_hu, score_probe
 
     brain = np.full((512, 512), -1024, np.int16)
     brain[80:432, 80:432] = np.arange(352 * 352, dtype=np.int16).reshape(352, 352) % 80 + 20
@@ -262,7 +262,7 @@ def test_sinoct_pixel_fingerprint_ignores_fov_pad_and_matches():
 
 def test_sinoct_pull_skips_dropped_series():
     import pandas as pd
-    from data.sinoct_overlap import select_pull_files
+    from brain.datasets.sinoct_overlap import select_pull_files
 
     recon = pd.DataFrame({
         "series": ["series_1", "series_1", "series_2", "series_3"],
@@ -276,7 +276,7 @@ def test_sinoct_pull_skips_dropped_series():
 
 def test_sinoct_drops_sinograms_and_rsna_ids():
     import pandas as pd
-    from data.download_sinoct import classify, is_sinogram, normalize_id
+    from brain.datasets.download_sinoct import classify, is_sinogram, normalize_id
 
     assert is_sinogram("Data/sinograms/0073410.npy")
     assert not is_sinogram("Data/0073410/ct.dcm")
@@ -302,7 +302,7 @@ def test_sinoct_drops_sinograms_and_rsna_ids():
 def test_brainmetshare_pairs_sequences_and_seg_on_bravo():
     import tempfile
     from pathlib import Path
-    from data.prep.sources import brainmetshare
+    from brain.prep.sources import brainmetshare
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -324,14 +324,14 @@ def test_brainmetshare_pairs_sequences_and_seg_on_bravo():
 
 
 def test_aisd_id_pads_numeric_manifest_stems():
-    from data.prep.sources import aisd_id
+    from brain.prep.sources import aisd_id
     assert aisd_id(72762) == "0072762" and aisd_id("73410") == "0073410"
 
 
 def test_aisd_pairs_image_and_mask_and_pads_ids():
     import tempfile
     from pathlib import Path
-    from data.prep.sources import aisd
+    from brain.prep.sources import aisd
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -344,7 +344,7 @@ def test_aisd_pairs_image_and_mask_and_pads_ids():
 
 
 def test_aisd_png_to_hu_keeps_ventricles_and_air():
-    from data.download_aisd import png_to_hu
+    from brain.datasets.download_aisd import png_to_hu
 
     vol = np.zeros((5, 32, 32), np.uint8)
     vol[:, 8:24, 8:24] = 80
@@ -358,8 +358,8 @@ def test_aisd_png_to_hu_keeps_ventricles_and_air():
 def test_aisd_png_stack_writes_nifti_and_pairs():
     import tempfile
     from pathlib import Path
-    from data.download_aisd import PNG_SPACING_XYZ, pngs_to_nifti
-    from data.prep.sources import aisd
+    from brain.datasets.download_aisd import PNG_SPACING_XYZ, pngs_to_nifti
+    from brain.prep.sources import aisd
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -386,7 +386,7 @@ def test_fomo_ingest_zip_keeps_structural_and_deletes_archive():
     import zipfile
     import tempfile
     from pathlib import Path
-    from data.download_fomo import already_extracted, ingest_zip
+    from brain.datasets.download_fomo import already_extracted, ingest_zip
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -405,7 +405,7 @@ def test_fomo_ingest_zip_keeps_structural_and_deletes_archive():
 
 def test_fomo_mapping_holds_out_entire_openneuro_ds():
     import pandas as pd
-    from data.prep.fomo import holdout_from_mapping, is_structural, match_hold_family
+    from brain.prep.fomo import holdout_from_mapping, is_structural, match_hold_family
 
     assert is_structural("sub-01_ses-01_T1w.nii.gz") and is_structural("t2f.nii.gz")
     assert not is_structural("sub-01_dwi.nii.gz") and not is_structural("adc_trace.nii.gz")
@@ -434,7 +434,7 @@ def test_fomo_mapping_holds_out_entire_openneuro_ds():
 def test_fomo_brats_restores_ids_and_joins_local_seg():
     import tempfile
     from pathlib import Path
-    from data.prep.sources import brats_fomo
+    from brain.prep.sources import brats_fomo
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -469,8 +469,8 @@ def test_fomo_brats_restores_ids_and_joins_local_seg():
 
 
 def test_fomo_case_ids_keep_contrasts_in_one_folder():
-    from data.prep.pipeline import needs_n4
-    from data.prep.sources import Case
+    from brain.prep.pipeline import needs_n4
+    from brain.prep.sources import Case
 
     t1 = Case("fomo_hbn_t1w", "sub-01_ses-01_t1w", "mri")
     fl = Case("fomo_hbn_flair", "sub-01_ses-01_flair", "mri")
@@ -481,7 +481,7 @@ def test_fomo_case_ids_keep_contrasts_in_one_folder():
 
 
 def test_fomo_jpegls_roundtrip_uint16():
-    from data.prep.archive import decode_volume, encode_volume, as_uint16_volume, archive_for_pt, pt_from_family
+    from brain.prep.archive import decode_volume, encode_volume, as_uint16_volume, archive_for_pt, pt_from_family
     from pathlib import Path
 
     vol = RNG.integers(0, 4000, size=(32, 32, 8), dtype=np.uint16)

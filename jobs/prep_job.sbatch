@@ -1,6 +1,6 @@
 #!/bin/bash
 # Generic CPU job for the v4 preprocessing package.
-# Submit: sbatch --export=ALL,CMD="-m data.prep.run --root STORE --shard 0/8" [-c 16 --mem 64G] jobs/prep_job.sbatch
+# Submit: sbatch --export=ALL,CMD="-m brain.prep.run --root STORE --shard 0/8" [-c 16 --mem 64G] jobs/prep_job.sbatch
 
 #SBATCH -p mit_normal
 #SBATCH --job-name=prep
@@ -12,9 +12,5 @@
 #SBATCH -e logs/prep_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-unset PYTHONPATH
-export PYTHONNOUSERSITE=True OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-/home/roku/.conda/envs/ml-torch/bin/python -u ${CMD:?}
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
+"$PY" -u ${CMD:?}

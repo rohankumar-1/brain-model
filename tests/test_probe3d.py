@@ -3,8 +3,8 @@
 import numpy as np
 import torch
 
-from downstream import probe3d as P
-from downstream.embed3d import token_gate
+from brain.downstream import probe3d as P
+from brain.downstream.embed3d import token_gate
 
 
 def _vol(device="cpu"):
@@ -47,7 +47,7 @@ def test_pixel_provider_matches_gate_and_shape():
 
 
 def test_slice2d_provider_lands_on_the_3d_grid():
-    from models.vit import VisionTransformer
+    from brain.models.vit2d import VisionTransformer
 
     class _Enc:
         model = VisionTransformer(size="tiny", img_size=256, patch_size=16).eval()
@@ -60,9 +60,9 @@ def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path=None):
     import tempfile
     from pathlib import Path
 
-    from brainmodel.config import DEFAULT_CONFIG
-    from brainmodel.train.train_ssl import build_encoder
-    from downstream.embeddings import load_frozen_encoder
+    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
+    from brain.train.lejepa3d import build_encoder
+    from brain.downstream.embeddings import load_frozen_encoder
 
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 16, "proj_hidden": 32},
            "loss": {**DEFAULT_CONFIG["loss"], "predict": {**DEFAULT_CONFIG["loss"]["predict"], "weight": 1.0, "depth": 1}}}
@@ -79,9 +79,9 @@ def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path=None):
 
 
 def test_tiled_embedding_matches_one_pass_for_a_full_size_window_and_covers_every_token():
-    from brainmodel.config import DEFAULT_CONFIG
-    from brainmodel.train.train_ssl import build_encoder
-    from downstream.embed3d import FrozenEncoder3D
+    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
+    from brain.train.lejepa3d import build_encoder
+    from brain.downstream.embed3d import FrozenEncoder3D
 
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
     enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), (256, 256, 128), (1.0, 1.0, 1.0))
@@ -164,9 +164,9 @@ def test_probe_intervals_cover_the_estimate_and_pair_across_encoders():
 
 
 def test_fine_patch_tiled_tokens_with_block_taps_cover_the_fine_grid():
-    from brainmodel.config import DEFAULT_CONFIG
-    from brainmodel.train.train_ssl import build_encoder
-    from downstream.embed3d import FrozenEncoder3D
+    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
+    from brain.train.lejepa3d import build_encoder
+    from brain.downstream.embed3d import FrozenEncoder3D
 
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
     model = build_encoder(cfg, torch.device("cpu")).eval()
@@ -178,9 +178,9 @@ def test_fine_patch_tiled_tokens_with_block_taps_cover_the_fine_grid():
 
 
 def test_fine_pooled_tokens_land_on_the_coarse_grid():
-    from brainmodel.config import DEFAULT_CONFIG
-    from brainmodel.train.train_ssl import build_encoder
-    from downstream.embed3d import FrozenEncoder3D
+    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
+    from brain.train.lejepa3d import build_encoder
+    from brain.downstream.embed3d import FrozenEncoder3D
 
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
     enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), (256, 256, 128), (1.0, 1.0, 1.0))
@@ -194,9 +194,9 @@ def test_fine_pooled_tokens_land_on_the_coarse_grid():
 
 
 def test_fine_grid_tokens_keep_the_native_grid():
-    from brainmodel.config import DEFAULT_CONFIG
-    from brainmodel.train.train_ssl import build_encoder
-    from downstream.embed3d import FrozenEncoder3D
+    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
+    from brain.train.lejepa3d import build_encoder
+    from brain.downstream.embed3d import FrozenEncoder3D
 
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
     enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), (256, 256, 128), (1.0, 1.0, 1.0))

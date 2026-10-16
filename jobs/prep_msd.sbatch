@@ -12,12 +12,7 @@
 #SBATCH -e logs/prep_msd_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-unset PYTHONPATH WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
-export PYTHONNOUSERSITE=True OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-PY=/home/roku/.conda/envs/ml-torch/bin/python
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 export STORE="${STORE:-/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr}"
 export MSD="${MSD:-/home/roku/orcd/pool/datasets/msd_braintumor}"
 EXPECTED="${EXPECTED:-484}"
@@ -25,14 +20,14 @@ EXPECTED="${EXPECTED:-484}"
 echo "[host] $(hostname) $(date -Is) store=$STORE"
 if [ ! -d "$MSD/Task01_BrainTumour/imagesTr" ]; then
   echo "[extract] $MSD/Task01_BrainTumour.tar"
-  "$PY" -u -m data.download_msd_braintumor --skip-download --skip-labels --out-dir "$MSD"
+  "$PY" -u -m brain.datasets.download_msd_braintumor --skip-download --skip-labels --out-dir "$MSD"
 fi
 
 if [ ! -f "$STORE/volumes.csv.bak_before_msd" ]; then
   cp "$STORE/volumes.csv" "$STORE/volumes.csv.bak_before_msd"
 fi
 
-"$PY" -u -m data.prep.run --root "$STORE" --datasets msd \
+"$PY" -u -m brain.prep.run --root "$STORE" --datasets msd \
   --manifest manifest_msd.jsonl --workers "${SLURM_CPUS_PER_TASK:-32}" --z-anchor auto
 
 N_DONE=$("$PY" -c "
@@ -47,13 +42,13 @@ if [ "$N_DONE" -lt "$EXPECTED" ]; then
   exit 1
 fi
 
-"$PY" -u -m data.prep.index --root "$STORE" --keep-ssl-index --workers "${SLURM_CPUS_PER_TASK:-32}"
+"$PY" -u -m brain.prep.index --root "$STORE" --keep-ssl-index --workers "${SLURM_CPUS_PER_TASK:-32}"
 "$PY" -u - <<'PY'
 from pathlib import Path
-from data.preprocess import export_msd_labels
-from data.prep.sources import DATASETS
 import os
-store = Path(os.environ.get("STORE", "/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr"))
+from brain.common.paths import DATASETS, PROCESSED_ROOT
+from brain.datasets.download_msd_braintumor import export_msd_labels
+store = Path(os.environ.get("STORE", str(PROCESSED_ROOT)))
 export_msd_labels(DATASETS / "msd_braintumor" / "Task01_BrainTumour",
                   store / "labels" / "msd_volume_labels.csv")
 PY

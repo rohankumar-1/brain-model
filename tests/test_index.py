@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from data.prep.index import (
+from brain.prep.index import (
     HELD_OUT,
     SPLIT_RANK,
     all_held_out,
@@ -93,7 +93,7 @@ def test_held_out_families():
 
 def test_inherit_current_splits_keeps_existing_and_assigns_new():
     import pandas as pd
-    from data.prep.index import inherit_current_splits
+    from brain.prep.index import inherit_current_splits
 
     old = pd.DataFrame({"dedup_key": ["ixi:a", "abide1:b"], "split": ["train", "val"]})
     vols = pd.DataFrame({
@@ -110,9 +110,9 @@ def test_inherit_current_splits_keeps_existing_and_assigns_new():
 
 def test_aisd_official_test_ids_are_pinned():
     import pandas as pd
-    from data.download_aisd import splits_for
-    from data.prep.index import pin_official_splits
-    from data.prep.sources import AISD_TEST_IDS, aisd_id
+    from brain.datasets.download_aisd import splits_for
+    from brain.prep.index import pin_official_splits
+    from brain.prep.sources import AISD_TEST_IDS, aisd_id
 
     ids = [aisd_id(x) for x in AISD_TEST_IDS[:3]] + ["0019983", "0021023"]
     vols = pd.DataFrame({

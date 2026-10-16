@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import torch
 
-from lib.windowing import WINDOW_MIXES, asinh_window, floors, foreground_mask, sample_windows
-from lib.slabs import brats_contrast, swap_brats_contrast
-from lib.views import same_crop_seq_pair, same_crop_window_pair, warp_floor
-from models.sigreg import pairwise_cosine, prediction_loss
+from brain.common.windowing import WINDOW_MIXES, asinh_window, floors, foreground_mask, sample_windows
+from brain.data.slabs import brats_contrast, swap_brats_contrast
+from brain.data.crops2d import same_crop_seq_pair, same_crop_window_pair, warp_floor
+from brain.objectives.sigreg import pairwise_cosine, prediction_loss
 
 
 def test_asinh_is_monotone_and_finite():

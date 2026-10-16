@@ -1,0 +1,92 @@
+# Continue the FOMO small 30k run with first-class fine tokens.
+# Weights from output.init_from (fresh optimizer and schedule). Predictor architecture is
+# unchanged (same depth, same 2x2x2 pixel head) so its weights load.
+#
+# Fine tokens used to be parent_mean'd into a 16x16x8 cell before any loss saw them. This run
+# keeps that coarse consensus (so the two scales stay tied) and adds:
+#   dense.fine_weight — native 8x8x4 tokens agree with each other on the fine volume grid
+#   predict.fine_weight — the same predictor fills hidden fine cuboids (and 2x2x2 cell means)
+# Also on vs the 30k recipe, because those pooled terms were already flat:
+#   aug.window.mix tissue, dense.stopgrad_mean
+# Do not start this while runs/brainmodel_small_fomo is still writing last.pt.
+#
+# Resume from runs/brainmodel_small_multiscale/last.pt (step 15k → 35k). Cosine is over max_steps,
+# so lr steps back up from the 15k floor, then decays. Do not set NO_RESUME.
+#   sbatch --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/small_multiscale.yaml jobs/train_pi4.sbatch
+
+seed: 42
+
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  default_origin_mm: [0.0, 0.0, 0.0]
+  volume_size_xyz: [256, 256, 128]
+  num_workers: 10
+  balance_alpha: 0.5
+
+model:
+  size: small
+  in_chans: 1
+  proj_dim: 128
+  proj_hidden: 2048
+  qk_norm: true
+  rope_base_mm: 100.0
+  checkpoint: true
+  proj_norm: batch
+  length_buckets: 4
+  dense_dim: 128
+  dense_hidden: 1024
+
+views:
+  patch_xyz: [16, 16, 8]
+  global: {n: 2, size_xyz: [128, 128, 64]}
+  local: {n: 2, size_xyz: [64, 64, 32]}
+  fine: {n: 2, size_xyz: [32, 32, 16], patch_xyz: [8, 8, 4]}
+  nested: true
+  fg_min: 0.15
+  retries: 8
+  gate: {ct_hu: [-500.0, 200.0], mri_lo: -5.5}
+
+aug:
+  window: {mode: random, mix: tissue}
+  noise: {p: 0.5, sigma: [0.02, 0.15]}
+  blur: {p: 0.3, sigma_vox: [0.5, 1.5]}
+  drift: {p: 0.3, amp: 0.25}
+
+loss:
+  lamb: 0.02
+  win_weight: 1.0
+  local_pooled: false
+  n_proj: 256
+  gather_ddp: true
+  dense: {weight: 1.0, tokens_per_view: 4, stopgrad_mean: true, fine_weight: 1.0}
+  predict:
+    weight: 1.0
+    pixel_weight: 0.5
+    pixel_cells: [2, 2, 2]
+    blocks: 3
+    block_tokens: [3, 6]
+    depth: 4
+    ramp_steps: 1000
+    fine_weight: 1.0
+    fine_blocks: 2
+    fine_block_tokens: [2, 3]
+
+optim:
+  lr: 0.0005
+  weight_decay: 0.05
+  warmup_steps: 1000
+  clip_grad: 1.0
+  batch_size: 96
+
+train:
+  max_steps: 35000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 3000
+
+output:
+  out_dir: runs/brainmodel_small_multiscale
+  init_from: runs/brainmodel_small_fomo/step_0025500.pt

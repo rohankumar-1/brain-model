@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from downstream import seg3d as S
-from downstream.tasks import TaskBundle
+from brain.downstream import seg3d as S
+from brain.downstream.tasks import TaskBundle
 
 REGIONS = {"LES": (1,)}
 
@@ -109,7 +109,7 @@ def test_cache_tokens_concatenates_patch_embed():
 
 
 def test_fine_flag_selects_the_half_size_patch_and_tiling():
-    from downstream.seg3d import PATCH, TILE, grid_for
+    from brain.downstream.seg3d import PATCH, TILE, grid_for
 
     assert grid_for((8, 8, 4)) == (32, 32, 32) and TILE[0][0] % 8 == 0
     assert PATCH == (16, 16, 8) and grid_for(PATCH) == (16, 16, 16)

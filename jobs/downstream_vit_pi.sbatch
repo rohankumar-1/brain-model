@@ -4,8 +4,8 @@
 # Override with colon-separated TASKS (commas are eaten by sbatch --export).
 #
 # Submit:
-#   sbatch --export=ALL,CKPT=runs/brainmodel_tiny_predict/last.pt jobs/downstream_vit_pi.sbatch
-#   sbatch --export=ALL,CKPT=runs/vit_tiny_v4/last.pt,TASKS=oasis1_age:cq500 jobs/downstream_vit_pi.sbatch
+#   sbatch --export=ALL,CKPT=runs/lejepa3d/last.pt jobs/downstream_vit_pi.sbatch
+#   sbatch --export=ALL,CKPT=runs/lejepa2d/last.pt,TASKS=oasis1_age:cq500 jobs/downstream_vit_pi.sbatch
 # Native 8x8x4 tokens (32^3, no 2x2x2 pool): BRAIN_FINE_GRID=1 (do not also set BRAIN_FINE_POOL).
 
 #SBATCH -p pi_dbertsim
@@ -19,19 +19,7 @@
 #SBATCH -e logs/downstream_%j.out
 
 set -euo pipefail
-cd /home/roku/brain-model
-mkdir -p logs
-
-unset PYTHONPATH
-export PYTHONNOUSERSITE=True
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export NUMEXPR_NUM_THREADS=1 BLOSC_NTHREADS=1
-
-PY=/home/roku/.conda/envs/ml-torch/bin/python
-export PYTHONPATH=/home/roku/brain-model:/home/roku/.local/lib/python3.12/site-packages
-NVIDLIBS=$(find /home/roku/.conda/envs/ml-torch/lib/python3.12/site-packages/nvidia \
-  /home/roku/.local/lib/python3.12/site-packages/nvidia -type d -name lib 2>/dev/null | paste -sd:)
-export LD_LIBRARY_PATH="${NVIDLIBS}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 
 echo "[host] $(hostname) $(date -Is)"
 "$PY" - <<'PY'
@@ -40,7 +28,7 @@ print(f"[torch] {torch.__version__} cuda={torch.cuda.is_available()} "
       f"device={torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'}")
 PY
 
-CKPT="${CKPT:-runs/vit_tiny_v4/last.pt}"
+CKPT="${CKPT:-runs/lejepa2d/last.pt}"
 WINDOW="${WINDOW:-multi}"
 SLICES="${SLICES:-/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr}"
 if [ -n "${TASKS:-}" ]; then
@@ -58,7 +46,7 @@ fi
 
 for t in "${TASK_LIST[@]}"; do
   echo "[task-start] $t $(date -Is)"
-  "$PY" -u -m downstream.run_suite --task "$t" --ckpt "$CKPT" --window "$WINDOW" \
+  "$PY" -u -m brain.downstream.run_suite --task "$t" --ckpt "$CKPT" --window "$WINDOW" \
     --slices-root "$SLICES" ${RUN_ARGS:-}
   echo "[task-done] $t $(date -Is)"
 done
