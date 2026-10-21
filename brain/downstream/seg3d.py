@@ -1,12 +1,12 @@
 """Segmentation on frozen 3D BrainModel tokens.
 
-The encoder runs once per volume (one pass over the native 256 x 256 x 128 grid); its 16 x 16 x 16 token
+The encoder runs once per volume (one pass over the native 256 x 256 x 160 grid); its 20 x 16 x 16 token
 map (one 16 x 16 x 8 patch each) is cached. A small 3D conv decoder, trained on the cached tokens alone,
 upsamples the map to one logit per voxel. Nothing but the final tokens reaches the decoder: no raw
 voxels and no intermediate blocks, so the decoder sees exactly the resolution the encoder hands over.
 
 The 2D UNETR reference (``brain.downstream.seg_train``) scores per-volume Dice over every second axial slice
-(slices 1, 3, ... of 128). Dice here is scored on the same slices (``dice_*``) and on the whole volume
+(slices 1, 3, ... of the volume). Dice here is scored on the same slices (``dice_*``) and on the whole volume
 (``dice_full_*``). Several sequences (BraTS) are encoded one at a time and their tokens are concatenated.
 
     python -m brain.downstream.seg3d --task wmh --ckpt runs/snap/predict_8k.pt
@@ -38,8 +38,12 @@ from brain.downstream.seg_model import region_seg_loss
 from brain.downstream.tasks import DEFAULT_VOLUMES, TaskBundle, load_task, load_volumes
 from brain.common.optim import lr_at
 from brain.common.windowing import windows_for
+from brain.common.grid import DEPTH
+from brain.common.paths import REPO_ROOT
+from brain.prep.store import FORMAT_VERSION
+from brain.downstream.embeddings import uniform_slice_indices
 
-VOX = (128, 256, 256)  # voxels (Z, Y, X)
+VOX = (DEPTH, 256, 256)  # voxels (Z, Y, X)
 PATCH = (16, 16, 8)  # the encoder's native patch (x, y, z)
 TILE = ((128, 128, 64), (64, 64, 32))  # window and stride in voxels (x, y, z): the training crop size
 
@@ -48,7 +52,8 @@ def grid_for(patch_xyz) -> tuple[int, int, int]:
     """Token grid (Z, Y, X) of a full volume."""
     px, py, pz = patch_xyz
     return VOX[0] // pz, VOX[1] // py, VOX[2] // px
-EVAL_SLICES = slice(1, None, 2)  # the slices the 2D reference scores
+# the axial slices the 2D reference decoder is scored on (64 bin-centre slices of the volume)
+EVAL_SLICES = torch.from_numpy(uniform_slice_indices(DEPTH, 64)).long()
 # Training copies of each volume besides the original: (shift in voxels (x, y, z), flip left-right). A shift off
 # the patch grid or a flip gives the encoder a new tokenization of the same brain; the mask moves with it.
 AUG = (None, ((8, 8, 4), False), ((0, 0, 0), True), ((-8, 8, -4), True))
@@ -155,13 +160,13 @@ class TokenDecoder3D(nn.Module):
     """Token-grid U-Net, then upsample to voxel logits.
 
     Two stride-2 stages on the token grid (with skips) keep local structure that a pure upsample stack
-    throws away. The remaining stages double in-plane size — and depth until 128 — to the 128 x 256 x 256
+    throws away. The remaining stages double in-plane size — and depth until full — to the 160 x 256 x 256
     voxel grid. ``pe_dim`` fuses pre-transformer patch embeddings after the token-grid U-Net (a UNETR-style
     skip at the encoder's native resolution). ``deep_sup`` adds 1x1 heads at the token grid and after the
     first voxel upsample.
     """
 
-    def __init__(self, in_dim: int, n_classes: int, grid=(16, 16, 16), widths=(128, 96, 64, 32, 16),
+    def __init__(self, in_dim: int, n_classes: int, grid=grid_for(PATCH), widths=(128, 96, 64, 32, 16),
                  dropout: float = 0.0, deep_sup: bool = False, out_vox=VOX, pe_dim: int = 0):
         super().__init__()
         self.grid = tuple(grid)
@@ -225,7 +230,7 @@ class PatchFCN(nn.Module):
     The loss is the usual voxel CE+Dice on the expanded map, so Dice is comparable to the U-Net decoder.
     """
 
-    def __init__(self, in_dim: int, n_classes: int, grid=(16, 16, 16), patch_xyz=PATCH, dropout: float = 0.0,
+    def __init__(self, in_dim: int, n_classes: int, grid=grid_for(PATCH), patch_xyz=PATCH, dropout: float = 0.0,
                  width: int = 128, out_vox=VOX):
         super().__init__()
         self.grid = tuple(grid)
@@ -441,7 +446,7 @@ def score_volumes(dec: nn.Module, cache: Cache, vols: np.ndarray, regions: dict,
         for j, vi in enumerate(chunk):
             gt = torch.from_numpy(np.asarray(cache.masks[int(vi)])).to(device)
             row = {"volume_id": cache.volume_ids[int(vi)]}
-            for tag, sl in (("", EVAL_SLICES), ("full_", slice(None))):
+            for tag, sl in (("", EVAL_SLICES.to(device)), ("full_", slice(None))):
                 for name, r in ids.items():
                     g, p = torch.isin(gt[sl], r), torch.isin(pred[j, sl], r)
                     row[f"{tag}{name}"] = float(2 * (g & p).sum() / (g.sum() + p.sum())) if g.any() else np.nan
@@ -533,12 +538,15 @@ def train_decoder(dec, cache, task, split, *, steps, batch_size, lr, seed, eval_
 
 
 def main() -> None:
+    from brain.downstream.records import now_utc, pretrain_overlap
+
+    started = now_utc()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--task", required=True)
     ap.add_argument("--ckpt", type=Path, required=True)
     ap.add_argument("--slices-root", type=Path, default=DEFAULT_VOLUMES.parent)
-    ap.add_argument("--out-root", type=Path, default=Path("runs/downstream"))
-    ap.add_argument("--cache-dir", type=Path, default=Path("runs/downstream/_cache"))
+    ap.add_argument("--out-root", type=Path, default=REPO_ROOT / "runs" / "downstream")
+    ap.add_argument("--cache-dir", type=Path, default=REPO_ROOT / "runs" / "downstream" / "_cache" / f"v{FORMAT_VERSION}")
     ap.add_argument("--steps", type=int, default=6000,
                     help="training budget (cosine horizon). Stops earlier when val Dice plateaus")
     ap.add_argument("--batch", type=int, default=None,
@@ -566,6 +574,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--cache-only", action="store_true")
+    ap.add_argument("--keep-cache", action="store_true", help="keep this checkpoint's token cache after the run")
     args = ap.parse_args()
     if args.fine:
         args.patch = args.patch or "8:8:4"
@@ -584,7 +593,8 @@ def main() -> None:
         if len(enc.patch_xyz) != 3:
             raise SystemExit(f"--patch needs three integers, got {enc.patch_xyz} (do not put commas in sbatch EXTRA_ARGS; Slurm splits on them)")
     enc.tap_blocks = tuple(sorted(int(t) for t in re.split("[,:]", args.taps) if t != ""))
-    task = load_task(args.task, load_volumes(DEFAULT_VOLUMES))
+    volumes = load_volumes(DEFAULT_VOLUMES)
+    task = load_task(args.task, volumes)
     if not task.regions:
         raise SystemExit(f"{task.name} has no segmentation regions")
     eval_banner(task.name, f"segmentation  ·  {args.ckpt}")
@@ -625,6 +635,9 @@ def main() -> None:
     flo, fhi = bootstrap_ci(lambda i: float(np.nanmean(f[i])), len(f))
     metrics.update(head=head, dice_macro_ci=[lo, hi], dice_full_macro_ci=[flo, fhi], history=history,
                    n_test=len(test), n_train=len(split("train")), n_val=len(split("val")))
+    vals = [r["val_dice_macro"] for r in history if r.get("val_dice_macro") is not None]
+    if vals:                                          # the restored decoder is the best-val one
+        metrics["val"] = {"dice_macro": float(np.nanmax(vals))}
     print(f"[seg3d] test dice_macro={metrics['dice_macro']:.4f} [{lo:.4f}, {hi:.4f}] "
           f"full={metrics['dice_full_macro']:.4f} per_class={metrics['dice_per_class']}")
     eval_banner(task.name, "summary")
@@ -648,8 +661,27 @@ def main() -> None:
               "crop": list(crop) if crop else None, "deep_sup": args.deep_sup, "pe_skip": args.pe_skip,
               "patch_fcn": args.patch_fcn, "pe_dim": pe_dim,
               "n_train": metrics["n_train"], "n_test": metrics["n_test"],
-              "patience": args.patience, "min_delta": args.min_delta, "stopped_step": history[-1]["step"] if history else 0}
-    print(f"[seg3d] summary -> {finalize_run(run_dir, config, {head: metrics})}")
+              "patience": args.patience, "min_delta": args.min_delta, "stopped_step": history[-1]["step"] if history else 0,
+              "eval_every": args.eval_every, "fine": args.fine, "started_utc": started,
+              "slices_root": str(args.slices_root), "volumes_csv": str(DEFAULT_VOLUMES), "n_val": metrics["n_val"],
+              "eval_slices": "64 bin-centre axial slices (dice_*) and the whole volume (dice_full_*)",
+              "pretrain_overlap": pretrain_overlap(task.volume_ids, volumes)}
+    print(f"[seg3d] summary -> {finalize_run(run_dir, config, {head: metrics}, suite='seg3d')}")
+    if not args.keep_cache:
+        drop_token_cache(args.cache_dir, task.name, args.ckpt)
+
+
+def drop_token_cache(cache_dir: Path, task: str, ckpt: Path) -> None:
+    """Delete this checkpoint's cached token maps for ``task`` (tens of GB per task; only a rerun of the same
+    checkpoint and task would reuse them). The masks are shared across checkpoints and stay."""
+    root = Path(cache_dir) / "_seg3d" / task
+    prefix = f"{ckpt.parent.name}_{ckpt.stem}"
+    freed = 0
+    for f in root.glob(prefix + "*"):
+        if f.is_file() and f.suffix in (".npy", ".json"):
+            freed += f.stat().st_size
+            f.unlink()
+    print(f"[seg3d] dropped token cache {root}/{prefix}* ({freed / 1e9:.1f} GB)", flush=True)
 
 
 if __name__ == "__main__":

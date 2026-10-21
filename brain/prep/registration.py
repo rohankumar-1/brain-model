@@ -6,7 +6,7 @@ the head-centering-only placement of earlier store versions; centering still sup
 
 Mattes mutual information is used because it needs no intensity relationship between the scan and the template,
 so CT and every MRI sequence register to the same T1 template. The template is a skull-on T1 (for example MNI152
-1 mm). Resampling happens once, from the source image through the fitted transform onto a fixed 256 x 256 x 128 mm grid
+1 mm). Resampling happens once, from the source image through the fitted transform onto a fixed 256 x 256 x 160 mm grid
 in template space.
 
 Failure handling: a fit is accepted only if the affine stays near rigid-plus-scale (singular values in
@@ -39,6 +39,7 @@ class Template:
     center_mm: tuple[float, float, float]  # physical point that becomes the center of the output grid
     brain: sitk.Image | None     # optional brain mask in the same frame as ``full``
     path: str
+    image_brain: sitk.Image | None = None  # ``image`` cut to the brain mask: the fixed image for skull-stripped scans
 
 
 @dataclass
@@ -70,7 +71,15 @@ def load_template(path: str, brain_mask: str | None = None) -> Template:
         a = sitk.GetArrayViewFromImage(work)
         zyx = np.argwhere(a > a.mean()).mean(0)
         center = work.TransformContinuousIndexToPhysicalPoint((float(zyx[2]), float(zyx[1]), float(zyx[0])))
-    return Template(work, full, tuple(float(c) for c in center), mask, str(p))
+    return Template(work, full, tuple(float(c) for c in center), mask, str(p), brain_only(work, mask))
+
+
+def brain_only(work: sitk.Image, mask: sitk.Image | None) -> sitk.Image | None:
+    """The working template multiplied by its brain mask (linear-resampled, so the edge stays soft)."""
+    if mask is None:
+        return None
+    m = sitk.Resample(sitk.Cast(mask > 0, sitk.sitkFloat32), work, sitk.Transform(), sitk.sitkLinear, 0.0)
+    return work * m
 
 
 def _regview(img: sitk.Image, modality: str) -> sitk.Image:
@@ -142,16 +151,21 @@ def _sane(tf: sitk.Transform) -> bool:
 
 
 def register(moving: sitk.Image, template: Template, modality: str, init_center_mm, mode: str = "affine",
-             seed: int = 0) -> RegResult:
-    """Fit ``template -> moving``. ``init_center_mm`` is the scan's brain center in physical space."""
+             seed: int = 0, stripped: bool = False) -> RegResult:
+    """Fit ``template -> moving``. ``init_center_mm`` is the scan's brain center in physical space.
+
+    A skull-stripped scan is fitted to the brain-only template when the template has a brain mask: against the
+    skull-on head its affine is usually rejected, which leaves stripped brains unscaled (larger than skull-on ones).
+    """
     if mode not in MODES[:2]:
         raise ValueError(f"registration mode must be one of {MODES[:2]}, got {mode!r}")
-    fixed, mov = template.image, _regview(moving, modality)
+    use_brain = stripped and template.image_brain is not None
+    fixed, mov = (template.image_brain if use_brain else template.image), _regview(moving, modality)
     shift = np.asarray(init_center_mm, float) - np.asarray(template.center_mm, float)
     start = sitk.Euler3DTransform()
     start.SetCenter(template.center_mm)
     start.SetTranslation(tuple(float(v) for v in shift))
-    info: dict = {"reg_mode": mode, "reg_method": "translation"}
+    info: dict = {"reg_mode": mode, "reg_method": "translation", "reg_template": "brain" if use_brain else "head"}
     best: sitk.Transform = start
     try:
         Rr = _method(fixed, mov, start, levels=3, lr=2.0, iters=100, seed=seed)
@@ -177,9 +191,16 @@ def register(moving: sitk.Image, template: Template, modality: str, init_center_
     return RegResult(best, info)
 
 
-def output_grid(template: Template, size=(256, 256, 128)) -> geometry.Grid:
+def output_grid(template: Template, size=geometry.GRID_XYZ) -> geometry.Grid:
     """The 1 mm output grid, axis-aligned in template space and centered on the template's brain center."""
     return geometry.target_grid(template.full, np.asarray(template.center_mm), size)
+
+
+def template_brain_on_grid(template: Template, grid: geometry.Grid) -> np.ndarray | None:
+    """The template's brain mask on the output grid (Z, Y, X) bool, or None without a mask."""
+    if template.brain is None:
+        return None
+    return geometry.resample(template.brain, grid, 0.0, nearest=True) > 0.5
 
 
 def fov_cover(img: sitk.Image, tf: sitk.Transform, template: Template, grid: geometry.Grid) -> float:
@@ -187,7 +208,7 @@ def fov_cover(img: sitk.Image, tf: sitk.Transform, template: Template, grid: geo
     ones = sitk.Image(img.GetSize(), sitk.sitkFloat32) + 1.0
     ones.CopyInformation(img)
     valid = geometry.resample(ones, grid, 0.0, nearest=True, tf=tf)
-    if template.brain is None:
+    brain = template_brain_on_grid(template, grid)
+    if brain is None:
         return float(valid.mean())
-    brain = geometry.resample(template.brain, grid, 0.0, nearest=True) > 0.5
     return float(valid[brain].mean()) if brain.any() else float(valid.mean())

@@ -31,7 +31,6 @@ from brain.downstream.tasks import (
 # dataset column values each named task reads from volumes.csv
 TASK_DATASETS = {
     "cq500": {"cq500", "seg_cq500"},
-    "rsna": {"rsna_ich"},
     "rsna_ich": {"rsna_ich"},
     "oasis1_cdr": {"oasis1"},
     "oasis2_cdr": {"oasis2"},
@@ -44,6 +43,8 @@ TASK_DATASETS = {
     "piop1_age": {"piop1"},
     "piop2_age": {"piop2"},
     "id1000_age": {"id1000"},
+    "ms3seg_age": {"ms3seg_flair"},
+    "valdo_epvs": {"valdo_t1"},
     "seg_cq500": {"seg_cq500"},
     "brats2023_gli": {"brats2023_gli_t1n"},
     "brats2023_men": {"brats2023_men_t1n"},
@@ -55,10 +56,13 @@ TASK_DATASETS = {
     "isles24": {"isles24_ncct"},
     "aisd": {"aisd"},
     "instance": {"instance"},
+    "ms3seg": {"ms3seg_flair"},
+    "valdo_cmb": {"valdo_t2s"},
+    "valdo_lacunes": {"valdo_t1"},
 }
 
 TASK_TYPES = {
-    **{n: "multilabel" for n in ("cq500", "rsna", "rsna_ich")},
+    **{n: "multilabel" for n in ("cq500", "rsna_ich")},
     **{n: "binary" for n in ("oasis1_cdr", "oasis2_cdr", "oasis2_conversion", "abide_asd", "msd")},
     **{n: "regression" for n in REGRESSION_TASKS},
     **{n: "segmentation" for n in SEGMENTATION_TASKS},
@@ -76,6 +80,9 @@ SEG_MASK = {
     "isles24": ("mask_lesion", "/tmp/i24.lesion.zip"),
     "aisd": ("mask_lesion", "/tmp/aisd.lesion.zip"),
     "instance": ("mask_ich", "/tmp/inst.ICH.zip"),
+    "ms3seg": ("mask_seg", "/tmp/ms.seg.zip"),
+    "valdo_cmb": ("mask_lesion", "/tmp/cmb.lesion.zip"),
+    "valdo_lacunes": ("mask_lesion", "/tmp/lac.lesion.zip"),
 }
 
 
@@ -116,6 +123,7 @@ def _volumes() -> pd.DataFrame:
         _row("piop2", "piop2:sub-01", case_id="sub-01"),
         _row("id1000", "id1000:sub-01", case_id="sub-01"),
         _row("msd_braintumor", "msd:1"),
+        _row("valdo_t1", "valdo_t1:t1_sub-201", case_id="t1_sub-201"),
     ]
     for name, (col, path) in SEG_MASK.items():
         ds = next(iter(TASK_DATASETS[name]))
@@ -157,6 +165,12 @@ def _write_clinical(root: Path) -> Path:
         pd.DataFrame({"participant_id": ["sub-01"], "age": [25.0]}).to_csv(
             d / "participants.tsv", sep="\t", index=False
         )
+    (root / "ms3seg").mkdir()
+    pd.DataFrame({"participant_id": ["v0"], "age": [44.0], "sex": ["F"]}).to_csv(
+        root / "ms3seg" / "participants.tsv", sep="\t", index=False)
+    (root / "valdo").mkdir()
+    pd.DataFrame({"task": ["t1"], "participant_id": ["sub-201"], "epvs_count": [12.0]}).to_csv(
+        root / "valdo" / "labels.tsv", sep="\t", index=False)
     msd = root / "msd_volume_labels.csv"
     pd.DataFrame({"volume_id": ["msd:1"], "enhancing_high": [1]}).to_csv(msd, index=False)
     return msd
@@ -174,6 +188,7 @@ def test_load_task_covers_every_name():
         msd = _write_clinical(root)
         with (
             patch("brain.downstream.tasks.DATASETS", root),
+            patch("brain.downstream.tasks.LABEL_SOURCES", root / "_not_synced"),
             patch("brain.downstream.tasks.build_rsna_volume_labels", return_value=_rsna_labels()),
             patch("pandas.read_excel", return_value=xls),
         ):
@@ -208,14 +223,11 @@ def test_msd_joins_store_ids_and_builds_enhancing_high():
     assert int(task.y[0]) == 1
 
 
-def test_rsna_aliases_share_labels_and_differ_by_name():
-    vols = _volumes()
-    labels = _rsna_labels()
-    a = load_rsna_task(vols, labels=labels, name="rsna")
-    b = load_rsna_task(vols, labels=labels, name="rsna_ich")
-    assert a.task_type == b.task_type == "multilabel"
-    assert a.label_names == b.label_names == list(RSNA_LABELS)
-    assert a.name == "rsna" and b.name == "rsna_ich"
+def test_rsna_is_one_task_named_rsna_ich():
+    task = load_rsna_task(_volumes(), labels=_rsna_labels())
+    assert task.name == "rsna_ich" and task.task_type == "multilabel"
+    assert task.label_names == list(RSNA_LABELS)
+    assert "rsna" not in TASK_NAMES                     # the old duplicate alias is gone
 
 
 def test_instance_is_in_the_seg_suite():
@@ -270,11 +282,16 @@ def test_frozen_suite_is_clf_plus_age():
     assert not set(SEGMENTATION_TASKS) & set(FROZEN_TASKS)
 
 
-def test_pi_job_defaults_to_the_full_frozen_suite():
-    text = (Path(__file__).resolve().parents[1] / "jobs" / "downstream_vit_pi.sbatch").read_text()
-    assert "TASK_LIST=(oasis1_age oasis1_cdr cq500)" not in text
-    for name in FROZEN_TASKS:
-        assert name in text, name
+def test_suite_runs_every_task_and_the_probes_with_the_right_evaluator():
+    from brain.downstream.suite import SUITE, command
+
+    assert set(FROZEN_TASKS) | set(SEGMENTATION_TASKS) | {"probe3d"} == set(SUITE)
+    ck = Path("/x/run/last.pt")
+    assert "brain.downstream.seg3d" in command("atlas", ck, [], brain3d=True)
+    assert "brain.downstream.run_suite" in command("atlas", ck, [], brain3d=False)   # 2D ViT: UNETR decoder
+    assert "brain.downstream.run_suite" in command("cq500", ck, ["--seed", "1"], brain3d=True)[:5]
+    probe = command("probe3d", ck, [], brain3d=True)
+    assert "brain.downstream.probe3d" in probe and "--pixel" in probe and "--random-init" in probe
 
 
 if __name__ == "__main__":

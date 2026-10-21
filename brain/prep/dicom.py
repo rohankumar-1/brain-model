@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import struct
 from concurrent.futures import ThreadPoolExecutor
 import tempfile
@@ -68,7 +69,11 @@ def read_study(zip_path: str, members, tmp_root: str | None = None) -> tuple[sit
 
 
 def read_series_dir(folder: str | Path) -> tuple[sitk.Image, dict]:
-    """Largest GDCM series in a folder of DICOM files -> (RAS float32 image, QC info)."""
+    """Largest series in a folder of DICOM files -> (RAS float32 image, QC info). ``BRAIN_DICOM_READER=dcm2niix``
+    assembles slices by position (dcm2niix: duplicate / mixed slices, gantry-tilt de-shear, even spacing); the
+    default SimpleITK series reader assumes even, untilted slices (docs/prep.md, "RSNA DICOM assembly")."""
+    if os.environ.get("BRAIN_DICOM_READER", "sitk") == "dcm2niix":
+        return read_series_dcm2niix(folder)
     folder = str(folder)
     reader = sitk.ImageSeriesReader()
     reader.MetaDataDictionaryArrayUpdateOn()
@@ -93,3 +98,38 @@ def _slice_gaps(reader: sitk.ImageSeriesReader, img: sitk.Image) -> dict:
         return {"slice_gap_dev_mm": float(np.abs(gaps - np.median(gaps)).max())}
     except Exception:
         return {"slice_gap_dev_mm": float("nan")}
+
+
+# dcm2niix output variants, best first: tilt-corrected and equidistant, tilt-corrected, equidistant, as acquired
+_DCM2NIIX_PREF = ("_Tilt_Eq_1", "_Tilt_1", "_Eq_1", "")
+
+
+def read_series_dcm2niix(folder: str | Path) -> tuple[sitk.Image, dict]:
+    """dcm2niix (``-i y``: no derived / localizer images) on a folder; the largest series, preferring its
+    tilt-corrected / equidistant reconstruction when dcm2niix writes one."""
+    import shutil
+    import subprocess
+
+    exe = os.environ.get("BRAIN_DCM2NIIX") or shutil.which("dcm2niix") or str(Path(sys.executable).parent / "dcm2niix")
+    with tempfile.TemporaryDirectory(dir=str(folder)) as out:
+        r = subprocess.run([exe, "-b", "n", "-z", "n", "-i", "y", "-f", "s%s", "-o", out, str(folder)],
+                           capture_output=True, text=True, timeout=600)
+        files = sorted(Path(out).glob("*.nii"))
+        if not files:
+            raise RuntimeError(f"dcm2niix wrote nothing for {folder}: {r.stdout[-300:]} {r.stderr[-300:]}")
+        def base(f):
+            n = f.stem
+            for suf in _DCM2NIIX_PREF[:-1]:
+                n = n.replace(suf, "")
+            return n
+        series = {}
+        for f in files:
+            series.setdefault(base(f), []).append(f)
+        def n_vox(fs):
+            return max(np.prod(sitk.ReadImage(str(f)).GetSize()) for f in fs)
+        group = max(series.values(), key=n_vox)
+        pick = next(f for suf in _DCM2NIIX_PREF for f in group if f.stem == base(f) + suf)
+        img = sitk.ReadImage(str(pick))
+        info = {"n_series": len(series), "n_slices": int(img.GetSize()[2]), "dcm2niix_variant": pick.stem[len(base(pick)):] or "plain",
+                "dcm2niix_warn": int(r.stdout.count("Warning"))}
+        return geometry.standardize(img), info

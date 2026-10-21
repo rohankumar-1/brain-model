@@ -13,7 +13,36 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from brain.data.index import enrich
 
 
-ROW_KEYS = ("modality", "thick_mm", "thick_axis")  # per-volume (B,) vectors; view tensors are (V, B, ...)
+ROW_KEYS = ("modality", "thick_mm", "thick_axis", "volume_full", "brain_full", "contrast_id", "tissue_q")
+HIST_LEVELS = 32                     # whole-volume tissue quantiles shipped for histogram matching  # per volume (B, ...); views (V, B, ...)
+
+
+# Contrast groups for histogram matching (only within a group). Index contrasts: BraTS t1n/t1c/t2w/t2f, FOMO t1w/t2w/
+# flair/pd, IXI t1/t2. Single-sequence cohorts without a label (ABIDE, OASIS, AOMIC, Pixar, ID1000) are T1-weighted.
+CONTRAST_GROUPS = {"t1": 1, "t1w": 1, "t1n": 1, "t1_pre": 1, "t1c": 2, "t1_gd": 2, "bravo": 2,
+                   "t2": 3, "t2w": 3, "flair": 4, "t2f": 4, "pd": 5, "dwi": 6, "adc": 7, "t2s": 8}
+
+
+def contrast_group(contrast, modality: int) -> int:
+    """0 for CT; an MRI contrast group (unlabelled MRI -> T1); -1 for an unknown labelled contrast (never matched)."""
+    if modality == 0:
+        return 0
+    c = str(contrast).strip().lower() if contrast is not None and str(contrast) not in ("nan", "None", "") else "t1"
+    return CONTRAST_GROUPS.get(c, -1)
+
+
+def tissue_quantiles(volume: torch.Tensor, modality: int, levels: int = HIST_LEVELS) -> torch.Tensor:
+    """Quantiles (1%..99%) of a whole volume's tissue (MRI: above the air floor), from a voxel subsample. The scan's
+    intensity distribution for histogram matching: whole-volume, so two scans are compared like for like rather
+    than a crop of ventricles against a crop of cortex. NaN for CT (never matched)."""
+    if modality == 0:
+        return torch.full((levels,), float("nan"))
+    flat = volume.reshape(-1)
+    v = flat[:: max(1, flat.numel() // 300000)].float()        # ~300k voxels: a full-res volume takes every 35th
+    v = v[v > -5.5]
+    if v.numel() < 100:
+        return torch.full((levels,), float("nan"))
+    return torch.quantile(v[:: max(1, v.numel() // 200000)], torch.linspace(0.01, 0.99, levels))
 
 
 class VolumeDataset(Dataset):
@@ -68,19 +97,34 @@ class VolumeDataset(Dataset):
         ax = int(row["thick_axis"]) if "thick_axis" in self.df.columns and pd.notna(row["thick_axis"]) else -1
         return torch.tensor([mm], dtype=torch.float32), torch.tensor([ax], dtype=torch.long)
 
-    def _skull_dropout(self, volume: torch.Tensor, row, modality: int, gen) -> torch.Tensor:
-        """Cut the volume to its brain mask with probability ``aug.skull.p``; a no-op when no mask is stored."""
+    def _lesion_path(self, row) -> Path | None:
+        """Lesion label zip for this volume: ``mask_seg`` / ``mask_lesion`` / ``mask_ich``, or for a BraTS sequence the
+        subject's segmentation (all four sequences share the t1n grid it was drawn on)."""
+        for col in ("mask_seg", "mask_lesion", "mask_ich"):
+            if col in self.df.columns and pd.notna(row.get(col)) and str(row[col]) not in ("", "nan"):
+                return self.store_root / str(row[col])
+        case = str(row.get("case_id", ""))
+        if str(row.get("dataset", "")).startswith("brats") and "-" in case:
+            p = self.store_root / str(row["folder"]) / f"{case.rsplit('-', 1)[0]}.seg.zip"
+            return p if p.exists() else None
+        return None
+
+    def _skull_mask_ok(self, row) -> bool:
+        """A brain mask exists and passed QC (a failed mask would cut real anatomy or leave scalp)."""
+        rel = str(row["mask_brain"]) if "mask_brain" in self.df.columns and pd.notna(row["mask_brain"]) else ""
+        if not rel or rel == "nan":
+            return False
+        return not ("brain_ok" in self.df.columns and str(row["brain_ok"]).strip().lower() in {"false", "0", "0.0"})
+
+    def _draw_skull_dropout(self, row, gen) -> bool:
+        """Cut this sample to its brain mask? Probability ``aug.skull.p``; never without a mask that passed QC."""
         p = float(((self.crop_cfg or {}).get("aug") or {}).get("skull", {}).get("p", 0.0))
         rel = str(row["mask_brain"]) if "mask_brain" in self.df.columns and pd.notna(row["mask_brain"]) else ""
         if p <= 0 or not rel or rel == "nan":
-            return volume
-        if float(torch.rand(1, generator=gen)) >= p:  # draw first so unstripped volumes never read the mask
-            return volume
-        from brain.data.augment import skull_dropout
-        from brain.prep import store
-
-        brain = torch.from_numpy(np.ascontiguousarray(store.read(self.store_root / rel, "mask")))
-        return skull_dropout(volume, brain, modality, 1.0)
+            return False
+        if "brain_ok" in self.df.columns and str(row["brain_ok"]).strip().lower() in {"false", "0", "0.0"}:
+            return False  # a mask that failed QC would cut real anatomy (or leave scalp) and teach a false cue
+        return float(torch.rand(1, generator=gen)) < p
 
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[int(idx)]
@@ -88,7 +132,13 @@ class VolumeDataset(Dataset):
         img_path = rel if rel.is_absolute() else self.store_root / rel
         from brain.prep import store
 
-        vol = store.read(img_path, "image")
+        gen = torch.Generator().manual_seed(1000 + int(idx)) if self.fixed_crops else None
+        # validation keeps whole volumes so its loss is comparable between runs
+        skull = ((self.crop_cfg or {}).get("aug") or {}).get("skull") or {}
+        per_view = bool(skull.get("per_view", False)) and not self.fixed_crops and self._skull_mask_ok(row)
+        drop = not per_view and not self.fixed_crops and self._draw_skull_dropout(row, gen)
+        arrays = store.read_many(img_path, ("image", "brain") if (drop or per_view) else ("image",))  # one zip open
+        vol = arrays["image"]
         if vol.ndim == 4:
             vol = vol[:, 0]
         volume = torch.from_numpy(np.ascontiguousarray(vol))  # (Z, Y, X) in the stored dtype
@@ -98,11 +148,28 @@ class VolumeDataset(Dataset):
         modality = 0 if str(row["modality"]).lower().startswith("ct") else 1
         from brain.data.crops3d import raw_views
 
-        gen = torch.Generator().manual_seed(1000 + int(idx)) if self.fixed_crops else None
-        if not self.fixed_crops:  # validation keeps whole volumes so its loss is comparable between runs
-            volume = self._skull_dropout(volume, row, modality, gen)
+        if drop and "brain" in arrays:
+            from brain.data.augment import skull_dropout
+
+            volume = skull_dropout(volume, torch.from_numpy(np.ascontiguousarray(arrays["brain"])), modality, 1.0)
         thick, axis = self._native(row)
+        extra = {}
+        if per_view and "brain" in arrays:                  # cropped with the views; dropped per view in raw_views
+            extra["brain"] = torch.from_numpy(np.ascontiguousarray(arrays["brain"])).bool().unsqueeze(0).unsqueeze(0)
+        extra["contrast_id"] = torch.tensor([contrast_group(row.get("contrast"), modality)])
+        if ((self.crop_cfg or {}).get("loss") or {}).get("predict", {}).get("lesion"):
+            # lesion-aware MAE masking: per-token lesion flags are derived from this in the worker (not shipped)
+            les, path = None, self._lesion_path(row)
+            if path is not None and path.exists():
+                m = np.asarray(store.read(path, "mask"))
+                m = m[:, 0] if m.ndim == 4 else m
+                if m.shape == tuple(volume.shape):
+                    les = torch.from_numpy(np.ascontiguousarray(m > 0))
+            extra["lesion"] = (les if les is not None else torch.zeros(volume.shape, dtype=torch.bool))[None, None]
+        extra["tissue_q"] = tissue_quantiles(volume, modality)[None]
         return raw_views({
+            **extra,
+            "geometric": not self.fixed_crops,          # validation keeps unaugmented crops, comparable across runs
             "volume": volume.unsqueeze(0).unsqueeze(0),
             "modality": torch.tensor([modality]),
             "spacing_mm": spacing.unsqueeze(0),
@@ -171,18 +238,34 @@ def collate_crops(batch: list[dict]) -> dict:
     return out
 
 
+def family_weights(families: pd.Series, alpha: float, groups: dict | None = None) -> np.ndarray:
+    """Per-volume sampling weight. Without ``groups`` a family gets mass ``n_family ** alpha``. With ``groups``
+    (``{group: [family, ...]}``) the balance is two-level: a group gets ``n_group ** alpha`` and splits it among its
+    families by ``n_family ** alpha``, so several cohorts of one source (BraTS GLI/MEN/PED/GoAT) share one source's
+    mass instead of each counting as a family of its own. Families not listed are their own group."""
+    fam = families.astype(str)
+    group_of = {f: g for g, fams in (groups or {}).items() for f in fams}
+    grp = fam.map(lambda f: group_of.get(f, f))
+    n_f = fam.map(fam.value_counts()).to_numpy(np.float64)
+    n_g = grp.map(grp.value_counts()).to_numpy(np.float64)
+    fam_mass = pd.Series(n_f ** alpha, index=fam.index)               # n_family ** alpha, repeated per volume
+    share = (fam.map(fam_mass.groupby(fam).first())
+             / grp.map(fam_mass.groupby(fam).first().groupby(lambda f: group_of.get(f, f)).sum())).to_numpy()
+    return (n_g ** alpha) * share / n_f
+
+
 class FamilySampler(DistributedSampler):
-    """Draws volumes with replacement so a dataset family gets sampling mass proportional to ``n ** alpha``.
+    """Draws volumes with replacement so a dataset family gets sampling mass proportional to ``n ** alpha``
+    (two-level with ``groups``: see ``family_weights``).
 
     ``alpha=1`` is the natural mix and ``alpha=0`` is uniform over families. Every rank draws the same list
     for an epoch (seeded by ``seed + epoch``) and takes its own stride of it, like ``DistributedSampler``.
     """
 
-    def __init__(self, dataset: VolumeDataset, alpha: float, *, seed: int = 0, num_replicas: int = 1, rank: int = 0):
+    def __init__(self, dataset: VolumeDataset, alpha: float, *, seed: int = 0, num_replicas: int = 1, rank: int = 0,
+                 groups: dict | None = None):
         super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=True, seed=seed)
-        fam = dataset.df["dataset_family"].astype(str)
-        counts = fam.map(fam.value_counts()).to_numpy(dtype=np.float64)
-        self.weights = torch.from_numpy(counts ** (float(alpha) - 1.0))
+        self.weights = torch.from_numpy(family_weights(dataset.df["dataset_family"], float(alpha), groups))
 
     def __iter__(self):
         g = torch.Generator().manual_seed(self.seed + self.epoch)
@@ -195,9 +278,11 @@ def _worker_threads(_worker_id: int) -> None:
 
 
 def crop_microbatch(batch_size: int) -> int:
-    """Volumes a worker crops before handing a chunk over. Few chunks in flight keeps file descriptors low."""
-    micro = min(8, int(batch_size))
-    return micro if int(batch_size) % micro == 0 else int(batch_size)
+    """Volumes a worker crops before handing a chunk over: the largest divisor of the batch up to 8. Few chunks in
+    flight keeps file descriptors low; small chunks keep host memory low (each chunk ships whole volumes and masks
+    through shared memory, and every worker prefetches whole chunks: batch 28 as one 28-volume chunk held ~65 GB)."""
+    b = int(batch_size)
+    return max(d for d in range(1, min(8, b) + 1) if b % d == 0)
 
 
 def make_loader(
@@ -232,7 +317,8 @@ def make_loader(
     alpha = float(d.get("balance_alpha", 1.0))
     if shuffle and alpha != 1.0:
         world, rank = (torch.distributed.get_world_size(), torch.distributed.get_rank()) if distributed else (1, 0)
-        sampler = FamilySampler(ds, alpha, seed=seed, num_replicas=world, rank=rank)
+        sampler = FamilySampler(ds, alpha, seed=seed, num_replicas=world, rank=rank,
+                                groups=d.get("balance_groups"))
     else:
         sampler = DistributedSampler(ds, shuffle=shuffle, seed=seed) if distributed else None
     cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))

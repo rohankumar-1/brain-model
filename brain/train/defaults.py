@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+from brain.common.grid import GRID_XYZ
 
 METHODS = {
     "lejepa2d": "brain.train.lejepa2d",
     "dino2d": "brain.train.dino2d",
     "lejepa3d": "brain.train.lejepa3d",
+    "mae3d": "brain.train.mae3d",
+    "multitask": "brain.train.multitask",
 }
 
 _TRAIN_2D = {
@@ -62,7 +65,7 @@ LEJEPA3D: dict[str, Any] = {
         "index_name": "volumes.csv",
         "default_spacing_mm": [1.0, 1.0, 1.0],
         "default_origin_mm": [0.0, 0.0, 0.0],
-        "volume_size_xyz": [256, 256, 128],
+        "volume_size_xyz": list(GRID_XYZ),
         "num_workers": 10,
         "balance_alpha": 1.0,  # family sampling mass ~ n**alpha: 1 natural mix, 0 uniform over families
     },
@@ -71,6 +74,9 @@ LEJEPA3D: dict[str, Any] = {
         "rope_base_mm": 100.0, "checkpoint": True, "proj_norm": "batch", "length_buckets": 4,
         # Token head for the dense loss: 0 builds none (a plain pooled-only model).
         "dense_dim": 128, "dense_hidden": 512,
+        # Prefix tokens: n_cls=1 adds a CLS that becomes the pooled (global) embedding; registers are extra
+        # position-free tokens attention can use as scratch space. 0/0 = mean-pooled patch tokens.
+        "n_cls": 0, "n_registers": 0,
     },
     # Crops live on the volume's token grid, so two crops share a token exactly where they overlap.
     "views": {
@@ -106,7 +112,7 @@ LEJEPA3D: dict[str, Any] = {
         "local_pooled": False,
         "n_proj": 256,
         "gather_ddp": True,
-        "dense": {"weight": 1.0, "tokens_per_view": 4, "fine_weight": 0.0, "stopgrad_mean": False},
+        "dense": {"weight": 1.0, "tokens_per_view": 32, "fine_weight": 0.0, "stopgrad_mean": False},
         # Masked prediction on the global crops (needs the dense term); weight 0 builds no predictor.
         # Hidden blocks: ``blocks`` cuboids with sides in ``block_tokens``. The predictor regresses each
         # hidden token's full-crop embedding and, with pixel_weight > 0, the voxel cell means of kept patches.
@@ -122,7 +128,54 @@ LEJEPA3D: dict[str, Any] = {
     "output": {"out_dir": "runs/lejepa3d", "resume_from": None, "init_from": None},
 }
 
-_DEFAULTS = {"lejepa2d": LEJEPA2D, "dino2d": DINO2D, "lejepa3d": LEJEPA3D}
+def _mae3d_defaults() -> dict[str, Any]:
+    """3D MAE: Primus-style ViT (SwiGLU, LayerScale, drop-path) on 8 x 8 x 4 mm tokens; 75% of each crop's foreground
+    tokens hidden; a narrow decoder reconstructs their voxels in windowed units (no per-patch normalisation)."""
+    c = deepcopy(LEJEPA3D)
+    c["model"].update(size="base", mlp="swiglu", layer_scale=0.1, drop_path=0.1, n_cls=0, n_registers=0, dense_dim=0,
+                      decoder={"dim": 384, "depth": 4, "heads": 6})
+    c["views"].update(patch_xyz=[8, 8, 4], nested=False, win=False,
+                      local={"n": 0, "size_xyz": [64, 64, 32]}, fine={"n": 0, "size_xyz": [32, 32, 16]})
+    c["aug"].update(curve={"p": 0.0}, skull={"p": 0.3, "per_view": True})
+    c["loss"] = {"predict": {"weight": 1.0, "mask_ratio": 0.75, "blocks": 0, "block_tokens": [3, 6]}}
+    c["optim"].update(lr=1.5e-4, weight_decay=0.05, warmup_steps=2000, batch_size=24)
+    c["train"].update(max_steps=30000, keep_every=3000)
+    c["output"]["out_dir"] = "runs/mae3d"
+    return c
+
+
+MAE3D: dict[str, Any] = _mae3d_defaults()
+
+
+def _multitask_defaults() -> dict[str, Any]:
+    """Task-conditioned multitask post-training (brain.multitask): an SSL encoder on whole volumes, learned task
+    embeddings as slot queries, typed shared heads. The encoder's architecture comes from ``model.init_from``."""
+    return {
+        "seed": 42,
+        "data": {"store_root": "data/processed/slices_zarr", "index_name": "volumes.csv",
+                 "labels_dir": "data/processed/slices_zarr/labels/multitask", "registry": None,
+                 "volume_size_xyz": list(GRID_XYZ), "default_spacing_mm": [1.0, 1.0, 1.0],
+                 "num_workers": 10, "balance_alpha": 0.5, "balance_groups": None,
+                 "val_per_task": 24, "val_max_seg": 4},
+        "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
+                  "slot": {"dim": 256, "layers": 3, "heads": 8, "width": None, "mode": "slots",
+                           "cross_task": True, "embedding": "learned"},
+                  "seg": {"widths": [128, 64, 32, 16]}},
+        "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5}},
+        "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}},
+        "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0}},
+        "loss": {"balance": "ema", "ema_decay": 0.99, "seg_stride": 2},
+        "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
+                  "warmup_steps": 1000, "freeze_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
+        "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
+                  "keep_every": 5000, "stop_poll": 20, "best_metric": "loss"},
+        "output": {"out_dir": "runs/multitask", "resume_from": None},
+    }
+
+
+MULTITASK: dict[str, Any] = _multitask_defaults()
+
+_DEFAULTS = {"lejepa2d": LEJEPA2D, "dino2d": DINO2D, "lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK}
 
 
 def default_config(method: str) -> dict[str, Any]:

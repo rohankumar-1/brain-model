@@ -1,9 +1,9 @@
 """Frozen-token probes that measure what a pretrained encoder keeps, without a task head per dataset.
 
 Every volume is encoded once and every encoder reads the same volume, so the comparison is paired.
-The default patch grid is the 3D encoder's 16 x 16 x 16 grid of 16 x 16 x 8 voxel patches, flattened
-(Z, Y, X). ``--fine-grid`` keeps the tiled 8 x 8 x 4 encode on 32 x 32 x 32. The 2D slice model is
-averaged over 8 slices per coarse patch to land on the 16^3 grid.
+The default patch grid is the 3D encoder's token grid (``brain.common.grid.TOKEN_GRID``: 20 x 16 x 16 tokens of
+16 x 16 x 8 voxels on the 256 x 256 x 160 volume), flattened (Z, Y, X). ``--fine-grid`` keeps the tiled 8 x 8 x 4
+encode on ``FINE_TOKEN_GRID`` (40 x 32 x 32). The 2D slice model is averaged over the 8 slices of each coarse patch.
 
 1. Dense lesion probe: from one token, is there lesion inside its patch? Linear and one-hidden-layer
    probes per held-out dataset, scored by average precision against the prevalence (lift) and AUROC.
@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -34,17 +34,17 @@ from sklearn.metrics import average_precision_score, balanced_accuracy_score, r2
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.preprocessing import StandardScaler
 
+from brain.common.grid import FINE_PATCH_XYZ, FINE_TOKEN_GRID, PATCH_XYZ, TOKEN_GRID
 from brain.common.paths import PROCESSED_ROOT
 from brain.prep import store
 from brain.downstream.embed3d import _crop_to_patch, read_volume_xyz, token_gate
 from brain.downstream.embeddings import load_frozen_encoder, resolve_path
 from brain.common.windowing import asinh_window, windows_for
 
-PATCH_XYZ = (16, 16, 8)
-GRID = (16, 16, 16)  # (Z, Y, X) tokens
-FINE_PATCH_XYZ = (8, 8, 4)
-FINE_GRID = (32, 32, 32)
-N_TOK = 4096
+GRID = TOKEN_GRID  # (Z, Y, X) tokens
+FINE_GRID = FINE_TOKEN_GRID
+N_TOK = GRID[0] * GRID[1] * GRID[2]
+LABEL_MASK_COLS = ("mask_seg", "mask_lesion", "mask_ich")  # mask_brain is not a label
 TILE_WINDOW = (128, 128, 64)  # the training global-crop size, in voxels (X, Y, Z)
 TILE_STRIDE = (64, 64, 32)
 LESION_FAMILIES = ("atlas", "isles22", "isles24", "wmh", "cq500", "aisd", "instance")
@@ -71,10 +71,11 @@ def load_cases(root: Path, families, split: str, n: int, seed: int, *, masked: b
     for fam in families:
         d = df[(df.dataset_family == fam) & (df.split == split)]
         if masked:
-            d = d[d.has_mask == True]  # noqa: E712
+            cols = [c for c in LABEL_MASK_COLS if c in d.columns]
+            d = d[d[cols].fillna("").astype(str).ne("").any(axis=1)] if cols else d.iloc[:0]
         d = d.sample(min(n, len(d)), random_state=seed)
         for r in d.itertuples():
-            m = next((x for x in (r.mask_seg, r.mask_lesion, r.mask_ich) if isinstance(x, str)), None)
+            m = next((x for x in (getattr(r, c, None) for c in LABEL_MASK_COLS) if isinstance(x, str) and x), None)
             out.append(Case(r.volume_id, fam, r.modality, resolve_path(root, r.image_path),
                             resolve_path(root, m) if (masked and m) else None, split))
     return out
@@ -108,6 +109,8 @@ class Provider:
     name: str
     patch_xyz = PATCH_XYZ
     grid = GRID
+    ckpt: Path | None = None       # for experiment records; None for controls
+    variant: str | None = None
 
     def tokens(self, vol: torch.Tensor, modality: str) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
@@ -130,6 +133,13 @@ class Brain3D(Provider):
             vol, windows_for("canonical", modality), modality=modality,
             window_xyz=self.window, stride_xyz=self.stride,
             fine_pool=self.fine_pool, fine_grid=self.fine_grid)
+        # the model's own global embeddings for this volume (windows concatenated), when it has prefix tokens
+        self.last_global = {}
+        if self.enc.last_cls is not None:
+            self.last_global["cls"] = self.enc.last_cls.float().reshape(-1).cpu().numpy()
+        if self.enc.last_reg is not None:                      # (n_windows, R, D) -> keep the register axis
+            r = self.enc.last_reg.float().cpu().numpy()
+            self.last_global["registers"] = np.transpose(r, (1, 0, 2)).reshape(r.shape[1], -1)   # (R, n_win * D)
         return torch.cat(list(seqs), -1), fg
 
 
@@ -186,6 +196,7 @@ def build_providers(ckpts, device, *, pixel: bool, random_init: bool, tiled: boo
     for path in ckpts:
         enc = load_frozen_encoder(Path(path), device)
         name = f"{Path(path).parent.name}/{Path(path).stem}"
+        start = len(out)
         if isinstance(enc, FrozenEncoder3D):
             out.append(Brain3D(enc, name, fine_pool=False, fine_grid=False))
             if fine:
@@ -197,6 +208,8 @@ def build_providers(ckpts, device, *, pixel: bool, random_init: bool, tiled: boo
             first3d = first3d or Path(path)
         else:
             out.append(Slice2D(enc, name))
+        for prov in out[start:]:
+            prov.ckpt, prov.variant = Path(path), (prov.name.split("@", 1)[1] if "@" in prov.name else None)
     if random_init and first3d is not None:
         ckpt = torch.load(first3d, map_location=device, weights_only=False)
         torch.manual_seed(0)
@@ -223,6 +236,8 @@ class Volume:
     idx: np.ndarray  # (n_fg,) token index
     pooled: np.ndarray  # (D,) mean over foreground tokens
     grid: tuple[int, int, int] = GRID
+    globals: dict = field(default_factory=dict)   # "cls": (D,), "registers": (R, D) for prefix-token encoders
+    norm_ratio: np.ndarray | None = None          # (n_fg,) token L2 norm / the volume's median token norm
 
 
 def extract(providers: list[Provider], cases: list[Case], device) -> dict[str, list[Volume]]:
@@ -247,8 +262,11 @@ def extract(providers: list[Provider], cases: list[Case], device) -> dict[str, l
             else:
                 frac = None
             f = feat[torch.from_numpy(idx).to(device)]
+            norms = f.float().norm(dim=-1)
             out[p.name].append(Volume(c, f.half(), None if frac is None else frac[idx], idx,
-                                      f.float().mean(0).cpu().numpy(), grid=p.grid))
+                                      f.float().mean(0).cpu().numpy(), grid=p.grid,
+                                      globals=dict(getattr(p, "last_global", {}) or {}),
+                                      norm_ratio=(norms / norms.median().clamp_min(1e-6)).cpu().numpy()))
         if (i + 1) % 50 == 0 or i + 1 == len(cases):
             print(f"[probe] {i + 1}/{len(cases)} volumes, {time.time() - t0:.0f}s", flush=True)
     return out
@@ -290,8 +308,27 @@ def lesion_probe(train: list[Volume], test: list[Volume], hidden: int, seed: int
             "lift": ap / float(yte.mean()), "_scores": np.split(s, cuts), "_labels": np.split(yte, cuts)}
 
 
-def fingerprint_probe(vols: list[Volume], seed: int = 0) -> dict:
-    x = StandardScaler().fit_transform(np.stack([v.pooled for v in vols]))
+def global_view(v: Volume, view: str) -> np.ndarray:
+    """``mean`` (patch-token mean), ``cls``, ``registers`` (all, concatenated), ``cls+registers``, ``reg<i>``."""
+    if view == "mean":
+        return v.pooled
+    if view == "registers":
+        return v.globals["registers"].reshape(-1)
+    if view == "cls+registers":
+        return np.concatenate([v.globals["cls"], v.globals["registers"].reshape(-1)])
+    if view.startswith("reg") and view[3:].isdigit():
+        return v.globals["registers"][int(view[3:])]
+    return v.globals[view]
+
+
+def global_views(vols: list[Volume]) -> list[str]:
+    g = vols[0].globals if vols else {}
+    views = ["mean"] + (["cls"] if "cls" in g else []) + (["registers"] if "registers" in g else [])
+    return views + (["cls+registers"] if "cls" in g and "registers" in g else [])
+
+
+def fingerprint_probe(vols: list[Volume], seed: int = 0, view: str = "mean") -> dict:
+    x = StandardScaler().fit_transform(np.stack([global_view(v, view) for v in vols]))
     out = {}
     for key, labels in (("modality", [v.case.modality for v in vols]), ("dataset", [v.case.family for v in vols])):
         y = np.asarray(labels)
@@ -390,6 +427,39 @@ def _strip(d):
     return d
 
 
+def register_probe(vols: list[Volume], seed: int = 0) -> dict:
+    """What each register carries: modality / dataset decodability of every register on its own, how alike the
+    registers are (mean pairwise cosine; near 1 = redundant), and their norm relative to the patch tokens."""
+    regs = np.stack([v.globals["registers"] for v in vols])            # (V, R, D)
+    n_reg = regs.shape[1]
+    per = {f"reg{r}": fingerprint_probe(vols, seed, view=f"reg{r}") for r in range(n_reg)}
+    unit = regs / np.linalg.norm(regs, axis=-1, keepdims=True).clip(1e-6)
+    cos = np.einsum("vrd,vsd->vrs", unit, unit)
+    off = cos[:, ~np.eye(n_reg, dtype=bool)]
+    patch_norm = np.array([float(np.linalg.norm(v.pooled)) for v in vols])
+    out = {"n_registers": n_reg, "pairwise_cosine": float(off.mean()),
+           "norm_vs_patch_mean": float(np.mean(np.linalg.norm(regs, axis=-1).mean(1) / patch_norm.clip(1e-6)))}
+    for k in ("modality_bal_acc", "dataset_bal_acc"):
+        vals = [per[r][k] for r in per]
+        out[f"{k}_mean"], out[f"{k}_max"], out[f"{k}_min"] = (float(np.nanmean(vals)), float(np.nanmax(vals)),
+                                                              float(np.nanmin(vals)))
+        out[f"{k}_per_register"] = {f"reg{r}": float(x) for r, x in enumerate(vals)}
+    return out
+
+
+def token_norm_probe(vols: list[Volume], thresh: float = 2.0) -> dict:
+    """High-norm outlier tokens (Darcet et al., "Vision Transformers Need Registers"): share of foreground tokens whose
+    norm exceeds ``thresh`` x the volume median, the largest ratio, and the norms' spread. Models without registers
+    tend to repurpose a few tokens as global scratch space; registers should remove them."""
+    ratios = [v.norm_ratio for v in vols if v.norm_ratio is not None and v.norm_ratio.size]
+    if not ratios:
+        return {}
+    allr = np.concatenate(ratios)
+    return {"outlier_frac": float(np.mean(allr > thresh)), "outlier_threshold": thresh,
+            "max_ratio_mean": float(np.mean([r.max() for r in ratios])),
+            "p99_ratio": float(np.percentile(allr, 99)), "cv_mean": float(np.mean([r.std() for r in ratios]))}
+
+
 def run_probes(name: str, lesion_train, lesion_test, fingerprint_vols, reps: int = 200) -> dict:
     res, raw = {"lesion": {}}, {"lesion": {}}
     for fam in LESION_FAMILIES + SEEN_FAMILIES:
@@ -406,6 +476,12 @@ def run_probes(name: str, lesion_train, lesion_test, fingerprint_vols, reps: int
             res["lesion"][f"mean_{kind}_{key}"] = float(np.nanmean(vals))
     raw["fingerprint"], raw["location"] = fingerprint_probe(fingerprint_vols), location_probe(fingerprint_vols)
     res["fingerprint"], res["location"] = raw["fingerprint"], raw["location"]
+    # every global embedding the model has (CLS, registers), read out the same way as the patch-token mean
+    res["fingerprint_views"] = {view: fingerprint_probe(fingerprint_vols, view=view)
+                                for view in global_views(fingerprint_vols) if view != "mean"}
+    if fingerprint_vols and "registers" in fingerprint_vols[0].globals:
+        res["registers"] = register_probe(fingerprint_vols)
+    res["token_norm"] = token_norm_probe(fingerprint_vols + lesion_test)
     res = _strip(res)
     if reps:
         boot = bootstrap_probes(raw, reps)
@@ -451,6 +527,57 @@ def format_summary(results: dict) -> str:
     return "\n".join(lines)
 
 
+def record_probes(providers, results: dict, args, started: str, n_cases: dict) -> int:
+    """One experiment record per (encoder, probe, head); CIs from the paired bootstrap; draws stay in ``--out``."""
+    from brain.downstream.records import make_record, model_info, provenance, write_record
+
+    data = provenance(args.root) | n_cases
+    protocol = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items() if k not in ("ckpt", "out")}
+    art = {"probe_json": str(args.out)}
+    n = 0
+    for p in providers:
+        r = results.get(p.name)
+        if r is None:
+            continue
+        if p.ckpt is not None:
+            model = model_info(p.ckpt, variant=p.variant)
+        else:
+            model = model_info(None, name=p.name)
+        if p.name.startswith("control/random3d") and providers:
+            model["architecture_from"] = next((str(q.ckpt) for q in providers if q.ckpt is not None), None)
+        ci = r.get("ci", {})
+
+        def put(task: str, head: str, test: dict, ci_map: dict | None = None):
+            nonlocal n
+            m = dict(test)
+            for metric, key in (ci_map or {}).items():
+                if key in ci:
+                    m[f"{metric}_ci"] = [ci[key]["lo"], ci[key]["hi"]]
+            write_record(make_record(suite="probe3d", kind="probe", task=task, task_type="token_probe", head=head,
+                                     model=model, data=data, protocol=protocol | {"probe": task, "head": head},
+                                     metrics={"test": m}, started_utc=started, artifacts=art))
+            n += 1
+
+        les = r["lesion"]
+        for fam, v in les.items():
+            if isinstance(v, dict):
+                for kind in ("linear", "mlp"):
+                    put(f"probe:lesion:{fam}", kind, {**v[kind], "n_train": v["n_train"], "n_test": v["n_test"],
+                                                      "seen_in_pretraining": fam in SEEN_FAMILIES})
+        for kind, tag in (("linear", "lin"), ("mlp", "mlp")):
+            put("probe:lesion:mean", kind, {k: les[f"mean_{kind}_{k}"] for k in ("ap", "lift", "auroc")},
+                {"lift": f"lift_{tag}", **({"auroc": "auroc_lin"} if kind == "linear" else {})})
+        put("probe:fingerprint", "logreg_cv5", r["fingerprint"], {"dataset_bal_acc": "dataset_acc"})
+        for view, fp in (r.get("fingerprint_views") or {}).items():
+            put("probe:fingerprint", f"logreg_cv5:{view}", fp)
+        if r.get("registers"):
+            put("probe:registers", "per_register", r["registers"])
+        if r.get("token_norm"):
+            put("probe:token_norm", "stats", r["token_norm"])
+        put("probe:location", "ridge", r["location"], {"r2_mean": "loc_r2", "token_participation_ratio": "pr"})
+    return n
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--ckpt", action="append", default=[], help="3D BrainEncoder or 2D ViT checkpoint (repeatable)")
@@ -471,7 +598,9 @@ def main() -> None:
     ap.add_argument("--ref", default=None, help="substring of an encoder name; print paired differences against it")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
+    from brain.downstream.records import now_utc
 
+    started = now_utc()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cuda.matmul.allow_tf32 = True
     providers = build_providers(args.ckpt, device, pixel=args.pixel, random_init=args.random_init,
@@ -487,6 +616,9 @@ def main() -> None:
                for p in providers}
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(results, indent=2) + "\n")
+    n = record_probes(providers, results, args, started, n_cases={"lesion_train": len(train), "lesion_test": len(test),
+                                                                 "fingerprint": len(fing)})
+    print(f"[record] {n} experiment records written")
     print(format_summary(results))
     if args.ref and args.reps:
         print("\n" + paired_table(results, args.ref))

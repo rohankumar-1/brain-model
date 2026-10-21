@@ -44,6 +44,8 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         predict_depth=int(pr.get("depth", 4)) if predict else 0,
         predict_pixel_dim=int(cells[0]) * int(cells[1]) * int(cells[2])
         if predict and float(pr.get("pixel_weight", 0.0)) > 0 else 0,
+        n_cls=int(m.get("n_cls", 0)),
+        n_registers=int(m.get("n_registers", 0)),
     ).to(device)
 
 
@@ -158,8 +160,9 @@ class Trainer(engine.Trainer):
             self.val_iter = synthetic_loader(cfg, val_batch, seed + 999)
         else:
             store = resolve(cfg["data"]["store_root"])
-            self.loader = forever_loader(store, "train", cfg, batch_size=self.batch, shuffle=True, seed=seed,
-                                         distributed=rt.world > 1)
+            # a resumed run continues with sampler epochs / crop draws it has not used yet (seed + step)
+            self.loader = forever_loader(store, "train", cfg, batch_size=self.batch, shuffle=True,
+                                         seed=seed + int(step), distributed=rt.world > 1)
             self.val_iter = forever_loader(store, "val", cfg, batch_size=val_batch, shuffle=False, seed=0,
                                            distributed=False) if rt.main else None
 

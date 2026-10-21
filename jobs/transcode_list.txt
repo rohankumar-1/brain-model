@@ -1,0 +1,24 @@
+# Archives re-encoded JPEG-LS -> JPEG-XL lossless (brain.prep.transcode), in this order (largest gain first).
+/home/roku/orcd/pool/datasets/fomo260k/PT018_HBN.jls.zip
+/home/roku/orcd/pool/datasets/fomo260k/PT035_Yale_Brain_Mets_Longitudinal.jls.zip
+/home/roku/orcd/pool/datasets/fomo260k/PT027_NKI.jls.zip
+/home/roku/orcd/pool/datasets/fomo260k/PT010_BrainLat.jls.zip
+/home/roku/orcd/pool/datasets/fomo260k/PT014_CoRR.jls.zip
+/home/roku/orcd/pool/datasets/fomo260k/PT009_BraTS-GEN.jls.zip
+/home/roku/orcd/pool/datasets/fomo260k/fomo_group_small.jls.zip
+/home/roku/orcd/pool/datasets/brats/brats.raw.zip
+/home/roku/orcd/pool/datasets/id1000/id1000.raw.zip
+/home/roku/orcd/pool/datasets/cq500/cq500.raw.zip
+/home/roku/orcd/pool/datasets/atlas/atlas.raw.zip
+/home/roku/orcd/pool/datasets/ixi/ixi.raw.zip
+/home/roku/orcd/pool/datasets/abide1/RawData.jls.zip
+/home/roku/orcd/pool/datasets/brainmetshare/brainmetshare.raw.zip
+/home/roku/orcd/pool/datasets/wmh/wmh.raw.zip
+/home/roku/orcd/pool/datasets/isles24/isles24.raw.zip
+/home/roku/orcd/pool/datasets/aisd/aisd.raw.zip
+/home/roku/orcd/pool/datasets/pixar/pixar.raw.zip
+/home/roku/orcd/pool/datasets/piop1/piop1.raw.zip
+/home/roku/orcd/pool/datasets/piop2/piop2.raw.zip
+/home/roku/orcd/pool/datasets/isles22/isles22.raw.zip
+/home/roku/orcd/pool/datasets/seg_cq500/seg_cq500.raw.zip
+/home/roku/orcd/pool/datasets/instance2022/instance2022.raw.zip

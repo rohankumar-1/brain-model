@@ -96,21 +96,16 @@ def print_head_table(task_name: str, task_type: str, rows: list[tuple[str, str, 
     print(flush=True)
 
 
-def finalize_run(run_dir: Path, config: dict, all_metrics: dict[str, dict]) -> Path:
+def finalize_run(run_dir: Path, config: dict, all_metrics: dict[str, dict], *, suite: str = "run_suite") -> Path:
+    """Run-directory files (config, metrics, summary.csv) plus one experiment record per head
+    (``brain.downstream.records``; query them with ``python -m brain.downstream.db``)."""
+    from brain.downstream.records import record_run
+
     write_json(run_dir / "config.json", config)
     write_json(run_dir / "metrics.json", all_metrics)
     rows = [summarize_for_table(name, m) for name, m in all_metrics.items()]
-    df = pd.DataFrame(rows)
     csv_path = run_dir / "summary.csv"
-    df.to_csv(csv_path, index=False)
-    # also append to a rolling leaderboard under task/
-    board = run_dir.parent.parent / "leaderboard.csv"
-    df2 = df.copy()
-    df2.insert(0, "run_dir", str(run_dir))
-    df2.insert(1, "ckpt", config.get("ckpt"))
-    df2.insert(2, "time_utc", config.get("time_utc"))
-    if board.exists():
-        prev = pd.read_csv(board)
-        df2 = pd.concat([prev, df2], ignore_index=True)
-    df2.to_csv(board, index=False)
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    recs = record_run(run_dir, config, all_metrics, suite=suite)
+    print(f"[record] {len(recs)} experiment record(s) -> {recs[0].parent if recs else '-'}", flush=True)
     return csv_path

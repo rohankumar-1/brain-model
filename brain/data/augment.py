@@ -14,6 +14,13 @@ it came from, so that agreement between views can only be reached through anatom
                      independently. ``flip`` negates it about the median, which swaps the order of tissues as T1 -> T2
                      or CT-like -> MRI-like contrast does. Background stays the darkest value.
 5. ``blur``/``drift``/``noise``  isotropic blur, a slow additive drift, and noise, in windowed units.
+   With ``noise.kind: rician`` MRI rows instead get Rician noise in native units (before the window): the magnitude of
+   the signal plus complex Gaussian noise, which is how MRI noise arises (biased upward and grainy in dark tissue and
+   air, Gaussian in bright tissue). CT rows keep Gaussian noise.
+
+Optional ``histmatch`` (MRI only, first, in native units): a row's tissue intensities are remapped to the quantiles of
+another volume's row of the same contrast group in the batch (blended), so contrast and dynamic range of a real other
+scanner are borrowed and "which scanner" stops being a cheap cue. Not CT: Hounsfield units are physical (blood ~60 HU).
 
 All are drawn independently per row; shapes are (R, 1, Z, Y, X). ``skull`` is separate: with probability ``p`` a whole
 volume is cut to its brain mask before cropping, so "has a skull" is not a modality cue.
@@ -151,8 +158,71 @@ def contrast_curve(y: torch.Tensor, fg: torch.Tensor, cfg: dict) -> torch.Tensor
     return y
 
 
-def degrade(x: torch.Tensor, aug: dict) -> torch.Tensor:
-    """Isotropic blur, a smooth additive drift, and noise, in windowed units. Each is drawn per row."""
+def rician_noise(x: torch.Tensor, modality: torch.Tensor, cfg: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rician noise on MRI rows in native robust-z units. Returns the volume and the rows that got it.
+
+    The stored MRI is a robust z-score with air at the floor (-6), so ``a = x - floor`` is a non-negative
+    magnitude-like signal whose tissue sits near 6. With ``snr`` drawn per row, ``sigma = 6 / snr`` and the result is
+    ``floor + |a + n1 + i n2|`` for independent Gaussian ``n1, n2`` of that sigma: air becomes Rayleigh noise above
+    the floor and dark tissue is lifted, as on a real magnitude image."""
+    r, dev = x.shape[0], x.device
+    on = (torch.rand(r, device=dev) < float(cfg["p"])) & (modality.to(dev) == MOD_MRI)
+    idx = on.nonzero(as_tuple=True)[0]
+    if idx.numel():
+        lo, hi = cfg.get("snr", (15.0, 100.0))
+        snr = torch.exp(_uniform(idx.numel(), math.log(float(lo)), math.log(float(hi)), dev))
+        sigma = (6.0 / snr).view(-1, 1, 1, 1, 1)
+        fl = floors(modality.to(dev))[idx].view(-1, 1, 1, 1, 1)
+        a = (x[idx] - fl).clamp_min(0)
+        x[idx] = fl + torch.sqrt((a + sigma * torch.randn_like(a)).square() + (sigma * torch.randn_like(a)).square())
+    return x, on
+
+
+def histogram_match(x: torch.Tensor, modality: torch.Tensor, fg: torch.Tensor, vol: torch.Tensor,
+                    contrast: torch.Tensor, quant: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """MRI rows: remap intensities from their volume's tissue distribution onto another volume's (same contrast
+    group), blended. ``quant`` (R, Q) are whole-volume tissue quantiles per row (``volumes.tissue_quantiles``), so the
+    map compares scanners, not the anatomy two crops happen to contain. The map is piecewise linear between quantiles,
+    each segment's slope clamped to [1/max_slope, max_slope] so sparse intensity ranges (partial-volume CSF) are not
+    stretched into speckle, and shifted (slope 1) beyond the tissue range. Air stays air; rows without a valid partner
+    are left alone. ``alpha`` ~ U(alpha) blends matched and original values."""
+    r, dev = x.shape[0], x.device
+    mri = modality.to(dev) == MOD_MRI
+    quant = quant.to(dev).float()
+    valid = mri & torch.isfinite(quant).all(1)
+    on = (torch.rand(r, device=dev) < float(cfg["p"])) & valid
+    if not bool(on.any()):
+        return x
+    vol, contrast = vol.to(dev), contrast.to(dev)
+    ok_pair = (contrast[:, None] == contrast[None, :]) & (vol[:, None] != vol[None, :]) & valid[None, :] \
+        & (contrast[:, None] > 0)
+    score = torch.rand(r, r, device=dev).masked_fill(~ok_pair, -1.0)
+    best, partner = score.max(1)
+    idx = (on & (best >= 0)).nonzero(as_tuple=True)[0]
+    if not idx.numel():
+        return x
+    q = quant.shape[1]
+    src = torch.cummax(quant[idx], 1).values + torch.arange(q, device=dev) * 1e-5       # strictly increasing knots
+    ref = torch.cummax(quant[partner[idx]], 1).values
+    max_slope = float(cfg.get("max_slope", 3.0))
+    slope = ((ref[:, 1:] - ref[:, :-1]) / (src[:, 1:] - src[:, :-1])).clamp(1.0 / max_slope, max_slope)
+    ref = torch.cat([ref[:, :1], ref[:, :1] + torch.cumsum(slope * (src[:, 1:] - src[:, :-1]), 1)], 1)
+    rows = x[idx].flatten(1)
+    k = torch.searchsorted(src.contiguous(), rows.contiguous()).clamp(1, q - 1)
+    x0, y0 = src.gather(1, k - 1), ref.gather(1, k - 1)
+    mapped = y0 + (rows - x0) * slope.gather(1, k - 1)
+    mapped = torch.where(rows < src[:, :1], rows - src[:, :1] + ref[:, :1], mapped)
+    mapped = torch.where(rows > src[:, -1:], rows - src[:, -1:] + ref[:, -1:], mapped)
+    lo, hi = cfg.get("alpha", (0.5, 1.0))
+    a = _uniform(idx.numel(), float(lo), float(hi), dev)[:, None]
+    out = (1 - a) * rows + a * mapped
+    x[idx] = torch.where(fg[idx].flatten(1), out, rows).view_as(x[idx])               # air stays air
+    return x
+
+
+def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None) -> torch.Tensor:
+    """Isotropic blur, a smooth additive drift, and noise, in windowed units. Each is drawn per row.
+    ``skip_noise`` marks rows that already got (Rician) noise in native units."""
     r, device = x.shape[0], x.device
     n, bl, dr = (aug.get(k) or {} for k in ("noise", "blur", "drift"))
     if bl and float(bl.get("p", 0)) > 0:
@@ -165,6 +235,8 @@ def degrade(x: torch.Tensor, aug: dict) -> torch.Tensor:
         x = x + on * F.interpolate(field, size=x.shape[2:], mode="trilinear", align_corners=True)
     if n and float(n.get("p", 0)) > 0:
         on = torch.rand(r, device=device) < float(n["p"])
+        if skip_noise is not None:
+            on &= ~skip_noise.to(device)
         lo, hi = n.get("sigma", (0.02, 0.15))
         sigma = torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)).view(r, 1, 1, 1, 1)
         x = x + sigma * torch.randn_like(x)
@@ -172,18 +244,28 @@ def degrade(x: torch.Tensor, aug: dict) -> torch.Tensor:
 
 
 def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
-               thick: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
-    """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place."""
+               thick: tuple[torch.Tensor, torch.Tensor] | None = None,
+               vol: torch.Tensor | None = None, contrast: torch.Tensor | None = None,
+               quant: torch.Tensor | None = None) -> torch.Tensor:
+    """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
+    ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching against another volume of the same contrast
+    group, using whole-volume tissue quantiles."""
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
+    if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
+        x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"])
     if _enabled(aug.get("through_plane")):
         x = through_plane(x, aug["through_plane"], thick)
+    noisy = None
+    noise = aug.get("noise") or {}
+    if _enabled(noise) and str(noise.get("kind", "gaussian")) == "rician":
+        x, noisy = rician_noise(x, modality, noise)
     y = window_view(x, modality, aug)
     if _enabled(aug.get("curve")):
         y = contrast_curve(y, fg, aug["curve"])
-    return degrade(y, aug)
+    return degrade(y, aug, skip_noise=noisy)
 
 
 def skull_dropout(volume: torch.Tensor, brain: torch.Tensor, modality: int, p: float,

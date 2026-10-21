@@ -15,9 +15,13 @@ data:
   index_name: volumes.csv
   default_spacing_mm: [1.0, 1.0, 1.0]
   default_origin_mm: [0.0, 0.0, 0.0]
-  volume_size_xyz: [256, 256, 128]
+  volume_size_xyz: [256, 256, 160]
   num_workers: 10
   balance_alpha: 0.5
+  # BraTS cohorts are one source: they share one group's mass instead of each counting as a family (with GoAT they
+  # took 29% of samples alone). Group mass ~ n_group^alpha, split among its families by n_family^alpha.
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
 
 model:
   size: small
@@ -43,18 +47,36 @@ views:
   gate: {ct_hu: [-500.0, 200.0], mri_lo: -5.5}
 
 aug:
-  window: {mode: random, mix: brain}
-  noise: {p: 0.5, sigma: [0.02, 0.15]}
+  # Skull dropout per view: each view independently is cut to its (QC-passed) brain mask, so skull-on and skull-free
+  # views of one scan meet in the invariance terms. Skull-stripped releases are ~28% of samples after balancing, so
+  # p=0.3 makes ~49% of all views skull-free.
+  skull: {p: 0.3, per_view: true}
+  # Geometric augmentation, independently per view (rotated / scaled / flipped about the crop center, sampled on the
+  # GPU from the whole volume). Ranges follow real head positioning and size: pitch (about the left-right axis) up to
+  # +-15 deg, roll and yaw +-10 deg (rot_deg is about the z, y, x axes), isotropic scale +-15%, left-right mirror.
+  # Tokens are matched across views by where their centers land in the scan, so the dense terms compare the same
+  # anatomy; RoPE stays on each view's own regular grid (relative positions, true voxel size). Validation is off.
+  geometric: {p: 0.8, rot_deg: [10, 10, 15], scale: [0.85, 1.15], flip_lr: 0.5}
+  window: {mode: random, mix: brain_bone}       # "brain" + 3% bone window (CT), which frozen eval also uses
+  # MRI: Rician noise in native units (magnitude of signal + complex Gaussian noise; SNR = tissue / sigma, log-uniform).
+  # CT: Gaussian noise in windowed units (sigma).
+  noise: {p: 0.5, kind: rician, snr: [15, 100], sigma: [0.02, 0.15]}
+  # MRI only: borrow another same-contrast scan's tissue histogram (blended), so scanner contrast is not a cheap cue.
+  # Never CT (HU are physical).
+  histmatch: {p: 0.10, alpha: [0.3, 0.7], quantiles: 64}
+  # Contrast curve relaxed and never inverted: the v3 diagnosis showed the encoder discarding tissue contrast that
+  # carries biology (myelination, WMH, MS lesions). Gentler, rarer re-rendering keeps cross-scanner robustness.
+  curve: {p: 0.5, knots: 5, strength: 0.3, flip: 0.0}
   blur: {p: 0.3, sigma_vox: [0.5, 1.5]}
   drift: {p: 0.3, amp: 0.25}
 
 loss:
-  lamb: 0.02
+  lamb: 0.03
   win_weight: 1.0
   local_pooled: false
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 1.0, tokens_per_view: 4}
+  dense: {weight: 1.0, tokens_per_view: 32}
   predict: {weight: 1.0, pixel_weight: 0.5, pixel_cells: [2, 2, 2], blocks: 3, block_tokens: [3, 6], depth: 4, ramp_steps: 2000}
 
 optim:

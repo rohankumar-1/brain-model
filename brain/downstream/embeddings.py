@@ -15,10 +15,11 @@ import torch
 
 from brain.models.vit2d import VIT_SIZES, VisionTransformer
 from brain.common.windowing import asinh_window, windows_for
+from brain.common.grid import DEPTH
 
 UNIFORM_SLICES = 32  # non-focal tasks (age, CDR, ASD): centers of 32 bins
 FOCAL_SLICES = 64  # ICH / tumor / lesion tasks: finer axial grid
-VOLUME_DEPTH = 128
+VOLUME_DEPTH = DEPTH
 CACHE_VERSION = "v4"  # v3 was cls+mean; v4 is cls+mean+amax and stores z_index
 CACHE_VERSION_3D = "v5_3d_tok"  # native-grid tokens + xyz; v4_3d was packed axial planes
 
@@ -68,12 +69,17 @@ def peek_is_brain3d(ckpt_path: Path) -> bool:
     """True if this checkpoint is a 3D BrainEncoder (not the 2D slice ViT)."""
     from brain.downstream.embed3d import is_brain3d_state
 
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False, mmap=True)  # header only, no full read
     cfg = ckpt.get("config") or {}
     if isinstance(cfg.get("views"), dict) and ({"patch_xyz", "global_patch_xyz"} & set(cfg["views"])):
         return True
     state = {str(k).removeprefix("_orig_mod.").removeprefix("module."): v for k, v in ckpt["model"].items()}
     return is_brain3d_state(state)
+
+
+def peek_n_registers(ckpt_path: Path) -> int:
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False, mmap=True)
+    return int(((ckpt.get("config") or {}).get("model") or {}).get("n_registers", 0) or 0)
 
 
 def load_frozen_encoder(ckpt_path: Path, device: torch.device):
@@ -84,7 +90,12 @@ def load_frozen_encoder(ckpt_path: Path, device: torch.device):
 
     views = (ckpt.get("config") or {}).get("views")
     if is_brain3d_state(state) or (isinstance(views, dict) and ({"patch_xyz", "global_patch_xyz"} & set(views))):
-        return load_brain3d(ckpt, device)
+        enc = load_brain3d(ckpt, device)
+        if "multitask" in ckpt:                    # multitask checkpoints also expose their task slots
+            from brain.multitask.slots import attach
+
+            attach(enc, ckpt, device)
+        return enc
     cfg = (ckpt.get("config") or {}).get("model") or {}
     if "patch_embed.weight" in state:
         dim = int(state["patch_embed.weight"].shape[0])
@@ -170,6 +181,12 @@ def load_or_build_embeddings(
         tag += "_finegrid"
     elif is3d and os.environ.get("BRAIN_FINE_POOL", "") == "1":
         tag += "_finepool"
+    if is3d and os.environ.get("BRAIN_EVAL_TILE", "") == "1":
+        tag += "_tiled"
+    eval_taps = os.environ.get("BRAIN_EVAL_TAPS", "").strip()     # e.g. "3": block 4's output (0-based index)
+    taps_only = os.environ.get("BRAIN_EVAL_TAPS_ONLY", "") == "1"
+    if is3d and eval_taps:
+        tag += f"_tap{eval_taps.replace(',', '-')}" + ("only" if taps_only else "")
     win = (window or "canonical").lower()
     ver = CACHE_VERSION_3D if is3d else CACHE_VERSION
     path = Path(cache_dir) / f"{ckpt.parent.name}_{ckpt.stem}" / task / f"embeddings_{ver}_{win}{tag}.npz"
@@ -178,7 +195,13 @@ def load_or_build_embeddings(
         data = np.load(path, allow_pickle=False)
         same_ids = [str(x) for x in data["volume_ids"]] == ids
         spatial = str(data["representation"]) == "tokens"
-        if same_ids and (spatial or int(data["max_slices"]) == max_slices):
+        # caches from before register capture lack the register outputs of register models: rebuild those
+        has_regs = "registers" in data.files or not (is3d and peek_n_registers(ckpt))
+        if is3d and "slots" not in data.files:     # multitask checkpoints: caches from before the slot readout
+            from brain.multitask.slots import is_multitask
+
+            has_regs = has_regs and not is_multitask(ckpt)
+        if same_ids and has_regs and (spatial or int(data["max_slices"]) == max_slices):
             z = data["z"] if "z" in data.files else slot_z(len(ids), max_slices)
             z = np.asarray(z, dtype=np.float32 if getattr(z, "ndim", 2) == 3 else np.int16)
             n_tok = int(data["mus"].shape[1])
@@ -189,9 +212,16 @@ def load_or_build_embeddings(
                 "z": z, "latent_dim": int(data["latent_dim"]),
                 "max_slices": n_tok if spatial else max_slices,
                 "representation": str(data["representation"]), "cache_path": path,
+                "cls": data["cls"] if "cls" in data.files else None,
+                "registers": data["registers"] if "registers" in data.files else None,
+                "slots": data["slots"] if "slots" in data.files else None,
+                "taskout": data["taskout"] if "taskout" in data.files else None,
             }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     enc = load_frozen_encoder(ckpt, device)
+    if is3d and eval_taps:
+        enc.tap_blocks = tuple(int(t) for t in eval_taps.split(","))
+        enc.tap_norm, enc.taps_only = True, taps_only
     print(f"[encoder] {enc.kind} representation={enc.representation} dim={enc.dim} window={win} ckpt={ckpt}")
     mus, mask, z = extract_volume_embeddings(
         enc, image_paths, ids, slices_root, device, max_slices,
@@ -201,10 +231,19 @@ def load_or_build_embeddings(
     z_save = np.asarray(z, dtype=np.float16 if spatial else np.int16)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(
-        volume_ids=np.asarray(ids), mus=mus.astype(np.float16), mask=mask, z=z_save,
+        volume_ids=np.asarray(ids), mus=mus.astype(np.float16, copy=False), mask=mask, z=z_save,
         latent_dim=np.int32(mus.shape[-1]), max_slices=np.int32(mus.shape[1] if spatial else max_slices),
         representation=np.asarray(enc.representation), window=np.asarray(win),
     )
+    cls = getattr(enc, "cls_bank", None)                     # CLS models: (N, D * n_windows)
+    if cls is not None:
+        payload["cls"] = cls.astype(np.float32)
+    regs = getattr(enc, "reg_bank", None)                    # register models: (N, R * D * n_windows)
+    if regs is not None:
+        payload["registers"] = regs.astype(np.float32)
+    slots, taskout = getattr(enc, "slot_bank", None), getattr(enc, "taskout_bank", None)   # multitask checkpoints
+    if slots is not None:
+        payload["slots"], payload["taskout"] = slots.astype(np.float32), taskout.astype(np.float32)
     # Uncompressed for the 32^3 grid: compressing ~20 GB of embeddings is slower than the encode.
     (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(path, **payload)
     return {
@@ -213,6 +252,10 @@ def load_or_build_embeddings(
         "latent_dim": int(mus.shape[-1]),
         "max_slices": int(mus.shape[1]) if spatial else max_slices,
         "representation": enc.representation, "cache_path": path,
+        "cls": cls,
+        "registers": regs,
+        "slots": slots,
+        "taskout": taskout,
     }
 
 

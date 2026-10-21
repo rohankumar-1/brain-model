@@ -74,6 +74,23 @@ def ct_native(vol: np.ndarray) -> tuple[np.ndarray, dict]:
     return vol.astype(np.float16), stats
 
 
+def mri_restat(z: np.ndarray, brain: np.ndarray) -> tuple[np.ndarray, float, float] | None:
+    """Re-standardise a *stored* robust-z MRI on a new brain mask: ``(z - m) / s`` with ``m``, ``s`` the median and
+    1.4826 MAD of ``z`` inside the brain, re-clipped, background kept at the floor. Returns (z', m, s), or None when
+    the mask has no foreground. Values already at the old clip limits stay saturated (the raw volume is gone)."""
+    fg = z > MRI_LO - 0.5
+    x = z[brain.astype(bool) & fg].astype(np.float32)
+    if not x.size:
+        return None
+    m = float(np.median(x))
+    s = float(1.4826 * np.median(np.abs(x - m)))
+    if s <= 0:
+        return None
+    out = np.clip((z.astype(np.float32) - m) / s, MRI_LO, MRI_HI)
+    out[~fg] = MRI_FLOOR
+    return out.astype(np.float16), m, s
+
+
 def mri_native(vol: np.ndarray, brain: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
     """Robust z (median / 1.4826 MAD), tissue in [-5, 20], background -6.
 

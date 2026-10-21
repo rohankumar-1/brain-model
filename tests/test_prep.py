@@ -7,6 +7,7 @@ import SimpleITK as sitk
 
 from brain.prep import centering, geometry, intensity, pipeline
 from brain.prep.sources import Case
+from brain.common.grid import DEPTH
 
 RNG = np.random.default_rng(0)
 
@@ -69,8 +70,8 @@ def test_target_grid_is_centered_and_contains_head():
     xy, _ = estimated_xy(img)
     g = geometry.target_grid(img, xy)
     raw = geometry.resample(img, g, -1024.0)
-    assert raw.shape == (128, 256, 256)
-    ys, xs = np.nonzero(raw[64] > 800)              # the skull shell (table, wire and ring are below 800 HU)
+    assert raw.shape == (DEPTH, 256, 256)
+    ys, xs = np.nonzero(raw[DEPTH // 2] > 800)              # the skull shell (table, wire and ring are below 800 HU)
     assert abs((xs.min() + xs.max()) / 2 - 127.5) < 8 and abs((ys.min() + ys.max()) / 2 - 127.5) < 8
     assert raw.min() >= -1024.0 - 1e-3          # padding never leaks below the floor
 
@@ -131,8 +132,8 @@ def test_pipeline_end_to_end_nifti(tmp_dir=None):
         path = Path(d) / "CT.nii.gz"
         sitk.WriteImage(ct_phantom((40.0, -30.0), spacing=(0.5, 0.5, 2.0), n=(400, 400, 100)), str(path))
         res = pipeline.process(Case("cq500", "phantom", "ct", path, (("brain", path),)))
-    assert res.vol.shape == (128, 256, 256) and res.vol.dtype == np.float16
-    assert res.masks["brain"].shape == (128, 256, 256)
+    assert res.vol.shape == (DEPTH, 256, 256) and res.vol.dtype == np.float16
+    assert res.masks["brain"].shape == (DEPTH, 256, 256)
     assert res.info["center_method"] == "brain" and res.info["shift_mm"] > 30
 
 

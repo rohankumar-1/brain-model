@@ -15,6 +15,7 @@ import os
 import signal
 import struct
 import zipfile
+import zlib
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -26,6 +27,15 @@ from brain.prep.fomo import FOMO_ROOT, PT_SHORT, pt_from_family
 from brain.prep.sources import DATASETS as POOL_DATASETS
 
 MAGIC_JLS = b"FOMOJLS1"
+MAGIC_JXL = b"FOMOJXL1"  # same container, JPEG-XL lossless slices: ~40% smaller than JPEG-LS on our MRI/CT, ~3x slower
+#                          to decode. Member names keep the ``.jls`` suffix; ``decode_volume`` reads either codec.
+JXL_EFFORT = 7
+CODECS = {
+    "jls": (MAGIC_JLS, imagecodecs.jpegls_encode, imagecodecs.jpegls_decode),
+    "jxl": (MAGIC_JXL, lambda a: imagecodecs.jpegxl_encode(a, lossless=True, effort=JXL_EFFORT, numthreads=1),
+            imagecodecs.jpegxl_decode),
+}
+DEFAULT_CODEC = "jxl"
 KIND_U16, KIND_I16, KIND_U8 = 1, 2, 3
 # Tiny families share one zip so pool is not one archive per PT.
 GROUP_SMALL = ("PT002_Nigerian_Clinical", "PT024_M4Raw")
@@ -78,7 +88,7 @@ def as_uint16_volume(arr: np.ndarray) -> tuple[np.ndarray, dict]:
     return np.ascontiguousarray(np.clip(scaled, 0, 65535).astype(np.uint16)), meta
 
 
-def encode_volume(vol: np.ndarray) -> bytes:
+def encode_volume(vol: np.ndarray, codec: str = DEFAULT_CODEC) -> bytes:
     vol = np.ascontiguousarray(vol)
     if vol.dtype == np.uint8:
         kind = KIND_U8
@@ -89,7 +99,8 @@ def encode_volume(vol: np.ndarray) -> bytes:
     axis = slice_axis(vol.shape)
     n = int(vol.shape[axis])
     buf = bytearray()
-    buf += MAGIC_JLS
+    magic, encode, _ = CODECS[codec]
+    buf += magic
     buf += struct.pack("<B", vol.ndim)
     buf += struct.pack("<" + "I" * vol.ndim, *[int(s) for s in vol.shape])
     buf += struct.pack("<BBI", axis, kind, n)
@@ -100,15 +111,93 @@ def encode_volume(vol: np.ndarray) -> bytes:
             sl = sl.reshape(1, -1)
         elif sl.ndim > 2:
             sl = sl.reshape(sl.shape[0], -1)
-        enc = imagecodecs.jpegls_encode(sl)
+        enc = encode(sl)
         buf += struct.pack("<I", len(enc))
         buf += enc
     return bytes(buf)
 
 
+def restore_array(vol: np.ndarray, meta: dict) -> np.ndarray:
+    """Invert ``as_uint16_volume`` so the NIfTI holds the original storage values (scl_slope/inter apply)."""
+    kind = meta.get("kind")
+    if kind == "int16":
+        return np.ascontiguousarray(vol.astype(np.int32) - int(meta.get("bias") or 32768), dtype=np.int16)
+    if kind == "uint16_quant":
+        lo, hi = float(meta["quant_lo"]), float(meta["quant_hi"])
+        return np.ascontiguousarray(vol.astype(np.float32) / 65535.0 * (hi - lo) + lo)
+    return np.ascontiguousarray(vol, dtype=np.uint16)
+
+
+def in_subset(member: str, subset: tuple[int, int] | None) -> bool:
+    """Shard ``i`` of ``n`` by subject folder (``PT/<subject>/...``): a subject's sessions and sequences stay together."""
+    if subset is None:
+        return True
+    i, n = subset
+    parts = member.split("/")
+    key = parts[1] if len(parts) > 2 else member
+    return zlib.crc32(key.encode()) % n == i
+
+
+def unpack_jls_zip(zpath: Path, dest_root: Path, *, workers: int = 8,
+                   subset: tuple[int, int] | None = None) -> tuple[int, int]:
+    """Write ``.nii.gz`` under ``dest_root`` from a JPEG-LS zip (skip existing); ``subset=(i, n)`` takes one
+    subject shard."""
+    dest_root = Path(dest_root)
+    dest_root.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zpath, "r") as zf:
+        members = [n for n in zf.namelist() if n.endswith(".jls") and not n.endswith("/") and in_subset(n, subset)]
+    jobs = []
+    for name in members:
+        out = dest_root / Path(name[: -4] + ".nii.gz")  # ``a/b/mprage.jls`` -> ``a/b/mprage.nii.gz``
+        if out.exists() and out.stat().st_size > 1000:
+            continue
+        jobs.append((str(zpath), name, str(out)))
+    print(f"[archive] unpack {zpath.name}: {len(members)} volumes, {len(jobs)} to write -> {dest_root}", flush=True)
+    if not jobs:
+        return 0, 0
+    n_ok = n_err = 0
+    with ProcessPoolExecutor(max_workers=max(1, workers)) as ex:
+        futs = [ex.submit(_unpack_one, *job) for job in jobs]
+        for i, fut in enumerate(as_completed(futs), 1):
+            try:
+                fut.result()
+                n_ok += 1
+            except Exception as e:
+                n_err += 1
+                if n_err <= 8:
+                    print(f"[archive] unpack ERR {type(e).__name__}: {e}", flush=True)
+            if i % 100 == 0 or i == len(futs):
+                print(f"[archive] unpack {i}/{len(futs)} ok={n_ok} err={n_err}", flush=True)
+    return n_ok, n_err
+
+
+def _unpack_one(zpath: str, member: str, dest: str) -> None:
+    dest_p = Path(dest)
+    dest_p.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zpath, "r") as zf:
+        blob = zf.read(member)
+        raw_meta = zf.read(member + ".json")
+    meta = json.loads(raw_meta)
+    vol = restore_array(decode_volume(blob), meta)
+    affine = np.array(meta["affine"], dtype=np.float64)
+    # nib.save keys off the suffix; ``.nii.gz.partial.PID`` is not a NIfTI path.
+    tmp = dest_p.parent / f"{dest_p.name}.partial.{os.getpid()}.nii.gz"
+    img = nib.Nifti1Image(vol, affine)
+    slope, inter = meta.get("slope"), meta.get("inter")
+    if slope is not None or inter is not None:
+        img.header.set_slope_inter(float(slope or 1.0), float(inter or 0.0))
+    try:
+        nib.save(img, str(tmp))
+        os.replace(tmp, dest_p)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def decode_volume(blob: bytes) -> np.ndarray:
-    if blob[:8] != MAGIC_JLS:
-        raise ValueError("not FOMOJLS1")
+    decode = next((d for magic, _, d in CODECS.values() if blob[:8] == magic), None)
+    if decode is None:
+        raise ValueError(f"unknown volume container {blob[:8]!r}")
     off = 8
     ndim = blob[off]
     off += 1
@@ -121,7 +210,7 @@ def decode_volume(blob: bytes) -> np.ndarray:
     for _ in range(n):
         (ln,) = struct.unpack_from("<I", blob, off)
         off += 4
-        slices.append(imagecodecs.jpegls_decode(blob[off:off + ln]))
+        slices.append(decode(blob[off:off + ln]))
         off += ln
     vol = np.stack(slices, axis=axis)
     return np.ascontiguousarray(vol, dtype=dtype).reshape(shape)
@@ -416,6 +505,44 @@ def pack_tree(src: Path, dest: Path, workers: int, delete_source: bool) -> None:
         _rmtree(src)
 
 
+def tree_member_name(src: Path, path: Path) -> str:
+    """Member name ``pack_tree`` gives ``path`` (relative to the packed tree, suffix -> ``.jls``)."""
+    rel = path.relative_to(src).as_posix()
+    for suf in (".nii.gz", ".nii", ".img"):
+        if rel.endswith(suf):
+            return rel[: -len(suf)] + ".jls"
+    return rel + ".jls"
+
+
+def drop_if_archived(tree: Path, zpath: Path, names: dict[Path, str], apply: bool) -> bool:
+    """Delete ``tree`` only when ``zpath`` holds a member (and its metadata) for every image under it."""
+    if not zpath.is_file():
+        print(f"[archive] KEEP {tree}: archive {zpath} missing", flush=True)
+        return False
+    with zipfile.ZipFile(zpath) as zf:
+        have = set(zf.namelist())
+    missing = [p for p, n in names.items() if n not in have or n + ".json" not in have]
+    if missing or not names:
+        print(f"[archive] KEEP {tree}: {len(missing)} of {len(names)} images not in {zpath.name}"
+              + (f" (e.g. {missing[0]})" if missing else ""), flush=True)
+        return False
+    print(f"[archive] {tree}: all {len(names)} images in {zpath.name}" + ("; deleting" if apply else ""), flush=True)
+    if apply:
+        _rmtree(tree)
+    return True
+
+
+def drop_verified_extracts(pts: list[str], extract_root: Path, pool_root: Path, apply: bool) -> bool:
+    ok = True
+    for pt in pts:
+        tree = extract_root / pt
+        if not tree.is_dir():
+            continue
+        names = {p: member_name(pt, extract_root, p) for p in nifti_paths(extract_root, pt)}
+        ok &= drop_if_archived(tree, archive_for_pt(pt, pool_root), names, apply)
+    return ok
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--families", default="", help="comma list of fomo_<short> or PT names")
@@ -424,9 +551,34 @@ def main() -> None:
     ap.add_argument("--dest", type=Path, default=None)
     ap.add_argument("--workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
     ap.add_argument("--delete-extracted", action="store_true")
+    ap.add_argument("--unpack", type=Path, default=None, help="JPEG-LS zip to restore as NIfTI under --dest")
+    ap.add_argument("--subset", default=None, help="with --unpack: i/n subject shard (crc32 of the subject folder)")
+    ap.add_argument("--drop-verified", action="store_true",
+                    help="delete extracts (--families, or --tree with its --dest zip) whose images are all archived")
+    ap.add_argument("--dry-run", action="store_true", help="with --drop-verified: report only")
     a = ap.parse_args()
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)
+    if a.unpack:
+        dest = a.dest or (Path(a.unpack).with_suffix("").with_suffix("") / "unpacked")
+        subset = tuple(int(v) for v in a.subset.split("/")) if a.subset else None
+        n_ok, n_err = unpack_jls_zip(a.unpack, dest, workers=a.workers, subset=subset)
+        print(f"[archive] unpack done ok={n_ok} err={n_err}", flush=True)
+        if n_err:
+            raise SystemExit(n_err)
+        return
+    if a.drop_verified:
+        if a.tree:
+            if a.dest is None:
+                raise SystemExit("--drop-verified --tree needs --dest (its archive)")
+            names = {p: tree_member_name(a.tree, p) for p in imaging_paths(a.tree)}
+            ok = drop_if_archived(a.tree, a.dest, names, not a.dry_run)
+        else:
+            ok = drop_verified_extracts(families_to_pts([x for x in a.families.split(",") if x.strip()]),
+                                        a.extract_root, a.dest or pool_fomo(), not a.dry_run)
+        if not ok:
+            raise SystemExit(2)
+        return
     if a.tree:
         dest = a.dest or (a.tree.parent / (a.tree.name + ".jls.zip"))
         print(f"[archive] tree={a.tree} dest={dest} workers={a.workers}", flush=True)

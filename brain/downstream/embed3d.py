@@ -12,6 +12,7 @@ from brain.data.gate import token_keep
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.models.vit3d import VIT_SIZES, BrainEncoder
 from brain.common.windowing import asinh_window, windows_for
+from brain.common.grid import GRID_XYZ, PATCH_XYZ
 
 
 DEFAULT_GATE = {"ct_hu": (-500.0, 200.0), "mri_lo": -5.5}
@@ -70,6 +71,16 @@ class FrozenEncoder3D:
         self.gate = dict(DEFAULT_GATE)
         # Blocks whose outputs are returned (concatenated before the final tokens) by embed_tokens.
         self.tap_blocks: tuple[int, ...] = ()
+        self.tap_norm = False          # layer-normalise tapped (pre-norm residual) features, as the final tokens are
+        self.taps_only = False         # drop the final tokens (and the CLS) and keep only the tapped blocks
+        # CLS embeddings (models with a CLS token): of the last single-pass encode, per window of the last
+        # ``embed_windows`` call, and per volume of the last ``extract_volume_embeddings_3d`` run.
+        self._last_cls: torch.Tensor | None = None
+        self.last_cls: torch.Tensor | None = None
+        self.cls_bank: np.ndarray | None = None
+        self._last_reg: torch.Tensor | None = None       # register outputs, (B, R, D), of the last encode
+        self.last_reg: torch.Tensor | None = None        # (n_windows, R, D) for the last volume
+        self.reg_bank: np.ndarray | None = None          # (N, n_windows * R * D) over a whole extraction
 
     @torch.no_grad()
     def embed_tokens(
@@ -91,6 +102,8 @@ class FrozenEncoder3D:
         """
         use_grid = fine_grid_on() if fine_grid is None else fine_grid
         use_pool = fine_pool_on() if fine_pool is None else fine_pool
+        if fine_pool is None and getattr(self, "force_fine_pool", False):
+            use_pool = True
         if use_grid and window_xyz is None:
             return self._embed_fine_native(vol_xyz, c, w, modality)
         if use_pool and window_xyz is None:
@@ -148,7 +161,12 @@ class FrozenEncoder3D:
         amp = dict(device_type=x.device.type, dtype=torch.bfloat16, enabled=x.is_cuda)
         with torch.autocast(**amp):
             out = self.model(view, coords, pmm, keep=keep, patch_xyz=self.patch_xyz, taps=self.tap_blocks)
-        tok = torch.cat([*out["taps"], out["tokens"]], dim=-1)
+        taps = [t.float() for t in out["taps"]]                 # bf16 under autocast; float32 like the final tokens
+        if self.tap_norm:
+            taps = [torch.nn.functional.layer_norm(t, t.shape[-1:]) for t in taps]
+        tok = torch.cat(taps if self.taps_only else [*taps, out["tokens"]], dim=-1)
+        self._last_cls = None if self.taps_only else out.get("cls")
+        self._last_reg = out.get("registers")
         return tok, coords, out["patch"]
 
     def _embed_patch_batch(self, x, starts, size, keep):
@@ -214,9 +232,16 @@ class FrozenEncoder3D:
         if grid is None:
             grid = fine_grid_on()
         if tiled or fine or grid or len(windows) <= 1:
+            clses, regs = [], []
             for c, w in windows:
+                self._last_cls = self._last_reg = None
                 seq, xyz, fg = self.embed_tokens(vol_xyz, c, w, modality=modality, **kwargs)
                 seqs.append(seq)
+                single = not (tiled or fine or grid)              # a tiled encode has no single CLS / registers
+                clses.append(self._last_cls[0] if single and self._last_cls is not None else None)
+                regs.append(self._last_reg[0] if single and self._last_reg is not None else None)
+            self.last_cls = torch.stack(clses) if clses and all(x is not None for x in clses) else None
+            self.last_reg = torch.stack(regs) if regs and all(x is not None for x in regs) else None
             return torch.stack(seqs), xyz, fg
         native = vol_xyz.float()
         cropped, start, size = _crop_to_patch(native, self.patch_xyz)
@@ -224,6 +249,8 @@ class FrozenEncoder3D:
         xs = torch.stack([asinh_window(cropped, c, w) for c, w in windows])
         keep = fg.unsqueeze(0).expand(len(windows), -1).contiguous()
         toks, coords, _ = self._encode_batch(xs, (start,) * len(windows), size, keep)
+        self.last_cls = self._last_cls                      # (n_windows, D) or None
+        self.last_reg = self._last_reg                      # (n_windows, R, D) or None
         lo, hi = coords[0].min(dim=0).values, coords[0].max(dim=0).values
         xyz = (coords[0] - lo) / (hi - lo).clamp_min(1e-6)
         return toks, xyz, fg
@@ -279,7 +306,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         dim = int(state["patch_embed.proj.weight"].shape[0])
         size = next(k for k, spec in VIT_SIZES.items() if spec["embed_dim"] == dim)
     patch = tuple(int(x) for x in (v.get("patch_xyz") or v.get("global_patch_xyz") or (16, 16, 8)))
-    native = tuple(int(x) for x in (cfg.get("data") or {}).get("volume_size_xyz", (256, 256, 128)))
+    native = tuple(int(x) for x in (cfg.get("data") or {}).get("volume_size_xyz", GRID_XYZ))
     spacing = tuple(float(x) for x in (cfg.get("data") or {}).get("default_spacing_mm", (1.0, 1.0, 1.0)))
     projector_bn = any("projector" in str(k) and str(k).endswith("running_mean") for k in state)
     proj_norm = "batch" if projector_bn else str(m.get("proj_norm", "layer"))
@@ -290,11 +317,18 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         checkpoint_blocks=False, proj_norm=proj_norm,
         dense_dim=int(state["token_head.net.6.weight"].shape[0]) if "token_head.net.6.weight" in state else 0,
         dense_hidden=int(m.get("dense_hidden", 512)),
+        n_cls=int(m.get("n_cls", 0)), n_registers=int(m.get("n_registers", 0)),
+        mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"),
     ).to(device)
     if pretrained:
         net.load_state_dict(state)
     net.eval().requires_grad_(False)
-    enc = FrozenEncoder3D(net, patch, native, spacing)
+    # A model trained on 8 x 8 x 4 tokens (MAE) is read out on the usual 16 x 16 x 8 grid: it encodes at its own patch
+    # in training-size windows and the 2 x 2 x 2 fine tokens under each grid position are averaged (``fine_pool``),
+    # so every frozen head, cache and probe works unchanged.
+    native_fine = patch == fine_patch_xyz(PATCH_XYZ)
+    enc = FrozenEncoder3D(net, PATCH_XYZ if native_fine else patch, native, spacing)
+    enc.force_fine_pool = native_fine
     gate = v.get("gate") or (cfg.get("loss") or {}).get("parenchyma")
     if isinstance(gate, dict):
         enc.gate = gate
@@ -345,24 +379,48 @@ def extract_volume_embeddings_3d(
     modalities = modalities or {}
     sample_mod = modalities.get(volume_ids[0], "mri") if volume_ids else "mri"
     embs = coords = mask = None
+    cls_bank = reg_bank = slot_bank = taskout_bank = None
     for i, vid in enumerate(volume_ids):
         vol = read_volume_xyz(resolve_path(slices_root, image_paths[vid]))
         x = torch.from_numpy(np.ascontiguousarray(vol)).to(device)
         mod = modalities.get(vid, sample_mod)
         wins = windows_for(window, mod)
-        seqs, xyz, fg = enc.embed_windows(x, wins, modality=mod)
+        # BRAIN_EVAL_TILE=1: encode as overlapping training-size windows (128 x 128 x 64 mm, half overlap) instead of
+        # the whole volume at once, so attention sees the context size the encoder was trained on
+        tile = os.environ.get("BRAIN_EVAL_TILE", "") == "1"
+        seqs, xyz, fg = enc.embed_windows(x, wins, modality=mod,
+                                          **({"window_xyz": (128, 128, 64), "stride_xyz": (64, 64, 32)} if tile else {}))
         feat = torch.cat(list(seqs), dim=-1)
         if embs is None:
             n, t, d = len(volume_ids), feat.shape[0], feat.shape[1]
-            dtype = np.float16 if t > 8192 else np.float32
+            # float16 for the fine grid or a large task (RSNA: 25k x 5120 x 384 would be ~200 GB as float32)
+            dtype = np.float16 if t > 8192 or n * t * d * 4 > 16 * 2**30 else np.float32
             embs = np.zeros((n, t, d), dtype=dtype)
             coords = np.zeros((n, t, 3), dtype=np.float32)
             mask = np.ones((n, t), dtype=bool)
         embs[i] = feat.detach().cpu().numpy()
+        if enc.last_cls is not None:                        # CLS models: one global vector per volume (windows concatenated)
+            c = enc.last_cls.reshape(-1).float().cpu().numpy()
+            if cls_bank is None:
+                cls_bank = np.zeros((len(volume_ids), c.shape[0]), dtype=np.float32)
+            cls_bank[i] = c
+        if enc.last_reg is not None:                        # register models: all registers, windows concatenated
+            r = enc.last_reg.reshape(-1).float().cpu().numpy()
+            if reg_bank is None:
+                reg_bank = np.zeros((len(volume_ids), r.shape[0]), dtype=np.float32)
+            reg_bank[i] = r
+        if getattr(enc, "slot_features", None) is not None:  # multitask checkpoints: task slots and outputs
+            sl, to = enc.slot_features(x, mod)
+            if slot_bank is None:
+                slot_bank = np.zeros((len(volume_ids), sl.shape[0]), dtype=np.float32)
+                taskout_bank = np.zeros((len(volume_ids), to.shape[0]), dtype=np.float32)
+            slot_bank[i], taskout_bank[i] = sl, to
         coords[i] = xyz.detach().cpu().numpy()
         if fg is not None:
             mask[i] = fg.detach().cpu().numpy()
         if i == 0 or (i + 1) % 50 == 0 or i + 1 == len(volume_ids):
             print(f"[embed3d] {i + 1}/{len(volume_ids)} volumes window={window} n_win={len(wins)} "
                   f"tokens={feat.shape[0]} patch={enc.patch_xyz} native={tuple(vol.shape)}")
+    enc.cls_bank, enc.reg_bank = cls_bank, reg_bank
+    enc.slot_bank, enc.taskout_bank = slot_bank, taskout_bank
     return embs, mask, coords

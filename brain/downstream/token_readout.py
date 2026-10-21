@@ -1,4 +1,4 @@
-"""Spatial readouts for a cubic token grid (16³ coarse or 32³ native fine).
+"""Spatial readouts for the encoder token grid (20 x 16 x 16 coarse or 40 x 32 x 32 tiled fine; ``brain.common.grid``).
 
 The encoder returns one vector per patch, flattened (Z, Y, X).
 A single mean over all tokens erases which plane the signal came from.
@@ -14,24 +14,22 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.decomposition import PCA
+from brain.common.grid import DEPTH, FINE_TOKEN_GRID, TOKEN_GRID
 
-# Conv flatten is (Z, Y, X) with X fastest. 256/16 × 256/16 × 128/8.
-GRID_ZYX = (16, 16, 16)
-FINE_GRID_ZYX = (32, 32, 32)
-NATIVE_Z = 128
+# Conv flatten is (Z, Y, X) with X fastest: 160/8 x 256/16 x 256/16.
+GRID_ZYX = TOKEN_GRID
+FINE_GRID_ZYX = FINE_TOKEN_GRID
+NATIVE_Z = DEPTH
 PCA_DIM = 16
 GRID_BINS = 4
 
 
 def token_grid_zyx(n_tok: int) -> tuple[int, int, int] | None:
-    """Cubic (Z, Y, X) grid for a flattened token count, or None if it is not a cube we know."""
+    """(Z, Y, X) grid for a flattened token count (coarse or fine full-volume grid), or None if it is neither."""
     n = int(n_tok)
     for g in (GRID_ZYX, FINE_GRID_ZYX):
         if int(np.prod(g)) == n:
             return g
-    side = int(round(n ** (1.0 / 3.0)))
-    if side > 0 and side ** 3 == n:
-        return (side, side, side)
     return None
 
 

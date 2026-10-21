@@ -29,6 +29,10 @@ from brain.common.paths import DATASETS, SCRATCH
 from brain.prep import store
 from brain.prep.fomo import CONTRAST_SUFFIXES, load_holdout_families, strip_contrast
 DEFAULT_STORE = SCRATCH / "data" / "processed" / "slices_zarr"
+SSL_QC_DROP_DATASETS = ("rsna_ich",)  # read from DICOM series by brain.prep.dicom
+# Whole datasets kept out of every training pool (SSL and multitask), stay in the store: HBN proton-density scans,
+# many of them noise / artefact with no brain contrast (SynthSeg QC passed 61%, vs 99% for HBN T1w), 2026-10-21.
+POOL_DROP_DATASETS = ("fomo_hbn_pd",)
 V3_VOLUMES = SCRATCH / "data" / "processed" / "v3_index_backup" / "volumes.csv"
 BHSD_ZIP = DATASETS / "bhsd" / "label_192.zip"
 SEED, TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 42, 0.75, 0.10, 0.15
@@ -37,7 +41,7 @@ SPLIT_RANK = {"test": 0, "val": 1, "train": 2}  # lower wins when merging inheri
 
 # Entire families stay out of the pretraining index (brain.downstream still gets train/val/test).
 HELD_OUT = {"cq500", "isles22", "atlas", "wmh", "isles24", "instance", "aisd", "brainmetshare",
-            "msd_braintumor"}
+            "msd_braintumor", "ms3seg", "valdo"}
 
 
 def all_held_out() -> set[str]:
@@ -75,6 +79,10 @@ def dataset_family(dataset: str) -> str:
         return "isles24"
     if ds.startswith("brainmetshare"):
         return "brainmetshare"
+    if ds.startswith("ms3seg"):
+        return "ms3seg"
+    if ds.startswith("valdo"):
+        return "valdo"
     return ds
 
 
@@ -86,6 +94,8 @@ def contrast_of(dataset: str, case_id: str) -> str:
         return "t1"
     if dataset.endswith("_t2"):
         return "t2"
+    if dataset.endswith("_t2s"):
+        return "t2s"
     if dataset.endswith(("_dwi", "_adc", "_flair", "_ncct", "_cta")):
         return dataset.rsplit("_", 1)[1]
     return ""
@@ -118,6 +128,11 @@ def isles22_subject(case_id: str) -> str:
     return case_id.rsplit("_", 1)[0]  # sub-strokecase0002_dwi
 
 
+def valdo_subject(case_id: str) -> str:
+    """VALDO case ids are ``<task>_<subject>`` (``t3_sub-101``); the subject is shared across that task's sequences."""
+    return case_id.split("_", 1)[1] if case_id[:1] == "t" and "_" in case_id else case_id
+
+
 def dedup_key(dataset: str, case_id: str) -> str:
     fam = dataset_family(dataset)
     if fam.startswith("brats"):
@@ -138,6 +153,10 @@ def dedup_key(dataset: str, case_id: str) -> str:
         return "wmh:" + case_id
     if fam == "atlas":
         return "atlas:" + case_id
+    if fam == "ms3seg":
+        return "ms3seg:" + case_id
+    if fam == "valdo":
+        return "valdo:" + valdo_subject(case_id)
     if fam.startswith("fomo_"):
         cid = str(case_id)
         for c in CONTRAST_SUFFIXES:
@@ -308,16 +327,27 @@ def index_ssl_volumes(root: Path, ssl_vols: pd.DataFrame, workers: int) -> tuple
 # columns for resolution-matching augmentation; the registration columns are for QC and for filtering analyses.
 NATIVE_COLS = ("src_dx", "src_dy", "src_dz", "src_nx", "src_ny", "src_nz", "thick_mm", "thick_axis", "aniso",
                "reg_method", "reg_ok", "reg_rot_deg", "reg_scale", "reg_aniso", "reg_mi", "brain_method", "brain_frac",
-               "brain_cover", "stripped_input")
+               "brain_cover", "stripped_input", "brain_ok", "brain_dice_tpl", "reg_template", "brain_head_ratio", "reg_mi", "reg_backend")
 
 
-def load_ok_manifests(root: Path) -> pd.DataFrame:
+def _recency(r: dict) -> tuple:
+    """Newer manifest rows win: by ``written_at``; rows from before timestamps prefer the one with a stored transform."""
+    return (r.get("written_at", 0), r.get("reg_affine") is not None)
+
+
+def load_ok_manifests(root: Path, pattern: str = "manifest_*.jsonl") -> pd.DataFrame:
     rows = {}
-    for f in sorted(root.glob("manifest_*.jsonl")):
+    for f in sorted(root.glob(pattern)):
         for line in open(f):
             r = json.loads(line)
             r["case_id"] = str(r["case_id"])
-            rows[(r["dataset"], r["case_id"])] = r
+            key = (r["dataset"], r["case_id"])
+            if r.get("skipped_existing") and key in rows:  # a resume marker carries no metadata; keep the full row
+                continue
+            # a rerun may re-shard cases into an earlier-sorted manifest: the most recently written full row wins
+            if key in rows and _recency(r) < _recency(rows[key]):
+                continue
+            rows[key] = r
     ok = [r for r in rows.values() if r.get("status") == "ok"]
     return pd.DataFrame(ok)
 
@@ -328,14 +358,13 @@ def mask_rel(root: Path, folder: str, case_id: str, name: str) -> str:
 
 
 def folder_of(dataset: str) -> str:
-    """BraTS mpMRI contrasts share a cohort folder; FOMO contrasts share ``fomo_<short>``.
+    """Store folder of a dataset: the same rule ``sources.Case.folder`` uses when writing, so paths always resolve.
 
-    ISLES/WMH keep one folder per sequence (``wmh_flair`` must not collapse to ``wmh``).
+    A trailing contrast token is stripped (``brats2023_gli_t1n`` -> ``brats2023_gli``, ``fomo_hbn_t1w`` ->
+    ``fomo_hbn``, ``wmh_flair`` -> ``wmh``); other sequences keep their own folder (``wmh_t1``, ``isles22_dwi``).
     """
     ds = str(dataset)
-    if ds.startswith("fomo_"):
-        return strip_contrast(ds)
-    for c in ("t1n", "t1c", "t2w", "t2f"):
+    for c in CONTRAST_SUFFIXES:
         if ds.endswith("_" + c):
             return ds[: -len(c) - 1]
     return ds
@@ -405,17 +434,18 @@ def assert_no_leak(vols: pd.DataFrame, slices: pd.DataFrame, bhsd: set[str]) -> 
     for dk, g in in_ssl.groupby("dedup_key"):
         assert g["split"].nunique() == 1, dk
     # multi-sequence families share a split
-    for fam in ("ixi", "isles22", "wmh", "isles24", "brats_gli", "brats_men", "brats_goat", "oasis2"):
+    for fam in ("ixi", "isles22", "wmh", "isles24", "brats_gli", "brats_men", "brats_goat", "oasis2", "ms3seg", "valdo"):
         sub = vols[vols.dataset_family == fam]
         bad = sub.groupby("dedup_key")["split"].nunique()
         assert (bad == 1).all(), f"{fam} split conflict: {list(bad[bad > 1].index)[:5]}"
     print("[leak] ok: no subject in two SSL splits; BHSD and held-out families absent from slices.parquet", flush=True)
 
 
-def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False) -> None:
+def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
+          manifests: str = "manifest_*.jsonl", inherit_splits: Path | None = None, slice_table: bool = True) -> None:
     bhsd = bhsd_case_ids()
     print(f"[bhsd] {len(bhsd)} RSNA studies with hemorrhage masks", flush=True)
-    man = load_ok_manifests(root)
+    man = load_ok_manifests(root, manifests)
     recs = []
     for r in man.itertuples(index=False):
         ds, cid, mod = r.dataset, str(r.case_id), r.modality
@@ -443,14 +473,17 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False)
             "role": "heldout" if held or is_bhsd else "pretrain_eval",
             "mask_seg": mask_rel(root, folder, cid.removesuffix("-t1n") if ds.startswith("brats") else cid, "seg"),
             "mask_ich": mask_rel(root, folder, cid, "ICH"),
-            "mask_brain": mask_rel(root, folder, cid, "brain"),
+            # format 6: the brain mask is the ``brain`` array inside the image zip
+            "mask_brain": img.relative_to(root).as_posix()
+            if str(getattr(r, "brain_method", "none")) not in ("none", "nan", "None", "") else "",
             **{c: getattr(r, c, None) for c in NATIVE_COLS},
             "mask_lesion": mask_rel(root, folder, cid, "lesion"),
             "mask_lvo": mask_rel(root, folder, cid, "lvo"),
             "mask_cow": mask_rel(root, folder, cid, "cow"),
         })
     vols = pd.DataFrame(recs)
-    old_vols = pd.read_csv(root / "volumes.csv", low_memory=False) if keep_ssl_index and (root / "volumes.csv").exists() else None
+    old_path = Path(inherit_splits) if inherit_splits else (root / "volumes.csv" if keep_ssl_index else None)
+    old_vols = pd.read_csv(old_path, low_memory=False) if old_path is not None and old_path.exists() else None
     if old_vols is not None:
         vols = inherit_current_splits(vols, old_vols)
     else:
@@ -460,14 +493,33 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False)
     ssl_keep = ~vols.duplicated(["dedup_key", "contrast", "modality"], keep="first")
     vols["ssl_keep"] = ssl_keep.to_numpy()
     vols["pretrain"] = (~vols["held_out"]) & (~vols["bhsd"])
-    vols["has_mask"] = vols.filter(like="mask_").astype(str).ne("").any(axis=1)
+    # Volumes that fail brain-mask QC in datasets read from DICOM series are kept out of SSL (not out of downstream
+    # tasks): there it mostly means a mis-assembled series (duplicate / mixed-thickness slices -> stripes) or an
+    # uncorrected gantry-tilt shear that registration could not remove (see docs/prep.md, "RSNA DICOM assembly").
+    failed_qc = vols.get("brain_ok", pd.Series(True, index=vols.index)).astype(str).str.lower().eq("false")
+    vols["ssl_qc_drop"] = vols["dataset"].isin(SSL_QC_DROP_DATASETS) & failed_qc
+    vols["pretrain"] &= ~vols["ssl_qc_drop"]
+    print(f"[ssl] QC drop (DICOM-assembled, brain_ok=False): {int(vols.ssl_qc_drop.sum())} volumes", flush=True)
+    vols["pool_drop"] = vols["dataset"].isin(POOL_DROP_DATASETS)
+    vols["pretrain"] &= ~vols["pool_drop"]
+    print(f"[ssl] dataset drop {POOL_DROP_DATASETS}: {int(vols.pool_drop.sum())} volumes", flush=True)
+    # label masks only: mask_brain (the brain array inside the image zip) is not a downstream label
+    vols["has_mask"] = vols.filter(like="mask_").drop(columns=["mask_brain"], errors="ignore").astype(str).ne("").any(axis=1)
 
     ssl_vols = vols[vols.pretrain & vols.ssl_keep].copy()
     print(f"[ssl] volumes eligible={len(ssl_vols)} / {len(vols)} (BHSD {int(vols.bhsd.sum())}, held-out {int(vols.held_out.sum())})", flush=True)
 
     dropped = None
-    write_ssl = not keep_ssl_index
-    if keep_ssl_index:
+    write_ssl = not keep_ssl_index and slice_table
+    if not slice_table:
+        # 3D pretraining and the downstream suite read volumes.csv only; the per-slice table (which reads every SSL
+        # volume) is for the 2D trainers. The leak check runs on the SSL volume rows instead.
+        slices = ssl_vols.loc[ssl_vols["split"].isin(["train", "val"]), ["volume_id", "dedup_key", "split", "modality"]]
+        for stale in ("slices.parquet", "slices.csv", "manifest.csv", "empty_slice_removals.csv"):
+            if (root / stale).exists():
+                (root / stale).unlink()
+                print(f"[ssl] removed stale {stale} (no slice table this build)", flush=True)
+    elif keep_ssl_index:
         old_vols_path, old_slices_path = root / "volumes.csv", root / "slices.parquet"
         if not old_vols_path.exists() or not old_slices_path.exists():
             raise SystemExit("--keep-ssl-index needs existing volumes.csv and slices.parquet")
@@ -531,7 +583,7 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False)
 
     print("\n[volumes] by family × split:")
     print(vols.groupby(["dataset_family", "split"]).size().unstack(fill_value=0).to_string())
-    print("\n[ssl slices] by split × modality:")
+    print("\n[ssl slices] by split × modality:" if slice_table else "\n[ssl volumes] by split × modality:")
     print(slices.groupby(["split", "modality"]).size().to_string())
     print(f"\n[ok] volumes={len(vols)} subjects={len(subj)} ssl_slices={len(slices)}", flush=True)
 
@@ -543,8 +595,14 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
     ap.add_argument("--keep-ssl-index", action="store_true",
                     help="keep existing SSL slices; index only newly added SSL volumes")
+    ap.add_argument("--manifests", default="manifest_*.jsonl", help="manifest glob under --root (e.g. manifest_v6_*)")
+    ap.add_argument("--inherit-splits", type=Path, default=None,
+                    help="volumes.csv whose subject splits are kept (new subjects are assigned fresh)")
+    ap.add_argument("--no-slices", action="store_true",
+                    help="skip the 2D slice table (reads every SSL volume); volumes.csv is all the 3D code needs")
     a = ap.parse_args()
-    build(a.root, a.v3_volumes, a.workers, keep_ssl_index=a.keep_ssl_index)
+    build(a.root, a.v3_volumes, a.workers, keep_ssl_index=a.keep_ssl_index, manifests=a.manifests,
+          inherit_splits=a.inherit_splits, slice_table=not a.no_slices)
 
 
 if __name__ == "__main__":

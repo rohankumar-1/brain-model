@@ -58,6 +58,14 @@ WINDOW_MIXES = {
         "mri_tissue_c": (0.3, 0.5),
         "mri_tissue_w_log": (math.log(1.5), 0.25),
     },
+    # As "brain", plus a small bone share (3%): frozen evaluation feeds CT through a bone window too (MULTI), and
+    # skull / fracture findings need bone contrast, so the encoder should have seen it. Still no wild tail.
+    "brain_bone": {
+        "ct_p": (0.54, 0.25, 0.15, 0.03, 0.03, 0.0),
+        "mri_tissue_p": 0.85,
+        "mri_tissue_c": (0.3, 0.5),
+        "mri_tissue_w_log": (math.log(1.5), 0.25),
+    },
 }
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from brain.prep.index import (
     HELD_OUT,
     SPLIT_RANK,
@@ -51,11 +53,15 @@ def test_piop1_and_piop2_do_not_collide():
     assert volume_id("piop1", "sub-0001", "mri") != volume_id("piop2", "sub-0001", "mri")
 
 
-def test_folder_of_keeps_isles_wmh_sequence_dirs():
+def test_folder_of_matches_the_writer():
+    from brain.prep.sources import Case
+    for ds in ("brats2023_gli_t1n", "isles22_flair", "isles22_dwi", "wmh_flair", "wmh_t1", "brainmetshare_flair",
+               "brainmetshare_t1_gd", "fomo_hbn_pd", "brats_goat_t2f", "aisd", "rsna_ich"):
+        assert folder_of(ds) == Case(ds, "x", "mri", Path("x")).folder, ds
     assert folder_of("brats2023_gli_t1n") == "brats2023_gli"
-    assert folder_of("isles22_flair") == "isles22_flair"
+    assert folder_of("isles22_flair") == "isles22"
     assert folder_of("isles22_dwi") == "isles22_dwi"
-    assert folder_of("wmh_flair") == "wmh_flair"
+    assert folder_of("wmh_flair") == "wmh"
     assert folder_of("wmh_t1") == "wmh_t1"
     assert folder_of("aisd") == "aisd"
     assert folder_of("fomo_hbn_t1w") == "fomo_hbn"

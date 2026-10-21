@@ -39,26 +39,67 @@ class Attention(nn.Module):
         x: torch.Tensor,
         coords_mm: torch.Tensor,
         attn_mask: torch.Tensor | None = None,
+        n_prefix: int = 0,
     ) -> torch.Tensor:
+        """``x`` is (B, n_prefix + N, C); ``coords_mm`` (B, N, 3) are the patch tokens' centers. Prefix tokens
+        (CLS, registers) have no position: RoPE rotates only the patch tokens."""
         b, n, c = x.shape
         q, k, v = self.qkv(x).reshape(b, n, 3, self.heads, c // self.heads).permute(2, 0, 3, 1, 4)
         q, k = self.q_norm(q).to(v.dtype), self.k_norm(k).to(v.dtype)
-        q, k = self.rope.rotate(q, k, coords_mm)
+        if n_prefix:
+            qr, kr = self.rope.rotate(q[:, :, n_prefix:], k[:, :, n_prefix:], coords_mm)
+            q, k = torch.cat([q[:, :, :n_prefix], qr], dim=2), torch.cat([k[:, :, :n_prefix], kr], dim=2)
+        else:
+            q, k = self.rope.rotate(q, k, coords_mm)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         return self.proj(out.transpose(1, 2).reshape(b, n, c))
 
 
+class SwiGLU(nn.Module):
+    """Gated MLP (Shazeer 2020) as in Primus / LLaMA; hidden width 2/3 of the GELU MLP's for the same parameters."""
+
+    def __init__(self, dim: int, hidden: int):
+        super().__init__()
+        self.w12 = nn.Linear(dim, 2 * hidden)
+        self.w3 = nn.Linear(hidden, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a, b = self.w12(x).chunk(2, dim=-1)
+        return self.w3(F.silu(a) * b)
+
+
+def drop_path(x: torch.Tensor, p: float, training: bool) -> torch.Tensor:
+    """Stochastic depth: drop a residual branch for whole rows (samples) with probability ``p``."""
+    if p <= 0.0 or not training:
+        return x
+    keep = torch.rand(x.shape[0], *([1] * (x.ndim - 1)), device=x.device, dtype=x.dtype) >= p
+    return x * keep / (1.0 - p)
+
+
 class Block(nn.Module):
-    def __init__(self, dim: int, heads: int, rope: RoPE3D, mlp_ratio: float = 4.0, qk_norm: bool = False):
+    """Pre-norm transformer block. Defaults are the original (GELU MLP, no LayerScale, no drop-path); ``mlp="swiglu"``,
+    ``layer_scale`` (initial per-channel residual scale, e.g. 1e-4) and ``drop_path`` give the Primus-style block."""
+
+    def __init__(self, dim: int, heads: int, rope: RoPE3D, mlp_ratio: float = 4.0, qk_norm: bool = False,
+                 mlp: str = "gelu", layer_scale: float | None = None, drop_path: float = 0.0):
         super().__init__()
         self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
         self.attn = Attention(dim, heads, rope, qk_norm)
         hidden = int(dim * mlp_ratio)
-        self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        if mlp == "swiglu":
+            self.mlp = SwiGLU(dim, int(round(hidden * 2 / 3 / 8)) * 8)
+        else:
+            self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        self.ls1 = nn.Parameter(torch.full((dim,), float(layer_scale))) if layer_scale else None
+        self.ls2 = nn.Parameter(torch.full((dim,), float(layer_scale))) if layer_scale else None
+        self.drop_path = float(drop_path)
 
-    def forward(self, x: torch.Tensor, coords_mm: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), coords_mm, attn_mask)
-        return x + self.mlp(self.norm2(x))
+    def forward(self, x: torch.Tensor, coords_mm: torch.Tensor, attn_mask: torch.Tensor | None = None,
+                n_prefix: int = 0) -> torch.Tensor:
+        a = self.attn(self.norm1(x), coords_mm, attn_mask, n_prefix)
+        x = x + drop_path(a * self.ls1 if self.ls1 is not None else a, self.drop_path, self.training)
+        m = self.mlp(self.norm2(x))
+        return x + drop_path(m * self.ls2 if self.ls2 is not None else m, self.drop_path, self.training)
 
 
 def _key_mask(keep: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -180,6 +221,11 @@ class BrainEncoder(nn.Module):
         dense_hidden: int = 512,
         predict_depth: int = 0,
         predict_pixel_dim: int = 0,
+        n_cls: int = 0,
+        n_registers: int = 0,
+        mlp: str = "gelu",
+        layer_scale: float | None = None,
+        drop_path: float = 0.0,
     ):
         super().__init__()
         if size not in VIT_SIZES:
@@ -193,7 +239,11 @@ class BrainEncoder(nn.Module):
         self.rope = RoPE3D(head_dim, base_mm=rope_base_mm)
         self.patch_embed = PatchEmbed3D(in_chans, dim, self.patch_xyz)
         self.scale_embed = ScaleEmbed(dim)
-        self.blocks = nn.ModuleList(Block(dim, heads, self.rope, qk_norm=qk_norm) for _ in range(depth))
+        # stochastic depth rises linearly with depth, as in DeiT / Primus
+        self.blocks = nn.ModuleList(
+            Block(dim, heads, self.rope, qk_norm=qk_norm, mlp=mlp, layer_scale=layer_scale,
+                  drop_path=float(drop_path) * i / max(depth - 1, 1))
+            for i in range(depth))
         self.norm = nn.LayerNorm(dim)
         self.projector = Projector(dim, proj_hidden or min(2048, dim * 4), self.proj_dim, norm=proj_norm)
         # Per-token head for the dense loss. No batch statistics: tokens of one volume are correlated.
@@ -205,7 +255,19 @@ class BrainEncoder(nn.Module):
             Predictor(dim, heads, self.rope, int(predict_depth), int(dense_dim), int(predict_pixel_dim), qk_norm)
             if predict_depth else None
         )
+        # Prefix tokens prepended to every sequence: an optional CLS (the pooled embedding when present) and
+        # register tokens (attention scratch space, discarded). They carry no position and are never gated out.
+        self.n_cls, self.n_registers = int(n_cls), int(n_registers)
+        if self.n_cls not in (0, 1):
+            raise ValueError(f"n_cls must be 0 or 1, got {n_cls}")
+        self.prefix = nn.Parameter(torch.zeros(1, self.n_prefix, dim)) if self.n_prefix else None
         self.apply(self._init_weights)
+        if self.prefix is not None:
+            nn.init.trunc_normal_(self.prefix, std=0.02)
+
+    @property
+    def n_prefix(self) -> int:
+        return self.n_cls + self.n_registers
 
     @staticmethod
     def _init_weights(m: nn.Module) -> None:
@@ -214,10 +276,10 @@ class BrainEncoder(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def _run_block(self, block: Block, x: torch.Tensor, coords: torch.Tensor, attn_mask):
+    def _run_block(self, block: Block, x: torch.Tensor, coords: torch.Tensor, attn_mask, n_prefix: int = 0):
         if self.checkpoint_blocks and self.training:
-            return checkpoint(block, x, coords, attn_mask, use_reentrant=False)
-        return block(x, coords, attn_mask)
+            return checkpoint(block, x, coords, attn_mask, n_prefix, use_reentrant=False)
+        return block(x, coords, attn_mask, n_prefix)
 
     def _embed(self, view, coords_mm, patch_size_mm, patch_xyz, zyx):
         tokens, grid = self.patch_embed(view, patch_xyz, zyx=zyx)
@@ -227,12 +289,27 @@ class BrainEncoder(nn.Module):
         scale = self.scale_embed(patch_size_mm)
         return tokens + (scale.unsqueeze(1) if patch_size_mm.ndim == 2 else scale), grid
 
-    def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor) -> torch.Tensor:
+    def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor,
+             taps: Sequence[int] = ()) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor]]:
+        """Blocks over packed patch tokens (with the prefix in front). Returns the normed prefix outputs (or None),
+        the normed patch tokens, and the pre-norm patch tokens after each block in ``taps``."""
+        p = self.n_prefix
+        if p:
+            x = torch.cat([self.prefix.to(x.dtype).expand(x.size(0), -1, -1), x], dim=1)
+            pad = torch.cat([torch.ones(pad.size(0), p, dtype=torch.bool, device=pad.device), pad], dim=1)
         # One row has no pad, so the additive mask is skipped and flash attention stays on.
         mask = None if x.size(0) == 1 else _key_mask(pad, x.dtype)
-        for block in self.blocks:
-            x = self._run_block(block, x, coords, mask)
-        return self.norm(x)
+        tapped = []
+        for i, block in enumerate(self.blocks):
+            x = self._run_block(block, x, coords, mask, p)
+            if i in taps:
+                tapped.append(x[:, p:])
+        x = self.norm(x)
+        return (x[:, :p] if p else None), x[:, p:], tapped
+
+    def _pool(self, prefix: torch.Tensor | None, x: torch.Tensor, pad: torch.Tensor) -> torch.Tensor:
+        """The global embedding: the CLS output when there is one, else the mean over kept patch tokens."""
+        return prefix[:, 0] if self.n_cls else _masked_mean(x, pad)
 
     def forward(
         self,
@@ -254,21 +331,14 @@ class BrainEncoder(nn.Module):
         if keep.shape != (b, n):
             raise ValueError(f"keep {tuple(keep.shape)} does not match tokens {(b, n)}")
         seq, seq_coords, pad, _ = pack_kept(tokens, coords_mm, keep)
-        tapped = []
-        if taps:
-            mask = None if seq.size(0) == 1 else _key_mask(pad, seq.dtype)
-            x = seq
-            for i, block in enumerate(self.blocks):
-                x = self._run_block(block, x, seq_coords, mask)
-                if i in taps:
-                    tapped.append(scatter_kept(x, keep))
-            x = self.norm(x)
-        else:
-            x = self._run(seq, seq_coords, pad)
+        prefix, x, tapped = self._run(seq, seq_coords, pad, taps)
         return {
             "tokens": scatter_kept(x, keep),
+            "cls": prefix[:, 0] if self.n_cls else None,       # (B, D) global embedding when the model has a CLS
+            "registers": prefix[:, self.n_cls:] if self.n_registers else None,   # (B, R, D) register outputs
+            "pooled": self._pool(prefix, x, pad),
             "patch": tokens * keep.unsqueeze(-1).to(dtype=tokens.dtype),
-            "taps": tapped,
+            "taps": [scatter_kept(t, keep) for t in tapped],
             "coords_mm": coords_mm,
             "grid_zyx": torch.tensor(grid, device=view.device),
         }
@@ -285,7 +355,7 @@ class BrainEncoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Pooled embedding of each row, and optionally its dense tokens, in input order.
 
-        ``view`` is (R, C, Z, Y, X). Pooled is the mean over kept tokens, (R, D). Dense tokens are
+        ``view`` is (R, C, Z, Y, X). Pooled is the CLS output, or without a CLS the mean over kept tokens, (R, D). Dense tokens are
         (R, N, D) with dropped tokens zero. ``plan`` is (order, sizes, longest): rows are sorted by kept
         count and cut into buckets, so a row is padded to its bucket's longest row, not the batch's. Rows
         never interact, so this changes cost, not values. ``longest`` comes from the CPU: no GPU sync.
@@ -298,8 +368,8 @@ class BrainEncoder(nn.Module):
             idx = order[start:start + size]
             start += size
             seq, seq_coords, pad, _ = pack_kept(emb[idx], coords_mm[idx], keep[idx], max_keep=m)
-            x = self._run(seq, seq_coords, pad)
-            pooled.append(_masked_mean(x, pad))
+            prefix, x, _ = self._run(seq, seq_coords, pad)
+            pooled.append(self._pool(prefix, x, pad))
             if tokens:
                 dense.append(scatter_kept(x, keep[idx]))
         inverse = torch.empty_like(order)

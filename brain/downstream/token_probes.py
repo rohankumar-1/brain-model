@@ -1,4 +1,4 @@
-"""Heads that read every token of the 16x16x16 grid at full width: no PCA, no plane or cell pooling.
+"""Heads that read every token of the encoder token grid (``brain.common.grid.TOKEN_GRID``) at full width: no PCA, no plane or cell pooling.
 
 - ``AttnProbe``: a few learned queries cross-attend to all tokens (token + position). The usual probe for
   JEPA-style encoders, so it matches how the 2D suite attends over slices.
@@ -10,12 +10,14 @@ Both take ``(x, mask, xyz)`` like ``TokenAttnMLP`` and train through ``AttnEnsem
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 from torch import nn
 
+from brain.common.grid import TOKEN_GRID
 from brain.downstream.heads import AttnEnsemble
 
-GRID_ZYX = (16, 16, 16)
+GRID_ZYX = TOKEN_GRID
 
 
 def _mlp(dim: int, hidden: int, n_out: int, dropout: float) -> nn.Sequential:
@@ -77,7 +79,7 @@ def make_token_heads(dim: int, n_out: int, multilabel: bool, seed: int, regressi
     for s in grid:
         n_tok *= int(s)
     # 32^3 x multi-window dims cannot sit on the GPU; smaller batches keep Conv3d activations in range.
-    bs = 32 if n_tok <= 4096 else 8
+    bs = 32 if n_tok <= int(np.prod(TOKEN_GRID)) else 8
     h = AttnEnsemble(dim, 0, n_out, multilabel, seed, regression=regression, spatial=True,
                      model_factory=lambda: ConvProbe(dim, n_out, grid_zyx=grid), half=True,
                      batch_size=bs)

@@ -6,7 +6,7 @@ import math
 
 import torch
 
-NO_DECAY_SUFFIXES = ("bias", "pos_embed", "cls_token", "register_tokens", "mask_token")
+NO_DECAY_SUFFIXES = ("bias", "pos_embed", "cls_token", "register_tokens", "mask_token", "prefix")
 
 
 def lr_at(step: int, total: int, peak: float, warmup: int, floor: float = 0.01) -> float:

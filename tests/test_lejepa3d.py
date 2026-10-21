@@ -444,3 +444,79 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print("ok", name)
+
+
+def _prefix_enc(n_cls: int, n_registers: int):
+    return BrainEncoder(
+        size="test", patch_xyz=(8, 8, 4), checkpoint_blocks=False, proj_dim=16, proj_hidden=32,
+        qk_norm=True, proj_norm="batch", dense_dim=16, dense_hidden=32, n_cls=n_cls, n_registers=n_registers,
+    )
+
+
+def test_without_prefix_tokens_the_model_is_unchanged_and_pools_the_mean():
+    plain = _enc()
+    none = _prefix_enc(0, 0)
+    assert set(plain.state_dict()) == set(none.state_dict()) and none.prefix is None  # old checkpoints load as is
+    view, coords, pmm = torch.randn(2, 1, 32, 32, 8), torch.rand(2, 32, 3) * 100, torch.ones(2, 3) * 8
+    keep = torch.rand(2, 32) > 0.3
+    none.eval()
+    with torch.no_grad():
+        out = none(view, coords, pmm, keep=keep, patch_xyz=(8, 8, 4))
+    assert out["cls"] is None
+    m = keep.unsqueeze(-1).float()
+    assert torch.allclose(out["pooled"], (out["tokens"] * m).sum(1) / m.sum(1), atol=1e-5)
+
+
+def test_cls_and_registers_carry_the_pooled_embedding_without_position():
+    from brain.common.optim import param_groups
+    from brain.data.batch3d import length_plan
+
+    torch.manual_seed(0)
+    enc = _prefix_enc(1, 4).eval()
+    assert enc.prefix.shape == (1, 5, 64) and enc.n_prefix == 5
+    view, coords, pmm = torch.randn(3, 1, 32, 32, 8), torch.rand(3, 32, 3) * 100, torch.ones(3, 3) * 8
+    keep = torch.rand(3, 32) > 0.3
+    keep[2] = False                                     # an all-air row still has its prefix to attend to
+    with torch.no_grad():
+        out = enc(view, coords, pmm, keep=keep, patch_xyz=(8, 8, 4))
+        rows = torch.randn(3, 1, 8, 32, 32)                # the training path: (Z, Y, X) crops, length buckets
+        p1, d1 = enc.encode_rows(rows, coords, pmm, keep, length_plan(keep.sum(1), 1), (8, 8, 4), tokens=True)
+        p2, d2 = enc.encode_rows(rows, coords, pmm, keep, length_plan(keep.sum(1), 3), (8, 8, 4), tokens=True)
+    assert out["cls"].shape == (3, 64) and torch.isfinite(out["cls"]).all() and torch.equal(out["cls"], out["pooled"])
+    assert float(out["tokens"][~keep].abs().sum()) == 0.0
+    # buckets change cost only (an all-air row alone in a bucket takes the unmasked single-row fast path, so its
+    # CLS also sees the one zero pad slot; crops are sampled with >= 15% foreground, so training never has one)
+    assert torch.allclose(p1[:2], p2[:2], atol=1e-4) and torch.allclose(d1[:2], d2[:2], atol=1e-4)
+    m = keep.unsqueeze(-1).float()
+    mean = (d1 * m).sum(1) / m.sum(1).clamp_min(1)
+    assert not torch.allclose(p1[:2], mean[:2], atol=1e-3)  # the pooled embedding is the CLS, not the token mean
+    # the prefix is not rotated: moving every patch coordinate together changes its attention scores,
+    # but the CLS still sees the patches (gradients reach the learned prefix)
+    enc.train()
+    out = enc(view, coords, pmm, keep=keep, patch_xyz=(8, 8, 4))
+    # a random projection: a plain sum of a LayerNorm output is constant, so it would carry no gradient at all
+    (out["cls"] * torch.randn_like(out["cls"])).sum().backward()
+    assert float(enc.prefix.grad[0, 0].abs().sum()) > 0           # the CLS row learns
+    decay_free = [g for g in param_groups(enc, 0.05) if g["weight_decay"] == 0.0]
+    assert any(p is enc.prefix for g in decay_free for p in g["params"])
+
+
+def test_cls_model_trains_end_to_end_on_the_synthetic_recipe():
+    import tempfile
+    from brain.train import engine
+
+    from brain.downstream.embed3d import load_brain3d
+    from brain.train.defaults import default_config, smoke_config
+    from brain.train.lejepa3d import build_encoder
+
+    with tempfile.TemporaryDirectory() as d:             # synthetic runs write no checkpoint: training only
+        engine.run(["lejepa3d", "--synthetic", "--max-steps", "3", "--no-resume", "--out-dir", d,
+                    "--set", "model.n_cls=1", "--set", "model.n_registers=4"])
+    cfg = smoke_config(default_config("lejepa3d"))
+    cfg["model"].update(n_cls=1, n_registers=4)
+    ck = {"model": build_encoder(cfg, torch.device("cpu")).state_dict(), "config": cfg, "step": 3}
+    assert ck["model"]["prefix"].shape[1] == 5
+    enc = load_brain3d(ck, torch.device("cpu"))         # the downstream loader rebuilds the prefix from the config
+    vol = torch.randn(32, 32, 16) + 1.0
+    seqs, _, _ = enc.embed_windows(vol, [(0.0, 1.0), (0.5, 2.0)], modality="mri")
+    assert enc.last_cls is not None and enc.last_cls.shape == (2, enc.dim) and seqs.shape[0] == 2

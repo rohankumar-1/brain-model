@@ -169,5 +169,9 @@ def run_latent_segmentation(task: TaskBundle, *, ckpt: Path, slices_root: Path, 
               "sequences": n_seq, "scale": scale, "steps": steps, "batch_size": batch_size, "lr": lr, "seed": seed,
               "max_slices": max_slices, "window": window, "last_only": last_only,
               "n_train": metrics["n_train"], "n_test": metrics["n_test"]}
-    print(f"[seg] summary → {finalize_run(run_dir, config, {'unetr_decoder': metrics})}")
+    vals = [r["val_dice_macro"] for r in history if r.get("val_dice_macro") is not None] if history else []
+    if vals:
+        metrics["val"] = {"dice_macro": float(np.nanmax(vals))}
+    config.update(slices_root=str(slices_root), n_train=metrics.get("n_train"), n_test=metrics.get("n_test"))
+    print(f"[seg] summary → {finalize_run(run_dir, config, {'unetr_decoder': metrics}, suite='seg_train')}")
     return run_dir

@@ -22,7 +22,7 @@ brain/
   downstream/  frozen-encoder tasks, heads, probes, segmentation
   datasets/    download / fetch scripts, SinoCT overlap
 configs/<method>/*.yaml    only the keys that differ from brain/train/defaults.py need be set
-jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep, downstream, probes
+jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep_v6*, eval_task/submit_eval.sh
 tests/                     CPU tests (python -m pytest tests -q)
 docs/                      prep.md, lejepa3d.md, downstream_3d.md, restructure.md (what changed and why)
 ```
@@ -35,7 +35,7 @@ docs/                      prep.md, lejepa3d.md, downstream_3d.md, restructure.m
 | Scratch (processed Zarr only) | `/home/roku/orcd/scratch/brain-model` |
 | Pool (raw archives) | `/home/roku/orcd/pool/datasets` |
 
-Override with `BRAIN_SCRATCH` / `BRAIN_DATASETS` (`brain/common/paths.py`), `BRAIN_REPO` / `BRAIN_ENV` for jobs, `BRAIN_TEMPLATE` for registration, `BRAIN_SYNTHSTRIP` for the SynthStrip binary.
+Override with `BRAIN_SCRATCH` / `BRAIN_DATASETS` (`brain/common/paths.py`), `BRAIN_REPO` / `BRAIN_ENV` for jobs, `BRAIN_TEMPLATE` for registration (with `BRAIN_TEMPLATE_BRAIN`, its brain mask: the fixed image for skull-stripped scans and the prior for brain-mask QC), `BRAIN_SYNTHSTRIP` for the SynthStrip binary (`SYNTHSTRIP_NOCSF=1` selects the model without extra-cerebral CSF).
 
 ## Datasets
 
@@ -63,7 +63,7 @@ Counts for **volumes / slices** are after shared-space prep (RAS, 1 mm, 256×2
 ## 1. Preprocessing
 
 ```bash
-sbatch --export=ALL,CMD="-m brain.prep.run --root $STORE --datasets cq500,oasis,brats,rsna --template $BRAIN_TEMPLATE --shard 0/8" jobs/prep_job.sbatch
+PHASE=B sbatch --export=ALL --array=0-7%4 jobs/prep_v6.sbatch     # see jobs/prep_v6*.sbatch for phases A/B and HBN/GoAT
 python -m brain.prep.index --root $STORE
 ```
 
@@ -86,12 +86,15 @@ Appearance augmentation (contrast curves with inversion, bias field, through-pla
 ## 3. Downstream
 
 ```bash
-python -m brain.downstream.run_suite --task cq500 --ckpt runs/lejepa2d/last.pt
-python -m brain.downstream.probe3d --ckpt runs/lejepa3d/last.pt --out runs/probes/x.json
-sbatch --export=ALL,CKPT=runs/lejepa3d/last.pt jobs/downstream_vit_pi.sbatch
+jobs/submit_eval.sh runs/<run>/last.pt            # the full suite (25 tasks + probes) as a Slurm array, then ingest
+python -m brain.downstream.db report --wide        # models x tasks from the experiment database
 ```
 
-Frozen encoder; ViT features are `[cls, mean patch, max patch]`. Classification / regression: pooled logreg / ridge, seed-ensembled slice-attention MLP, XGBoost, bootstrap 95% CIs. Segmentation: UNETR-style decoder (2D) or token decoder (3D). See `docs/downstream_3d.md`.
+Frozen encoder on the 256 x 256 x 160 grid (20 x 16 x 16 tokens). Classification and regression use PCA plane, grid
+and global readouts plus a 3D conv probe, with bootstrap 95% CIs. Segmentation uses a token U-Net decoder (`seg3d`).
+`probe3d` runs lesion, fingerprint and location token probes with pixel and random-init controls. Every evaluation
+writes an experiment record (model, data provenance, protocol, test and val metrics, environment, artifacts) under
+`results/records/`; `brain.downstream.db` folds the records into SQLite. See `docs/downstream_3d.md`.
 
 ## 4. Splits
 

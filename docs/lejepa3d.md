@@ -39,3 +39,28 @@ One `ViewNet` forward for all views (DDP/SyncBN friendly), length-bucketed rows,
 
 ## Tests
 `python -m pytest tests -q` (CPU); the 3D model and objective tests are in `tests/test_lejepa3d.py`, augmentation in `tests/test_augment.py`.
+
+## Geometric augmentation (`aug.geometric`, next-run recipe)
+
+Each view gets its own rotation (`rot_deg`, about the z, y, x axes: yaw, roll, pitch), isotropic scale (`scale`) and
+left-right mirror (`flip_lr`), with probability `p`. The loader ships the whole volume (and the brain mask for
+per-view skull dropout) plus each view's sampling transform; `batch3d.sample_views` warps the views on the GPU
+(trilinear; outside the scan = air). Token bookkeeping is done on the CPU from where each token center lands in the
+scan: `pos` / `tok_pos` are those cells and `fg` the scan's token gate there, so the dense consensus and masked
+prediction still compare the same anatomy across differently posed views. RoPE stays on each view's own regular grid:
+attention sees relative positions only, so a shift of all coordinates would change nothing, and scaling them would
+misstate voxel size (physical size is diagnostic). Validation crops are never warped. Off unless configured, so older
+configs (the prefix ablation) train exactly as before. Tests: `tests/test_geometric.py`.
+
+## Rician noise and histogram matching (next-run recipe)
+
+`aug.noise.kind: rician`: MRI rows get Rician noise in native robust-z units before windowing: `floor + |a + n1 +
+i n2|` with `a = x - floor` and Gaussian `n1, n2` of sigma = 6 / SNR (SNR log-uniform in `snr`). Air becomes Rayleigh
+noise and dark tissue is lifted, as on a real magnitude image. CT keeps Gaussian noise (`sigma`, windowed units).
+
+`aug.histmatch` (MRI only; never CT, whose HU are physical): with probability `p` a row's intensities are remapped
+from its volume's tissue quantiles to those of another volume of the same contrast group in the batch (T1, T1+Gd, T2,
+FLAIR, PD, ...; unlabelled single-sequence cohorts count as T1). Quantiles are whole-volume (`volumes.tissue_quantiles`,
+shipped per volume), not per crop, so scanners are compared rather than whatever anatomy two crops contain; segment
+slopes are capped (`max_slope`, default 3) so sparse intensity ranges do not turn into speckle; `alpha` blends.
+Tests: `tests/test_intensity_aug.py`.

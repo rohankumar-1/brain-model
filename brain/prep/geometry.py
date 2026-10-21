@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
+from brain.common.grid import GRID_XYZ
+
 sitk.ProcessObject.GlobalWarningDisplayOff()  # ITK's per-file "Analyze deprecated" / "non-uniform sampling" noise
 
 ISO_MM = 1.0
@@ -34,8 +36,40 @@ def tilt_deg(img: sitk.Image) -> float:
     return float(np.degrees(np.arccos(np.clip(d.min(), 0.0, 1.0))))
 
 
+def _analyze_orient(path: Path) -> int | None:
+    """Analyze 7.5 ``hist.orient`` byte of a .img/.hdr pair (None for NIfTI or anything else)."""
+    hdr = Path(path).with_suffix(".hdr")
+    if Path(path).suffix != ".img" or not hdr.exists():
+        return None
+    raw = hdr.read_bytes()
+    if len(raw) < 348 or raw[344:347] in (b"ni1", b"n+1"):   # a NIfTI pair carries real orientation
+        return None
+    return raw[252]
+
+
+def _read_sagittal_analyze(path: Path) -> sitk.Image:
+    """Analyze ``orient = 2`` (sagittal), e.g. raw OASIS-1 MPRAGE (128 x 256 x 256, 1.25 mm slices). ITK ignores the
+    orient byte and reads the slice axis as superior-inferior, which no affine registration recovers. Array axes are
+    (slice, superior->inferior..., ...): transposing (1, 2, 0) gives superior-up / anterior-up / slice order, checked
+    visually and against the MNI template (2026-10-21). Left-right (the slice direction) is not determinable from
+    the image; it is taken as stored, so left / right labels of these scans may be mirrored."""
+    src = sitk.ReadImage(str(path))
+    a = sitk.GetArrayFromImage(src).astype(np.float32)          # (slice, j, i)
+    a = a[..., 0] if a.ndim == 4 else a
+    sp = src.GetSpacing()                                        # (i, j, slice)
+    b = np.ascontiguousarray(np.transpose(a, (1, 2, 0)))        # (S, A, slice) = (z, y, x)
+    img = sitk.GetImageFromArray(b)
+    img.SetSpacing((float(sp[2]), float(sp[0]), float(sp[1])))   # x = slice, y = i, z = j
+    img.SetDirection((-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0))   # RAS index axes in LPS physical space
+    half = [(n - 1) * s / 2 for n, s in zip(img.GetSize(), img.GetSpacing())]
+    img.SetOrigin((half[0], half[1], -half[2]))                # centred on the origin
+    return img
+
+
 def read(path: Path) -> sitk.Image:
     """NIfTI / Analyze -> float32 image in RAS orientation (nibabel fallback for bad direction cosines)."""
+    if _analyze_orient(path) == 2:
+        return standardize(_read_sagittal_analyze(path))
     try:
         img = sitk.ReadImage(str(path))
     except RuntimeError:
@@ -82,7 +116,7 @@ def center_z(img: sitk.Image) -> float:
     return float(img.TransformContinuousIndexToPhysicalPoint([(n - 1) / 2 for n in img.GetSize()])[2])
 
 
-def target_grid(img: sitk.Image, center: np.ndarray, size=(256, 256, 128)) -> Grid:
+def target_grid(img: sitk.Image, center: np.ndarray, size=GRID_XYZ) -> Grid:
     """Axis-aligned 1 mm grid centered at physical ``center`` = (x, y) or (x, y, z).
 
     Without z the slab is centered on the volume, as the original pipeline did.

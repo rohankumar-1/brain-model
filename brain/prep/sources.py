@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from brain.common.paths import DATASETS, SCRATCH  # noqa: F401  (re-exported for prep.index)
 from brain.prep.fomo import CONTRAST_SUFFIXES
@@ -17,6 +19,10 @@ BRATS_COHORTS = {"2023_GLI": "brats2023_gli", "2023_MEN": "brats2023_men",
                  "2023_PED": "brats2023_ped", "2024_MEN_RT": "brats2024_men_rt"}
 COHORT_RANK = {"brats2024_gli": 50, "brats2023_gli": 40, "brats2024_men_rt": 30,
                "brats2023_men": 20, "brats2023_ped": 10}
+
+
+# skull-stripped releases (dataset-name prefixes): BraTS, MSD, ATLAS R2/3, BrainMetShare, FOMO Yale mets, ISLES'22
+STRIPPED_PREFIXES = ("brats", "msd_braintumor", "atlas", "brainmetshare", "fomo_yale_mets", "isles22")
 
 
 @dataclass(frozen=True)
@@ -32,9 +38,10 @@ class Case:
 
     @property
     def stripped(self) -> bool:
-        """Known skull-stripped release (BraTS, MSD brain tumour). Extend with BRAIN_STRIPPED=prefix,prefix."""
+        """Known skull-stripped release. Extend with BRAIN_STRIPPED=prefix,prefix. Checked on the v6 smoke run: these
+        (and only these) have brain/head volume ratio ~1 (``brain_head_ratio``; skull-on scans sit at 0.45-0.7)."""
         extra = tuple(x for x in os.environ.get("BRAIN_STRIPPED", "").split(",") if x)
-        return self.dataset.startswith(("brats", "msd_braintumor") + extra)
+        return self.dataset.startswith(STRIPPED_PREFIXES + extra)
 
     @property
     def folder(self) -> str:
@@ -72,7 +79,10 @@ def cq500(*dirs: Path) -> list[Case]:
 
 
 def oasis(root: Path = DATASETS / "oasis" / "extracted") -> list[Case]:
-    """OASIS-1 atlas-registered gain-field-corrected T1 (skull on), then OASIS-2 raw MPRAGE."""
+    """OASIS-1 and OASIS-2 raw MPRAGE (first scan of the session). OASIS-1 used to take the distributed
+    Talairach-registered gain-field-corrected image (``*_t88_gfc``, cropped 176 x 208 x 176): every one of those
+    registered poorly to MNI (template Dice ~0.83) and failed SynthSeg, while raw OASIS-2 registers like other
+    cohorts (2026-10-21). The t88 image remains the fallback for a session without a raw scan."""
     cases, seen = [], set()
 
     def add(sid: str, path: Path, tag: str) -> None:
@@ -80,9 +90,9 @@ def oasis(root: Path = DATASETS / "oasis" / "extracted") -> list[Case]:
             seen.add(sid)
             cases.append(Case(tag, sid, "mri", path))
 
-    for p in sorted(root.rglob("*_t88_gfc.img")):
-        add("_".join(p.name.split("_")[:3]), p, "oasis1")
     for p in sorted(root.rglob("*_mpr-1_anon.img")):
+        add("_".join(p.name.split("_")[:3]), p, "oasis1")
+    for p in sorted(root.rglob("*_t88_gfc.img")):
         add("_".join(p.name.split("_")[:3]), p, "oasis1")
     for p in sorted(root.rglob("mpr-1.nifti.img")):
         session = p.parent.parent.name if p.parent.parent.name.startswith("OAS2_") else p.parent.name
@@ -159,9 +169,16 @@ def brats_fomo(fomo_root: Path, local_root: Path = DATASETS / "brats" / "extract
     pt = "PT009_BraTS-GEN"
     mapping = read_mapping(fomo_root / pt / "mapping.tsv")
     if mapping.empty:
+        mapping = read_mapping(fomo_root / "extracted" / pt / "mapping.tsv")
+    if mapping.empty:
+        # the corpus-wide mapping names the PT folder in ``dataset``; ``new_path`` is relative to it
         mapping = read_mapping(fomo_root / "mapping.tsv")
-        if not mapping.empty and "new_path" in mapping.columns:
-            mapping = mapping[mapping["new_path"].astype(str).str.contains(pt, na=False)]
+        if not mapping.empty:
+            in_pt = pd.Series(False, index=mapping.index)
+            for col in ("dataset", "new_path"):
+                if col in mapping.columns:
+                    in_pt |= mapping[col].astype(str).str.contains(pt, na=False)
+            mapping = mapping[in_pt]
     held = load_holdout_families(fomo_root)
     segs, cohorts = local_brats_assets(local_root)
     cases, by_session = [], {}
@@ -269,10 +286,20 @@ def fomo(root: Path | None = None) -> list[Case]:
     return cases
 
 
-def abide1(root: Path = DATASETS / "abide1" / "RawData") -> list[Case]:
+def abide1(root: Path | None = None) -> list[Case]:
     """ABIDE I raw T1 (skull on, 24 site folders); diagnosis and age are in the phenotypic table."""
-    return [Case("abide1", f"{p.parents[3].name}_{p.parents[2].name}", "mri", p)
-            for p in sorted(root.glob("*/*/session_1/anat_1/mprage.nii.gz"))]
+    roots = [root] if root is not None else [
+        DATASETS / "abide1" / "RawData",
+        SCRATCH / "datasets" / "abide1" / "RawData",
+    ]
+    for cand in roots:
+        if cand is None:
+            continue
+        cases = [Case("abide1", f"{p.parents[3].name}_{p.parents[2].name}", "mri", p)
+                 for p in sorted(Path(cand).glob("*/*/session_1/anat_1/mprage.nii.gz"))]
+        if cases:
+            return cases
+    return []
 
 
 def ixi(root: Path = DATASETS / "ixi") -> list[Case]:
@@ -344,6 +371,59 @@ def wmh(root: Path = DATASETS / "wmh" / "extracted") -> list[Case]:
         cases.append(Case("wmh_flair", cid, "mri", flair, (("lesion", wmh_mask),) if wmh_mask.exists() else ()))
         if t1.exists():
             cases.append(Case("wmh_t1", cid, "mri", t1, ref=flair))
+    return cases
+
+
+def ms3seg(root: Path = DATASETS / "ms3seg" / "extracted" / "MS_100_patient_nifti") -> list[Case]:
+    """MS3SEG (100 MS patients, 1.5T Toshiba, thick-slice clinical): axial FLAIR with the staged label map
+    (``brain.prep.stage_new``: 1 ventricles, 2 normal WMH, 3 MS lesion), plus T1 and T2. The sagittal FLAIR is skipped."""
+    cases = []
+    if not root.exists():
+        return cases
+    for subject in sorted(p for p in root.iterdir() if p.is_dir()):
+        sid = subject.name
+        flair, seg = subject / f"{sid}_FLAIR.nii.gz", subject / f"{sid}_seg.nii.gz"
+        if flair.exists():
+            cases.append(Case("ms3seg_flair", sid, "mri", flair, (("seg", seg),) if seg.exists() else ()))
+        for tag, name in (("t1", "T1WI"), ("t2", "T2WI")):
+            p = subject / f"{sid}_{name}.nii.gz"
+            if p.exists():
+                cases.append(Case(f"ms3seg_{tag}", sid, "mri", p))
+    return cases
+
+
+VALDO_SEQ = {"T1": "t1", "T2": "t2", "FLAIR": "flair", "T2S": "t2s"}
+
+
+def valdo(root: Path = DATASETS / "valdo" / "extracted") -> list[Case]:
+    """VALDO 2021 (Task1 EPVS, Task2 microbleeds on T2*, Task3 lacunes). Every task's sequences are co-registered to
+    its reference space (``space-T1`` / ``space-T2S``): the reference sequence decides the grid and carries the
+    rater-union lesion mask staged by ``brain.prep.stage_new``; the other sequences take its grid (``ref``)."""
+    cases = []
+    if not root.exists():
+        return cases
+    pat = re.compile(r"_space-([A-Za-z0-9]+)_desc-(?!Rater|union)[A-Za-z0-9]+_(T1|T2|FLAIR|T2S)\.nii\.gz$")
+    for task_dir in sorted(root.glob("Task*")):
+        task = task_dir.name.lower().replace("task", "t")
+        for subject in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+            images = {}
+            for f in subject.glob("*.nii.gz"):
+                m = pat.search(f.name)
+                if m:
+                    space, seq = m.group(1).upper(), m.group(2).upper()
+                    images[seq] = (f, space)
+            if not images:
+                continue
+            space = next(iter(images.values()))[1]
+            ref = images.get(space, (None,))[0]
+            # segmentation targets: lacunes (Task 3) and microbleeds (Task 2); Task 1's PVS masks cover only slabs
+            union = next((f for f in subject.glob("*_desc-union_*.nii.gz") if f.name.endswith(("_Lacunes.nii.gz", "_CMB.nii.gz"))), None)
+            cid = f"{task}_{subject.name}"
+            for seq, (f, _) in sorted(images.items()):
+                is_ref = f == ref
+                masks = (("lesion", union),) if is_ref and union is not None else ()
+                cases.append(Case(f"valdo_{VALDO_SEQ[seq]}", cid, "mri", f, masks,
+                                  ref=None if is_ref or ref is None else ref))
     return cases
 
 
@@ -426,15 +506,20 @@ def ensure_msd_t1w(src: Path, channel: int = MSD_T1W_CHANNEL) -> Path:
     import nibabel as nib
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + f".partial.{os.getpid()}")
+    # nib.save keys off the suffix; ``.nii.gz.partial.PID`` is not a NIfTI path.
+    tmp = dest.parent / f"{dest.name}.partial.{os.getpid()}.nii.gz"
     nii = nib.load(str(src))
     data = np.asanyarray(nii.dataobj)
     if data.ndim == 4:
         data = data[..., channel]
     elif data.ndim != 3:
         raise ValueError(f"Expected 3D or 4D MSD volume at {src}, got {data.shape}")
-    nib.save(nib.Nifti1Image(np.asarray(data, dtype=np.float32), nii.affine, nii.header), str(tmp))
-    os.replace(tmp, dest)
+    try:
+        nib.save(nib.Nifti1Image(np.asarray(data, dtype=np.float32), nii.affine, nii.header), str(tmp))
+        os.replace(tmp, dest)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
     return dest
 
 

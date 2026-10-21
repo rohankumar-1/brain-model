@@ -16,6 +16,7 @@ from brain.downstream.tasks import (
     load_aisd_task, load_instance_task,
 )
 from brain.models.vit2d import VisionTransformer
+from brain.common.grid import DEPTH
 
 
 def test_windows_for_counts():
@@ -43,13 +44,13 @@ def test_focal_tasks_include_ich_and_seg():
     assert "oasis1_age" not in FOCAL_SLICE_TASKS
     for name in SEGMENTATION_TASKS:
         assert name in FOCAL_SLICE_TASKS
-    for name in ("cq500", "rsna", "rsna_ich", "msd"):
+    for name in ("cq500", "rsna_ich", "msd"):
         assert name in FOCAL_SLICE_TASKS
 
 
 def test_uniform_64_covers_the_volume():
-    z = uniform_slice_indices(128, 64)
-    assert len(z) == 64 and z[0] >= 0 and z[-1] < 128
+    z = uniform_slice_indices(DEPTH, 64)
+    assert len(z) == 64 and z[0] >= 0 and z[-1] < DEPTH
     assert np.all(np.diff(z) >= 1)
 
 

@@ -11,10 +11,10 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from brain.prep import brainmask, centering, dicom, geometry, intensity, registration
+from brain.prep import brainmask, centering, dicom, geometry, intensity, native, registration
 from brain.prep.sources import Case
 
-SIZE = (256, 256, 128)  # (x, y, z)
+SIZE = geometry.GRID_XYZ  # (x, y, z)
 # raw structural scans; OASIS-1 is gain-field corrected, BraTS is preprocessed, DWI/ADC are not bias-field images
 N4_DATASETS = {"oasis2", "abide1", "ixi_t1", "ixi_t2", "atlas", "isles22_flair",
                "pixar", "piop1", "piop2", "id1000", "wmh_flair", "wmh_t1"}
@@ -35,6 +35,7 @@ class Options:
     template: str | None = None             # skull-on T1 template (MNI152 1 mm)
     template_brain: str | None = None       # optional brain mask in the template frame
     brain_mask: str = "none"                # "auto" | "synthstrip" | "classical" | "none"
+    reg_backend: str = "sitk"               # "sitk" (CPU) | "torch" (GPU when available; registration_torch)
 
 
 def add_cli_options(ap) -> None:
@@ -45,11 +46,13 @@ def add_cli_options(ap) -> None:
     ap.add_argument("--template-brain", default=None, help="brain mask of the template (sets the grid center)")
     ap.add_argument("--brain-mask", choices=list(brainmask.METHODS), default="auto",
                     help="auto = SynthStrip when installed, else classical")
+    ap.add_argument("--reg-backend", choices=["sitk", "torch"], default="sitk",
+                    help="registration engine: SimpleITK on the CPU, or the PyTorch port (GPU) of the same fit")
 
 
 def options_from_args(a) -> Options:
     """Build ``Options`` from parsed flags and fail fast if the template is missing."""
-    opts = Options(a.registration, a.template, a.template_brain, a.brain_mask)
+    opts = Options(a.registration, a.template, a.template_brain, a.brain_mask, a.reg_backend)
     if opts.registration != "none":
         registration.load_template(opts.template or str(registration.default_template_path() or ""),
                                    opts.template_brain)
@@ -78,11 +81,36 @@ def _read(case: Case) -> tuple[sitk.Image, dict]:
     return geometry.read(case.path), {}
 
 
+@dataclass
+class Partial:
+    """A case read, registered and resampled; what is left is the brain mask, intensities and QC (``finish``)."""
+
+    case: Case
+    raw: np.ndarray                                   # (Z, Y, X) float32 on the grid, source units
+    masks: dict[str, np.ndarray]
+    info: dict
+    timing: dict
+    prior: np.ndarray | None                          # template brain on the grid (registered runs)
+    cover: float
+    debug: dict = field(default_factory=dict)
+
+    @property
+    def needs_synthstrip(self) -> bool:
+        return "brain" not in self.masks
+
+
 def process(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = False,
             opts: Options | None = None) -> Result:
     """``z_anchor`` (used when not registering): "volume" centers the slab on the file's z-center; "brain" on the
     brain's z-extent; "auto" is "brain" for CT (neck/torso in the scan must not shift the slab) and "volume" for MRI.
     With registration the slab is fixed in template space and ``z_anchor`` is recorded but unused."""
+    opts = opts or Options()
+    return finish(prepare(case, size, z_anchor, keep_debug, opts), opts)
+
+
+def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = False,
+            opts: Options | None = None) -> Partial:
+    """Read -> (N4) -> center -> (register) -> one resample. CPU only; see ``process`` for ``z_anchor``."""
     opts = opts or Options()
     ct, t = case.modality == "ct", {}
     reg = opts.registration != "none"
@@ -119,18 +147,26 @@ def process(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
         shift = xyz[:2] - geometry.center_xy(img)
         b = sorted(small.TransformContinuousIndexToPhysicalPoint((cx, cy, z))[2] for z in (z0, z1))
 
-    tf, rinfo = None, {}
+    tf, rinfo, prior = None, {}, None
     if reg:
         with stage("register"):
             tpl = registration.load_template(opts.template or str(registration.default_template_path() or ""),
                                              opts.template_brain)
             # the starting pose uses the brain center; z follows the brain's extent so a long CT starts well
             start = np.array(small.TransformContinuousIndexToPhysicalPoint((cx, cy, (z0 + z1) / 2)))
-            rr = registration.register(src, tpl, case.modality, start, opts.registration)
+            if opts.reg_backend == "torch":
+                from brain.prep import registration_torch
+
+                rr = registration_torch.register(src, tpl, case.modality, start, opts.registration,
+                                                 stripped=case.stripped)
+            else:
+                rr = registration.register(src, tpl, case.modality, start, opts.registration, stripped=case.stripped)
+                rr.info["reg_backend"] = "sitk"
             tf, rinfo = rr.transform, rr.info
             grid = registration.output_grid(tpl, size)
             cover = registration.fov_cover(img, tf, tpl, grid)
             center = np.array(tf.TransformPoint(tuple(tpl.center_mm)))
+            prior = registration.template_brain_on_grid(tpl, grid)
     else:
         grid = geometry.target_grid(img, center, size)
         lo, hi = geometry.z_range(grid)
@@ -140,32 +176,58 @@ def process(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
         raw = geometry.resample(img, grid, default=intensity.FLOOR["ct"] if ct else 0.0, tf=tf)
         masks = {n: geometry.resample(geometry.read(p), grid, 0.0, nearest=True, tf=tf).astype(np.uint8)
                  for n, p in case.masks}
+    info |= cinfo | rinfo | {"shift_x_mm": float(shift[0]), "shift_y_mm": float(shift[1]),
+                             "shift_mm": float(np.hypot(*shift)), "modality": case.modality}
+    info |= native.geometry_attrs(img, grid, tf, case)       # map stored arrays back onto the source scan
+    debug = {"src": img, "center_xyz": center, "grid": grid, "old_xy": geometry.center_xy(img), "tf": tf} \
+        if keep_debug else {}
+    return Partial(case, raw, masks, info, t, prior, float(cover), debug)
+
+
+def finish(p: Partial, opts: Options | None = None, synth: np.ndarray | None = None,
+           brain_method: str | None = None) -> Result:
+    """Brain mask -> native units -> QC. ``synth`` is a SynthStrip mask computed elsewhere (a GPU batch);
+    ``brain_method`` overrides ``opts.brain_mask`` (``classical`` when that batch failed)."""
+    opts = opts or Options()
+    case, raw, masks, prior, t = p.case, p.raw, p.masks, p.prior, dict(p.timing)
+    ct = case.modality == "ct"
+    method = brain_method or opts.brain_mask
+
+    @contextmanager
+    def stage(name):
+        t0 = time.perf_counter()
+        yield
+        t[name] = t.get(name, 0.0) + time.perf_counter() - t0
+
     brain = masks.get("brain")                        # a mask shipped with the dataset beats a computed one
     if brain is not None:
         binfo = {"brain_method": "source", "brain_frac": float((brain > 0).mean()), "brain_ok": True}
-    elif opts.brain_mask != "none" and ct:
+    elif method != "none" and ct:
         with stage("brainmask"):                      # CT stats are already in HU: mask first, normalise after
-            brain, binfo = brainmask.compute(raw, raw, "ct", opts.brain_mask, case.stripped)
+            brain, binfo = brainmask.compute(raw, raw, "ct", method, case.stripped, prior=prior,
+                                             fg=None if prior is None else intensity.ct_mask(raw), synth=synth)
     else:
         binfo = {"brain_method": "none"}
     with stage("intensity"):
         if ct:
             vol, stats = intensity.ct_native(raw)
         else:
-            if brain is None and opts.brain_mask != "none":
+            if brain is None and method != "none":
                 # the classical MRI mask reads the head foreground, so build it from a provisional normalisation
                 prov, _ = intensity.mri_native(raw)
                 with stage("brainmask"):
-                    brain, binfo = brainmask.compute(raw, prov.astype(np.float32), "mri", opts.brain_mask,
-                                                     case.stripped, intensity.MRI_FLOOR)
+                    brain, binfo = brainmask.compute(raw, prov.astype(np.float32), "mri", method,
+                                                     case.stripped, intensity.MRI_FLOOR, prior=prior,
+                                                     fg=None if prior is None else prov > intensity.MRI_LO - 0.5,
+                                                     synth=synth)
             use = brain if brain is not None and binfo.get("brain_ok", True) else None
             vol, stats = intensity.mri_native(raw, use)
 
-    info |= cinfo | stats | rinfo | binfo | {"shift_x_mm": float(shift[0]), "shift_y_mm": float(shift[1]),
-                                              "shift_mm": float(np.hypot(*shift)), "brain_cover": float(cover),
-                                              "modality": case.modality}
+    info = p.info | stats | binfo | {"brain_cover": p.cover}
+    if brain is not None and stats.get("fg_frac"):        # ~1 for skull-stripped input, 0.45-0.7 with a skull
+        info["brain_head_ratio"] = float((brain > 0).mean()) / float(stats["fg_frac"])
+    cinfo = {"center_method": info.get("center_method")}
     reasons = (["fg_odd"] if stats["fg_odd"] else []) + (
         [cinfo["center_method"]] if cinfo["center_method"] in ("head_disagree", "fallback") else [])
     info |= {"qc_flag": bool(reasons), "qc_reason": ",".join(reasons)}
-    debug = {"src": img, "center_xyz": center, "grid": grid, "old_xy": geometry.center_xy(img)} if keep_debug else {}
-    return Result(vol, masks, None if brain is None else (brain > 0).astype(np.uint8), info, t, debug)
+    return Result(vol, masks, None if brain is None else (brain > 0).astype(np.uint8), info, t, p.debug)

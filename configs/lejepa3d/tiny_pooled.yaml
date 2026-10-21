@@ -8,7 +8,7 @@ data:
   index_name: volumes.csv
   default_spacing_mm: [1.0, 1.0, 1.0]
   default_origin_mm: [0.0, 0.0, 0.0]
-  volume_size_xyz: [256, 256, 128]
+  volume_size_xyz: [256, 256, 160]
   num_workers: 10
 model: {size: tiny, in_chans: 1, proj_dim: 128, proj_hidden: 2048, qk_norm: true,
   rope_base_mm: 100.0, checkpoint: true, proj_norm: batch, length_buckets: 4, dense_dim: 128,
@@ -42,7 +42,7 @@ loss:
   local_pooled: true
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 0.0, tokens_per_view: 4}
+  dense: {weight: 0.0, tokens_per_view: 32}
 optim: {lr: 0.0005, weight_decay: 0.05, warmup_steps: 2000, clip_grad: 1.0, batch_size: 192}
 train: {max_steps: 45000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 3000}
 output: {out_dir: runs/brainmodel_tiny_pooled}

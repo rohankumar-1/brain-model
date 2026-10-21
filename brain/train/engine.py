@@ -13,6 +13,7 @@ import argparse
 import importlib
 import json
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--log-every", type=int, default=None)
     p.add_argument("--no-resume", action="store_true")
+    p.add_argument("--reset-schedule", action="store_true",
+                   help="on resume, use the config's LR schedule (lr, warmup, max_steps) instead of the saved one")
     p.add_argument("--synthetic", action="store_true", help="tiny phantom volumes, no store (lejepa3d only)")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="dotted config override, repeatable (e.g. --set optim.lr=1e-4)")
@@ -129,7 +132,8 @@ def run(argv: list[str] | None = None) -> None:
 
     step, history, ckpt, resume_src = 0, [], None, None
     best_val, best_step = float("inf"), 0
-    if not (args.no_resume or args.synthetic):
+    synthetic_persist = args.synthetic and os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"
+    if not (args.no_resume or (args.synthetic and not synthetic_persist)):
         resume_from = out_cfg.get("resume_from")
         resume_src = find_resume(out_dir, resolve(resume_from) if resume_from else None)
     if resume_src is not None:
@@ -140,8 +144,33 @@ def run(argv: list[str] | None = None) -> None:
         else:
             step, history = int(ckpt["step"]), list(ckpt.get("history") or [])
             best_val, best_step = float(ckpt.get("best_val", best_val)), int(ckpt.get("best_step", best_step))
+    # The LR schedule is part of the run: a resumed run keeps the one it started with (saved in every checkpoint),
+    # so a changed config or --max-steps cannot silently bend the cosine; --reset-schedule adopts the config's.
+    schedule = {"lr": float(cfg["optim"]["lr"]), "warmup_steps": int(cfg["optim"]["warmup_steps"]),
+                "max_steps": max_steps, "floor": float(cfg["optim"].get("lr_floor", 0.01))}
+    saved = (ckpt or {}).get("schedule")
+    if saved and not args.reset_schedule:
+        if saved != schedule:
+            log(f"[resume] keeping the saved LR schedule {saved} (config gives {schedule}; --reset-schedule to adopt)")
+        schedule = dict(saved)
+        max_steps = int(schedule["max_steps"])
+    args.max_steps = max_steps                         # the trainer reads it too (end-of-run prefetch)
+    if step > 0:
+        # fresh random streams after a resume: the same seeds would replay the batches and augmentation draws
+        # that followed the previous start
+        torch.manual_seed(int(cfg["seed"]) + 1000 * rt.rank + step)
 
     trainer: Trainer = mod.Trainer(rt, cfg, args, ckpt, step)
+    # what this model is trained on, carried in every checkpoint so evaluation records can name it
+    prov = None
+    if rt.main and not args.synthetic:
+        from brain.downstream.records import provenance
+
+        data_cfg = cfg.get("data") or {}
+        root = resolve(data_cfg["store_root"]) if data_cfg.get("store_root") else None
+        prov = provenance(root, root / data_cfg.get("index_name", "volumes.csv") if root else None)
+        prov["method"] = args.method
+        prov["started_from"] = str(resume_src) if resume_src is not None else None
     log(f"[model] {args.method} {trainer.banner()} steps={step}/{max_steps} synthetic={args.synthetic}"
         + (f" resume={resume_src}" if resume_src is not None else "")
         + (f" best={best_val:.4f} @ {best_step}" if math.isfinite(best_val) else ""))
@@ -155,18 +184,20 @@ def run(argv: list[str] | None = None) -> None:
             log("[nan] weights are non-finite; not writing a checkpoint")
             raise SystemExit(4)
         atomic_torch_save({
-            **trainer.state(model_only), "step": step, "config": cfg, "history": history,
+            **trainer.state(model_only), "step": step, "config": cfg, "history": history, "provenance": prov,
+            "schedule": schedule, "lr": lr_at(step, schedule["max_steps"], schedule["lr"], schedule["warmup_steps"],
+                                              schedule["floor"]),
             "best_val": best_val, "best_step": best_step, "best_metric": best_metric,
         }, path)
 
-    persist = not args.synthetic
+    persist = not args.synthetic or os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"   # tests: resume on phantoms
     stop = StopFlag()
     step_w, prefix_w = len(str(max_steps)), len(f"[step {max_steps}/{max_steps}]")
     put = _metric_table(prefix_w, log)
     keys: list[str] | None = None
     acc, seen, t0 = None, 0, time.time()
     while step < max_steps:
-        lr = lr_at(step, max_steps, float(cfg["optim"]["lr"]), int(cfg["optim"]["warmup_steps"]))
+        lr = lr_at(step, schedule["max_steps"], schedule["lr"], schedule["warmup_steps"], schedule["floor"])
         set_lr(trainer.opt, lr)
         metrics = trainer.step(step, lr)
         if keys is None:

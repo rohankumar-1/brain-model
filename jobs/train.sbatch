@@ -32,7 +32,8 @@ if [ -n "${EXPECT_GPUS:-}" ] && [ "$NGPU" -ne "$EXPECT_GPUS" ]; then
   exit 3
 fi
 export REQUEUE_FLAG="logs/.requeue_${SLURM_JOB_ID}"
-rm -f "$REQUEUE_FLAG"
+export STOP_FILE="logs/.stop_${SLURM_JOB_ID}"
+rm -f "$REQUEUE_FLAG" "$STOP_FILE"
 
 echo "[host] $(hostname) $(date -Is) gpus=${NGPU} cpus=${SLURM_CPUS_PER_TASK:-?} method=${METHOD} config=${CONFIG}"
 nvidia-smi -L || true
@@ -45,12 +46,21 @@ else
 fi
 PID=$!
 
-# SIGTERM reaches this shell only (B:), so forward it to the trainer, then wait for it.
-trap 'kill -TERM "$PID" 2>/dev/null' TERM
+# Slurm's warning SIGTERM (--signal=B:TERM@180) reaches this shell only. Ask the trainer to stop through STOP_FILE:
+# it notices within ``train.stop_poll`` steps, writes last.pt, sets REQUEUE_FLAG and exits cleanly. (Forwarding the
+# signal through torchrun kills the ranks and their DataLoader workers before they can checkpoint.) If it has not
+# exited after 150 s, fall back to the signal.
+on_term() {
+  touch "$STOP_FILE"
+  echo "[stop] $(date -Is) asked the trainer to checkpoint and stop"
+  ( sleep 150; kill -0 "$PID" 2>/dev/null && kill -TERM "$PID" 2>/dev/null ) &
+}
+trap on_term TERM
 wait "$PID"; rc=$?
 if [ "$rc" -gt 128 ]; then wait "$PID"; rc=$?; fi
 echo "[exit] rc=${rc} $(date -Is)"
 
+rm -f "$STOP_FILE"
 if [ -f "$REQUEUE_FLAG" ]; then
   rm -f "$REQUEUE_FLAG"
   echo "[requeue] resuming from last.pt"

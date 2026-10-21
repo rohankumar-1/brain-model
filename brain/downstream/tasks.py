@@ -10,6 +10,7 @@ Splits are the ones stored in ``volumes.csv``.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -55,7 +56,6 @@ ICH_REGIONS = {"ICH": (1, 2)}
 
 CLASSIFICATION_TASKS = (
     "cq500",
-    "rsna",
     "rsna_ich",
     "oasis1_cdr",
     "oasis2_cdr",
@@ -70,6 +70,8 @@ REGRESSION_TASKS = (
     "piop1_age",
     "piop2_age",
     "id1000_age",
+    "ms3seg_age",
+    "valdo_epvs",
 )
 SEGMENTATION_TASKS = (
     "seg_cq500",
@@ -83,6 +85,9 @@ SEGMENTATION_TASKS = (
     "isles24",
     "aisd",
     "instance",
+    "ms3seg",
+    "valdo_cmb",
+    "valdo_lacunes",
 )
 # Frozen clf/reg suite (segmentation is ``seg3d`` / ``run_suite`` separately).
 FROZEN_TASKS = CLASSIFICATION_TASKS + REGRESSION_TASKS
@@ -92,9 +97,11 @@ LESION_REGIONS = {"lesion": (1,)}
 # AISD: remote=1, clear acute=2, blurred acute=3, invisible=4, infarct=5. Dice on {1,2,3,5}.
 AISD_REGIONS = {"infarct": (1, 2, 3, 5)}
 WMH_REGIONS = {"WMH": (1,)}
+# MS3SEG staged label map (brain.prep.stage_new): 1 ventricles, 2 normal WMH, 3 MS lesion.
+MS3SEG_REGIONS = {"MS_lesion": (3,), "normal_WMH": (2,), "ventricles": (1,)}
 TASK_NAMES = CLASSIFICATION_TASKS + REGRESSION_TASKS + SEGMENTATION_TASKS
 # Focal pathology: sample a finer axial grid so a 1–3 slice finding is not skipped.
-FOCAL_SLICE_TASKS = frozenset((*SEGMENTATION_TASKS, "cq500", "rsna", "rsna_ich", "msd"))
+FOCAL_SLICE_TASKS = frozenset((*SEGMENTATION_TASKS, "cq500", "rsna_ich", "msd"))
 FOCAL_SLICES = 64
 
 
@@ -183,9 +190,51 @@ def _binarize(frame: pd.DataFrame, labels: list[str], threshold: float) -> np.nd
     return out.to_numpy(dtype=np.int64)
 
 
-def cq500_majority(reads_csv: Path | None = None) -> pd.DataFrame:
-    """3-reader majority vote from Qure.ai reads.csv (0/1 per finding). EDH is omitted."""
-    reads_csv = reads_csv or (DATASETS / "cq500_meta" / "reads.csv")
+# Label tables copied from the raw dataset folders into the store (pool keeps only archives): read them there first.
+LABEL_SOURCES = PROCESSED_ROOT / "labels" / "sources"
+LABEL_FILES = (
+    ("cq500_meta", "reads.csv"),
+    ("oasis", "oasis1", "oasis_cross-sectional.csv"),
+    ("oasis", "oasis2", "oasis_longitudinal.csv"),
+    ("abide1", "Phenotypic_V1_0b.csv"),
+    ("ixi", "IXI.xls"),
+    ("pixar", "participants.tsv"),
+    ("piop1", "participants.tsv"),
+    ("piop2", "participants.tsv"),
+    ("id1000", "participants.tsv"),
+    ("msd_braintumor", "volume_labels.csv"),
+    ("ms3seg", "participants.tsv"),        # written by brain.prep.stage_new
+    ("valdo", "labels.tsv"),
+    ("fomo260k", "participants.tsv"),     # demographics / diagnosis for the multitask model (brain.multitask)
+)
+
+
+def label_file(*parts: str) -> Path:
+    """``labels/sources/<dataset>/...`` in the store when synced, else the file in the pool dataset folder."""
+    local = LABEL_SOURCES.joinpath(*parts)
+    return local if local.exists() else DATASETS.joinpath(*parts)
+
+
+def sync_label_files(dest: Path = LABEL_SOURCES) -> list[Path]:
+    """Copy every downstream label table from pool into the store (idempotent; run before packing pool)."""
+    import shutil
+
+    out = []
+    for parts in LABEL_FILES:
+        src, dst = DATASETS.joinpath(*parts), dest.joinpath(*parts)
+        if not src.exists():
+            continue
+        if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        out.append(dst)
+    return out
+
+
+def cq500_majority(reads_csv: Path | None = None, threshold: float = 0.5) -> pd.DataFrame:
+    """Reader vote from Qure.ai reads.csv (0/1 per finding): positive when at least ``threshold`` of the three
+    readers marked it (0.5 = majority). EDH is omitted."""
+    reads_csv = reads_csv or (label_file("cq500_meta", "reads.csv"))
     df = pd.read_csv(reads_csv)
     out = pd.DataFrame({"name": df["name"].astype(str)})
     for lab in CQ500_LABELS:
@@ -193,7 +242,7 @@ def cq500_majority(reads_csv: Path | None = None) -> pd.DataFrame:
         if not cols:
             raise ValueError(f"{reads_csv} has no reader columns for {lab}")
         votes = df[cols].apply(pd.to_numeric, errors="coerce")
-        out[lab] = (votes.mean(axis=1) >= 0.5).astype(np.int64)
+        out[lab] = (votes.mean(axis=1) >= threshold).astype(np.int64)
     return out
 
 
@@ -204,10 +253,14 @@ def load_cq500_task(
     threshold: float = 0.5,
     reads_csv: Path | None = None,
 ) -> TaskBundle:
-    """CQ500 and Seg-CQ500 together. Labels are 3-reader majority; ``cohort`` is the dataset folder."""
-    labels = cq500_majority(reads_csv)
+    """CQ500 and Seg-CQ500 together. Labels are 3-reader majority; ``cohort`` is the dataset folder.
+
+    Seg-CQ500 re-releases some CQ500 studies; a study present in both is kept once (the ``cq500`` copy) so it does
+    not count twice in train or test. ``threshold`` is the reader-agreement fraction for a positive label."""
+    labels = cq500_majority(reads_csv, threshold)
     ct = volumes[volumes["dataset"].isin(["cq500", "seg_cq500"])].copy()
     ct["name"] = ct["volume_id"].map(_case_name)
+    ct = ct.sort_values("dataset").drop_duplicates("name", keep="first")   # "cq500" sorts before "seg_cq500"
     merged = ct.merge(labels[["name"] + CQ500_LABELS], on="name", how="inner")
     y = merged[CQ500_LABELS].to_numpy(dtype=np.int64)
     return _bundle_from_frame(
@@ -278,10 +331,21 @@ def build_rsna_volume_labels(
     return out
 
 
-def load_rsna_task(volumes: pd.DataFrame, labels: pd.DataFrame | None = None, name: str = "rsna") -> TaskBundle:
+RSNA_MAX_TRAIN = 4000   # frozen heads need far fewer than 18k training studies; the full token cache does not fit
+
+
+def load_rsna_task(volumes: pd.DataFrame, labels: pd.DataFrame | None = None, name: str = "rsna_ich",
+                   max_train: int | None = None) -> TaskBundle:
+    """RSNA study-level subtypes. The train split is subsampled to ``max_train`` studies (env ``BRAIN_RSNA_MAX_TRAIN``;
+    0 = all), stratified on ``any``, with a fixed seed; validation and test are kept whole."""
     labels = labels if labels is not None else build_rsna_volume_labels()
     rsna = volumes[volumes["dataset"] == "rsna_ich"].copy()
     merged = rsna.merge(labels, on="volume_id", how="inner")
+    cap = int(os.environ.get("BRAIN_RSNA_MAX_TRAIN", RSNA_MAX_TRAIN) if max_train is None else max_train)
+    train = merged["split"] == "train"
+    if cap and train.sum() > cap:
+        keep = merged[train].groupby("any").sample(frac=cap / train.sum(), random_state=0).index
+        merged = merged[~train | merged.index.isin(keep)].reset_index(drop=True)
     y = merged[RSNA_LABELS].to_numpy(dtype=np.int64)
     return _bundle_from_frame(name, "multilabel", merged, y, RSNA_LABELS, modality="ct")
 
@@ -297,7 +361,7 @@ def load_oasis1_age_task(
     volumes: pd.DataFrame,
     clinical_csv: Path | None = None,
 ) -> TaskBundle:
-    clinical_csv = clinical_csv or (DATASETS / "oasis" / "oasis1" / "oasis_cross-sectional.csv")
+    clinical_csv = clinical_csv or (label_file("oasis", "oasis1", "oasis_cross-sectional.csv"))
     clin = pd.read_csv(clinical_csv)
     merged = _oasis_sessions(volumes, "oasis1", clin, "ID")
     merged = merged.dropna(subset=["Age"])
@@ -309,7 +373,7 @@ def load_oasis1_cdr_task(
     volumes: pd.DataFrame,
     clinical_csv: Path | None = None,
 ) -> TaskBundle:
-    clinical_csv = clinical_csv or (DATASETS / "oasis" / "oasis1" / "oasis_cross-sectional.csv")
+    clinical_csv = clinical_csv or (label_file("oasis", "oasis1", "oasis_cross-sectional.csv"))
     clin = pd.read_csv(clinical_csv)
     merged = _oasis_sessions(volumes, "oasis1", clin, "ID")
     merged = merged.dropna(subset=["CDR"])
@@ -321,7 +385,7 @@ def load_oasis2_cdr_task(
     volumes: pd.DataFrame,
     clinical_csv: Path | None = None,
 ) -> TaskBundle:
-    clinical_csv = clinical_csv or (DATASETS / "oasis" / "oasis2" / "oasis_longitudinal.csv")
+    clinical_csv = clinical_csv or (label_file("oasis", "oasis2", "oasis_longitudinal.csv"))
     clin = pd.read_csv(clinical_csv)
     merged = _oasis_sessions(volumes, "oasis2", clin, "MRI ID")
     merged = merged.dropna(subset=["CDR"])
@@ -334,7 +398,7 @@ def load_oasis2_conversion_task(
     clinical_csv: Path | None = None,
 ) -> TaskBundle:
     """Baseline session with CDR 0, labeled by whether a later visit has CDR > 0."""
-    clinical_csv = clinical_csv or (DATASETS / "oasis" / "oasis2" / "oasis_longitudinal.csv")
+    clinical_csv = clinical_csv or (label_file("oasis", "oasis2", "oasis_longitudinal.csv"))
     clin = pd.read_csv(clinical_csv)
     clin["CDR"] = pd.to_numeric(clin["CDR"], errors="coerce")
     base = clin[clin["Visit"] == 1].dropna(subset=["CDR"])
@@ -357,7 +421,7 @@ def load_abide_asd_task(
     phenotypic: Path | None = None,
 ) -> TaskBundle:
     """ABIDE I: DX_GROUP 1 = ASD, 2 = control. Cohort is the scan site (FILE_ID prefix)."""
-    phenotypic = phenotypic or (DATASETS / "abide1" / "Phenotypic_V1_0b.csv")
+    phenotypic = phenotypic or (label_file("abide1", "Phenotypic_V1_0b.csv"))
     pheno = pd.read_csv(phenotypic)
     pheno["case_id"] = pheno["FILE_ID"].astype(str)
     vol = volumes[volumes["dataset"] == "abide1"].copy()
@@ -371,8 +435,11 @@ def load_abide_asd_task(
 
 
 def load_ixi_age_task(volumes: pd.DataFrame, xls: Path | None = None) -> TaskBundle:
-    xls = xls or (DATASETS / "ixi" / "IXI.xls")
-    clin = pd.read_excel(xls, engine="xlrd")
+    xls = xls or (label_file("ixi", "IXI.xls"))
+    clin = pd.read_excel(xls, engine="xlrd").dropna(subset=["AGE"])
+    # IXI.xls repeats some subjects: identical rows collapse to one; subjects with conflicting ages are dropped
+    ages = clin.groupby("IXI_ID")["AGE"].agg(lambda a: a.round(2).nunique())
+    clin = clin[clin["IXI_ID"].isin(ages[ages == 1].index)].drop_duplicates("IXI_ID")
     vol = volumes[volumes["dataset"] == "ixi_t1"].copy()
     vol["ixi_id"] = vol["case_id"].str.extract(r"IXI(\d+)", expand=False).astype(int)
     merged = vol.merge(clin, left_on="ixi_id", right_on="IXI_ID", how="inner")
@@ -490,6 +557,45 @@ def load_isles24_task(volumes: pd.DataFrame) -> TaskBundle:
                      mask_col="mask_lesion", modality="ct")
 
 
+def load_ms3seg_task(volumes: pd.DataFrame) -> TaskBundle:
+    return _load_seg("ms3seg", volumes, "ms3seg_flair", MS3SEG_REGIONS, ".seg.zip", mask_col="mask_seg",
+                     modality="mri")
+
+
+def load_valdo_cmb_task(volumes: pd.DataFrame) -> TaskBundle:
+    """Cerebral microbleeds on T2* (VALDO Task 2), rater union."""
+    return _load_seg("valdo_cmb", volumes, "valdo_t2s", {"CMB": (1,)}, ".lesion.zip", mask_col="mask_lesion",
+                     modality="mri")
+
+
+def load_valdo_lacunes_task(volumes: pd.DataFrame) -> TaskBundle:
+    """Lacunes on T1 (VALDO Task 3), rater union. Only Task-3 T1 volumes carry the mask."""
+    return _load_seg("valdo_lacunes", volumes, "valdo_t1", {"lacune": (1,)}, ".lesion.zip", mask_col="mask_lesion",
+                     modality="mri")
+
+
+def load_ms3seg_age_task(volumes: pd.DataFrame) -> TaskBundle:
+    part = pd.read_csv(label_file("ms3seg", "participants.tsv"), sep="\t", dtype={"participant_id": str})
+    vol = volumes[volumes["dataset"] == "ms3seg_flair"].copy()
+    vol["participant_id"] = vol["case_id"].astype(str)
+    merged = vol.merge(part, on="participant_id", how="inner")
+    merged = merged.dropna(subset=["age"])
+    return _bundle_from_frame("ms3seg_age", "regression", merged, merged["age"].to_numpy(np.float64), ["Age"],
+                              modality="mri")
+
+
+def load_valdo_epvs_task(volumes: pd.DataFrame) -> TaskBundle:
+    """Enlarged perivascular space burden (VALDO Task 1): log(1 + rated EPVS count over the annotated regions)."""
+    lab = pd.read_csv(label_file("valdo", "labels.tsv"), sep="\t", dtype={"participant_id": str})
+    lab = lab[(lab["task"] == "t1") & lab["epvs_count"].notna()].copy()
+    lab["case_id"] = "t1_" + lab["participant_id"]
+    vol = volumes[volumes["dataset"] == "valdo_t1"].copy()
+    vol["case_id"] = vol["case_id"].astype(str)
+    merged = vol.merge(lab[["case_id", "epvs_count"]], on="case_id", how="inner")
+    y = np.log1p(merged["epvs_count"].to_numpy(np.float64))
+    return _bundle_from_frame("valdo_epvs", "regression", merged, y, ["log1p_EPVS"], modality="mri")
+
+
 def load_aisd_task(volumes: pd.DataFrame) -> TaskBundle:
     return _load_seg("aisd", volumes, "aisd", AISD_REGIONS, ".lesion.zip",
                      mask_col="mask_lesion", modality="ct")
@@ -535,7 +641,7 @@ def resolve_msd_labels(labels_csv: Path | None = None) -> pd.DataFrame:
     if labels_csv is not None:
         candidates.append(Path(labels_csv))
     candidates.append(DEFAULT_VOLUMES.parent / "labels" / "msd_volume_labels.csv")
-    pool = DATASETS / "msd_braintumor" / "volume_labels.csv"
+    pool = label_file("msd_braintumor", "volume_labels.csv")
     for path in candidates:
         if path.is_file():
             return _msd_with_targets(pd.read_csv(path))
@@ -591,7 +697,7 @@ def load_task(
 ) -> TaskBundle:
     if name == "cq500":
         return load_cq500_task(volumes, threshold=threshold)
-    if name in ("rsna", "rsna_ich"):
+    if name == "rsna_ich":
         return load_rsna_task(volumes, name=name)
     if name == "oasis1_age":
         return load_oasis1_age_task(volumes)
@@ -606,13 +712,13 @@ def load_task(
     if name == "ixi_age":
         return load_ixi_age_task(volumes)
     if name == "pixar_age":
-        return load_bids_age_task(volumes, "pixar", DATASETS / "pixar" / "participants.tsv")
+        return load_bids_age_task(volumes, "pixar", label_file("pixar", "participants.tsv"))
     if name == "piop1_age":
-        return load_bids_age_task(volumes, "piop1", DATASETS / "piop1" / "participants.tsv")
+        return load_bids_age_task(volumes, "piop1", label_file("piop1", "participants.tsv"))
     if name == "piop2_age":
-        return load_bids_age_task(volumes, "piop2", DATASETS / "piop2" / "participants.tsv")
+        return load_bids_age_task(volumes, "piop2", label_file("piop2", "participants.tsv"))
     if name == "id1000_age":
-        return load_bids_age_task(volumes, "id1000", DATASETS / "id1000" / "participants.tsv")
+        return load_bids_age_task(volumes, "id1000", label_file("id1000", "participants.tsv"))
     if name == "seg_cq500":
         return load_seg_cq500_task(volumes)
     if name == "brats2023_gli":
@@ -635,6 +741,16 @@ def load_task(
         return load_aisd_task(volumes)
     if name == "instance":
         return load_instance_task(volumes)
+    if name == "ms3seg":
+        return load_ms3seg_task(volumes)
+    if name == "valdo_cmb":
+        return load_valdo_cmb_task(volumes)
+    if name == "valdo_lacunes":
+        return load_valdo_lacunes_task(volumes)
+    if name == "ms3seg_age":
+        return load_ms3seg_age_task(volumes)
+    if name == "valdo_epvs":
+        return load_valdo_epvs_task(volumes)
     if name == "msd":
         return load_msd_task(volumes, labels_csv=msd_labels, target=msd_target)
     raise KeyError(f"Unknown task {name}. Choices: {', '.join(TASK_NAMES)}")
@@ -698,9 +814,15 @@ def task_summary(task: TaskBundle) -> str:
 
 
 def main() -> None:
+    import sys
+
+    if "--sync-labels" in sys.argv:
+        for f in sync_label_files():
+            print(f"[labels] {f}")
+        return
     volumes = load_volumes()
     for name in TASK_NAMES:
-        if name in ("msd", "rsna"):
+        if name == "msd":
             continue
         task = load_task(name, volumes)
         print(task_summary(task))

@@ -62,13 +62,17 @@ def shutdown(rt: Runtime) -> None:
 
 
 class StopFlag:
-    """Set by SIGTERM/SIGINT. ``poll`` agrees across ranks so all stop on the same step.
+    """Set by SIGTERM/SIGINT, or by the file named in ``STOP_FILE`` appearing. ``poll`` agrees across ranks so all
+    stop on the same step.
 
-    The trainer checks it between steps, so a checkpoint is never written mid-update.
+    The trainer checks it between steps, so a checkpoint is never written mid-update. The file is how the sbatch
+    wrapper asks for a clean stop before the time limit: a SIGTERM sent through ``torchrun`` makes it tear the ranks
+    and their DataLoader workers down before they can checkpoint.
     """
 
     def __init__(self) -> None:
         self.flag = False
+        self.stop_file = os.environ.get("STOP_FILE")
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, self._set)
 
@@ -76,6 +80,8 @@ class StopFlag:
         self.flag = True
 
     def poll(self, device: torch.device) -> bool:
+        if self.stop_file and Path(self.stop_file).exists():
+            self.flag = True
         if not (dist.is_available() and dist.is_initialized()):
             return self.flag
         t = torch.tensor(float(self.flag), device=device)

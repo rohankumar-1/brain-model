@@ -5,16 +5,20 @@ import torch
 
 from brain.downstream.heads import AttnEnsemble
 from brain.downstream.token_probes import AttnProbe, ConvProbe, GRID_ZYX, make_token_heads
+from brain.common.grid import DEPTH, FINE_TOKEN_GRID, GRID_XYZ, TOKEN_GRID
+
+N_TOK = TOKEN_GRID[0] * TOKEN_GRID[1] * TOKEN_GRID[2]
+N_FINE = FINE_TOKEN_GRID[0] * FINE_TOKEN_GRID[1] * FINE_TOKEN_GRID[2]
 
 
 def _data(n, dim=16, seed=0):
     """Positives carry a small shift on channel 0 of every token."""
     rng = np.random.default_rng(seed)
-    x = rng.normal(size=(n, 4096, dim)).astype(np.float32)
+    x = rng.normal(size=(n, N_TOK, dim)).astype(np.float32)
     y = (np.arange(n) % 2).astype(np.float32)
     x[y == 1, :, 0] += 0.3
     g = np.stack(np.meshgrid(*[np.linspace(0, 1, s) for s in GRID_ZYX], indexing="ij"), -1).reshape(-1, 3)
-    return x, y.reshape(-1, 1), np.ones((n, 4096), bool), np.broadcast_to(g, (n, 4096, 3)).astype(np.float32)
+    return x, y.reshape(-1, 1), np.ones((n, N_TOK), bool), np.broadcast_to(g, (n, N_TOK, 3)).astype(np.float32)
 
 
 def _auc(y, s):
@@ -53,14 +57,14 @@ def test_attn_ensemble_trains_a_large_grid_from_host_memory():
 
 
 def test_conv_probe_accepts_the_fine_grid():
-    x = torch.zeros(2, 32768, 4)
-    m = torch.ones(2, 32768, dtype=torch.bool)
-    z = torch.zeros(2, 32768, 3)
-    out = ConvProbe(4, 1, grid_zyx=(32, 32, 32), width=8)(x, m, z)
+    x = torch.zeros(2, N_FINE, 4)
+    m = torch.ones(2, N_FINE, dtype=torch.bool)
+    z = torch.zeros(2, N_FINE, 3)
+    out = ConvProbe(4, 1, grid_zyx=FINE_TOKEN_GRID, width=8)(x, m, z)
     assert out.shape == (2, 1) and bool(torch.isfinite(out).all())
     from brain.downstream.token_readout import token_grid_zyx
-    assert token_grid_zyx(4096) == (16, 16, 16)
-    assert token_grid_zyx(32768) == (32, 32, 32)
+    assert token_grid_zyx(N_TOK) == TOKEN_GRID
+    assert token_grid_zyx(N_FINE) == FINE_TOKEN_GRID and token_grid_zyx(4096) is None
     assert token_grid_zyx(100) is None
 
 

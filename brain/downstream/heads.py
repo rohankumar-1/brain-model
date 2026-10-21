@@ -20,13 +20,14 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from brain.common.optim import lr_at
+from brain.common.grid import DEPTH
 
 DEFAULT_HEADS = "logreg_pool"
 LOGREG_CS = np.logspace(-2, 2, 9)
 RIDGE_ALPHAS = np.logspace(-1, 4, 12)
 _XGB = dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.9,
             colsample_bytree=0.9, n_jobs=4, tree_method="hist")
-VOLUME_DEPTH = 128
+VOLUME_DEPTH = DEPTH
 
 
 def mean_pool(x: np.ndarray, mask: np.ndarray) -> np.ndarray:

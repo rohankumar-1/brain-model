@@ -10,6 +10,14 @@ BRAIN_USER_SITE="${BRAIN_USER_SITE:-/home/roku/.local/lib/python3.12/site-packag
 cd "$BRAIN_REPO"
 mkdir -p logs
 
+# Standalone SynthStrip (weights + wrapper under scratch; not a full FreeSurfer install).
+export FREESURFER_HOME="${FREESURFER_HOME:-/home/roku/orcd/scratch/brain-model/tools/synthstrip}"
+export BRAIN_SYNTHSTRIP="${BRAIN_SYNTHSTRIP:-$FREESURFER_HOME/bin/mri_synthstrip}"
+# Registration template and its brain mask (also the brain-mask QC prior used by remask).
+export BRAIN_TEMPLATE="${BRAIN_TEMPLATE:-/home/roku/orcd/scratch/brain-model/templates/MNI152_T1_1mm.nii.gz}"
+export BRAIN_TEMPLATE_BRAIN="${BRAIN_TEMPLATE_BRAIN:-/home/roku/orcd/scratch/brain-model/templates/MNI152_T1_1mm_brain_mask.nii.gz}"
+export PATH="$FREESURFER_HOME/bin:$PATH"
+
 unset PYTHONPATH WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
 export PYTHONNOUSERSITE=True
 export OMP_NUM_THREADS="${OMP_THREADS:-1}" MKL_NUM_THREADS="${OMP_THREADS:-1}" OPENBLAS_NUM_THREADS="${OMP_THREADS:-1}"

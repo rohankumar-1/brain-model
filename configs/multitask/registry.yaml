@@ -1,0 +1,359 @@
+# Task registry for the task-conditioned multitask model (brain.multitask).
+#
+# A task is semantic, not a dataset: "whole tumour" is one task whose labels come from the glioma, meningioma and
+# paediatric cohorts; "age" one task over every cohort with ages. Each task has
+#   type          binary | regression | multiclass | segmentation | survival
+#   descriptions  what the task asks (documentation; embedded only for the ``slot.embedding: text`` ablation)
+#   classes       (multiclass) class names, embedded with the same text encoder as the descriptions
+#   role          train      labels from ``use: train`` sources (split == train) are trained on
+#                 held_out   never trained; evaluated few-shot (a new task embedding fitted on k labelled scans)
+#   analog        (held_out) the trained task it is closest to, for reporting
+#   sources       label adapters (brain.multitask.labels.SOURCES) with their parameters. ``use: eval`` sources
+#                 add evaluation-only cohorts of a trained task (same request, unseen cohort).
+#
+# Leakage rules (enforced by the label builder): ``use: train`` sources only read pretraining-pool volumes
+# (held-out families never), and training reads only their split == train rows. Downstream-suite tasks that share
+# training labels (rsna_ich, brats* segmentation) become *seen* tasks in the frozen suite: report them separately.
+
+text_encoder: NeuML/pubmedbert-base-embeddings
+
+tasks:
+  # ---------------------------------------------------------------- demographics (FOMO participants tables)
+  - id: age
+    type: regression
+    descriptions:
+      - "Estimate the age of the person in years from this brain scan."
+      - "How old is this subject?"
+      - "Predict chronological age from brain anatomy."
+    sources:
+      - {source: fomo_participants, field: age,
+         families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian]}
+      - {source: downstream, task: ms3seg_age, use: eval}
+      - {source: downstream, task: oasis1_age, use: eval}
+      - {source: downstream, task: ixi_age, use: eval}
+
+  - id: sex
+    type: binary
+    descriptions:
+      - "Is this person male?"
+      - "Predict whether the subject's sex is male rather than female."
+    sources:
+      - {source: fomo_participants, field: sex, map: {M: 1, F: 0, m: 1, f: 0, male: 1, female: 0},
+         families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian]}
+
+  # ---------------------------------------------------------------- diagnosis
+  - id: neuro_diagnosis
+    type: multiclass
+    classes: ["cognitively normal", "Alzheimer's disease", "frontotemporal dementia", "multiple sclerosis"]
+    descriptions:
+      - "Which neurological diagnosis best fits this brain MRI?"
+      - "Classify the patient's neurodegenerative or neuroinflammatory condition."
+    sources:
+      - {source: fomo_participants, field: group, families: [fomo_brainlat],
+         map: {CN: "cognitively normal", AD: "Alzheimer's disease", FTD: "frontotemporal dementia",
+               MS: "multiple sclerosis"}}
+
+  - id: tumor_type
+    type: multiclass
+    classes: ["glioma", "meningioma", "pediatric brain tumor", "brain metastasis"]
+    descriptions:
+      - "What type of brain tumor is present?"
+      - "Classify the intracranial tumor: glioma, meningioma, pediatric tumor or metastasis."
+    sources:
+      - {source: family_class, map: {brats_gli: glioma, brats_men: meningioma, brats_ped: "pediatric brain tumor",
+                                     fomo_yale_mets: "brain metastasis"}}
+
+  # ---------------------------------------------------------------- CT hemorrhage (RSNA, study level)
+  - id: hemorrhage_any
+    type: binary
+    descriptions:
+      - "Is there any intracranial hemorrhage on this head CT?"
+      - "Detect bleeding inside the skull."
+    sources: [{source: rsna, subtype: any}]
+  - id: hemorrhage_epidural
+    type: binary
+    descriptions: ["Is there an epidural hematoma?", "Detect blood between the skull and the dura."]
+    sources: [{source: rsna, subtype: epidural}]
+  - id: hemorrhage_intraparenchymal
+    type: binary
+    descriptions: ["Is there an intraparenchymal hemorrhage?", "Detect bleeding within the brain tissue."]
+    sources: [{source: rsna, subtype: intraparenchymal}]
+  - id: hemorrhage_intraventricular
+    type: binary
+    descriptions: ["Is there intraventricular hemorrhage?", "Detect blood inside the ventricles."]
+    sources: [{source: rsna, subtype: intraventricular}]
+  - id: hemorrhage_subarachnoid
+    type: binary
+    descriptions: ["Is there subarachnoid hemorrhage?", "Detect blood in the subarachnoid space and sulci."]
+    sources: [{source: rsna, subtype: subarachnoid}]
+  - id: hemorrhage_subdural
+    type: binary
+    descriptions: ["Is there a subdural hematoma?", "Detect a crescent of blood between the dura and the brain."]
+    sources: [{source: rsna, subtype: subdural}]
+
+  # ---------------------------------------------------------------- derived, every scan (dense labels)
+  - id: brain_volume
+    type: regression
+    descriptions:
+      - "Estimate the brain volume after normalisation to a standard head size."
+      - "How much brain tissue is there relative to head size (atrophy)?"
+    sources: [{source: brain_volume}]
+
+  - id: brain_mask
+    type: segmentation
+    descriptions:
+      - "Segment the brain (skull stripping)."
+      - "Outline all brain tissue, excluding skull, scalp and air."
+    sources: [{source: brain_mask}]
+
+  - id: brain_asymmetry
+    type: regression
+    descriptions:
+      - "How asymmetric is the brain outline between the left and right hemispheres?"
+      - "Quantify left-right asymmetry of brain shape, as from mass effect or focal atrophy."
+    sources: [{source: live, name: mask_asym}]
+
+  - id: intensity_asymmetry
+    type: regression
+    descriptions:
+      - "How different are the left and right hemispheres in signal intensity?"
+      - "Quantify left-right asymmetry of brain tissue intensity, as caused by a focal lesion."
+    sources: [{source: live, name: intensity_asym}]
+
+  - id: ct_csf_fraction
+    type: regression
+    descriptions:
+      - "Estimate the fraction of the intracranial space occupied by cerebrospinal fluid on CT."
+      - "How enlarged are the ventricles and sulci (CSF fraction) on this head CT?"
+    sources: [{source: live, name: ct_csf_frac, modality: ct}]
+
+  - id: ct_brain_density
+    type: regression
+    descriptions:
+      - "Estimate the mean attenuation of brain tissue in Hounsfield units."
+      - "What is the typical CT density of the brain parenchyma?"
+    sources: [{source: live, name: ct_brain_hu, modality: ct}]
+
+  # ---------------------------------------------------------------- tumour (BraTS subject segmentations)
+  - id: whole_tumor
+    type: segmentation
+    descriptions:
+      - "Segment the whole tumor including the surrounding edema."
+      - "Outline the full abnormal region of the tumor: core and peritumoral swelling."
+    sources:
+      - {source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 2, 3]}
+      - {source: mask_column, families: [msd_braintumor], column: mask_seg, ids: [1, 2, 3], use: eval}
+  - id: tumor_core
+    type: segmentation
+    descriptions:
+      - "Segment the tumor core: enhancing and necrotic tumor, without edema."
+      - "Outline the solid and necrotic tumor core."
+    sources: [{source: brats_seg, families: [brats_gli, brats_men], ids: [1, 3]}]
+  - id: enhancing_tumor
+    type: segmentation
+    descriptions:
+      - "Segment the contrast-enhancing tumor."
+      - "Outline the tumor tissue that enhances after gadolinium."
+    sources: [{source: brats_seg, families: [brats_gli, brats_men], ids: [3]}]
+  - id: resection_cavity
+    type: segmentation
+    descriptions:
+      - "Segment the surgical resection cavity."
+      - "Outline the cavity left by tumor resection."
+    sources: [{source: brats_seg, families: [brats_gli], datasets: [brats2024_gli], ids: [4]}]
+  - id: tumor_volume
+    type: regression
+    descriptions:
+      - "Estimate the total volume of the tumor and edema."
+      - "How large is the tumor burden?"
+    sources: [{source: brats_seg_volume, families: [brats_gli, brats_men, brats_ped], ids: [1, 2, 3]}]
+
+
+  # ---------------------------------------------------------------- SynthSeg-robust 2.0 (brain.prep.synthseg)
+  # Structure masks (left + right merged) and template-space volumes / ratios / asymmetries of QC-passed scans.
+  # Template space = affine-registered, so volumes are already normalised for head size.
+  - id: seg_ventricles
+    type: segmentation
+    descriptions: ["Segment the ventricular system (lateral, third and fourth ventricles).", "Outline the cerebrospinal-fluid-filled ventricles of the brain."]
+    sources: [{source: synthseg_seg, group: ventricles}]
+  - id: seg_hippocampus
+    type: segmentation
+    descriptions: ["Segment both hippocampi.", "Outline the hippocampal formation in the medial temporal lobes."]
+    sources: [{source: synthseg_seg, group: hippocampus}]
+  - id: seg_amygdala
+    type: segmentation
+    descriptions: ["Segment both amygdalae.", "Outline the amygdala in each medial temporal lobe."]
+    sources: [{source: synthseg_seg, group: amygdala}]
+  - id: seg_thalamus
+    type: segmentation
+    descriptions: ["Segment both thalami.", "Outline the thalamus on each side of the third ventricle."]
+    sources: [{source: synthseg_seg, group: thalamus}]
+  - id: seg_caudate
+    type: segmentation
+    descriptions: ["Segment the caudate nuclei.", "Outline the caudate nucleus beside each lateral ventricle."]
+    sources: [{source: synthseg_seg, group: caudate}]
+  - id: seg_putamen
+    type: segmentation
+    descriptions: ["Segment the putamen on both sides.", "Outline the putamen of the basal ganglia."]
+    sources: [{source: synthseg_seg, group: putamen}]
+  - id: seg_pallidum
+    type: segmentation
+    descriptions: ["Segment the globus pallidus on both sides.", "Outline the pallidum medial to the putamen."]
+    sources: [{source: synthseg_seg, group: pallidum}]
+  - id: seg_cortex
+    type: segmentation
+    descriptions: ["Segment the cerebral cortex (grey matter).", "Outline the cortical grey-matter ribbon of both hemispheres."]
+    sources: [{source: synthseg_seg, group: cortex}]
+  - id: seg_white_matter
+    type: segmentation
+    descriptions: ["Segment the cerebral white matter.", "Outline the white matter of both cerebral hemispheres."]
+    sources: [{source: synthseg_seg, group: white_matter}]
+  - id: seg_cerebellum
+    type: segmentation
+    descriptions: ["Segment the cerebellum.", "Outline the cerebellar cortex and white matter."]
+    sources: [{source: synthseg_seg, group: cerebellum}]
+  - id: seg_brainstem
+    type: segmentation
+    descriptions: ["Segment the brainstem.", "Outline the midbrain, pons and medulla."]
+    sources: [{source: synthseg_seg, group: brainstem}]
+  - id: seg_csf
+    type: segmentation
+    descriptions: ["Segment the extraventricular cerebrospinal fluid.", "Outline the CSF in the sulci and cisterns outside the ventricles."]
+    sources: [{source: synthseg_seg, group: csf}]
+  - id: vol_log_ventricles
+    type: regression
+    descriptions: ["Estimate the (log) volume of the ventricles, normalised for head size.", "How enlarged are the ventricles?"]
+    sources: [{source: synthseg_measure, measure: log_ventricles}]
+  - id: vol_log_csf
+    type: regression
+    descriptions: ["Estimate the (log) volume of extraventricular CSF, normalised for head size.", "How much CSF fills the sulci and cisterns?"]
+    sources: [{source: synthseg_measure, measure: log_csf}]
+  - id: vol_hippocampus
+    type: regression
+    descriptions: ["Estimate the volume of the hippocampi, normalised for head size.", "How large are the hippocampi (atrophy)?"]
+    sources: [{source: synthseg_measure, measure: hippocampus}]
+  - id: vol_amygdala
+    type: regression
+    descriptions: ["Estimate the volume of the amygdalae, normalised for head size.", "How large are the amygdalae?"]
+    sources: [{source: synthseg_measure, measure: amygdala}]
+  - id: vol_thalamus
+    type: regression
+    descriptions: ["Estimate the volume of the thalami, normalised for head size.", "How large are the thalami?"]
+    sources: [{source: synthseg_measure, measure: thalamus}]
+  - id: vol_caudate
+    type: regression
+    descriptions: ["Estimate the volume of the caudate nuclei, normalised for head size.", "How large are the caudate nuclei?"]
+    sources: [{source: synthseg_measure, measure: caudate}]
+  - id: vol_putamen
+    type: regression
+    descriptions: ["Estimate the volume of the putamen, normalised for head size.", "How large is the putamen?"]
+    sources: [{source: synthseg_measure, measure: putamen}]
+  - id: vol_cortex
+    type: regression
+    descriptions: ["Estimate the cerebral cortical grey-matter volume, normalised for head size.", "How much cortical grey matter is there?"]
+    sources: [{source: synthseg_measure, measure: cortex}]
+  - id: vol_white_matter
+    type: regression
+    descriptions: ["Estimate the cerebral white-matter volume, normalised for head size.", "How much cerebral white matter is there?"]
+    sources: [{source: synthseg_measure, measure: white_matter}]
+  - id: vol_cerebellum
+    type: regression
+    descriptions: ["Estimate the cerebellar volume, normalised for head size.", "How large is the cerebellum?"]
+    sources: [{source: synthseg_measure, measure: cerebellum}]
+  - id: vol_brainstem
+    type: regression
+    descriptions: ["Estimate the brainstem volume, normalised for head size.", "How large is the brainstem?"]
+    sources: [{source: synthseg_measure, measure: brainstem}]
+  - id: vol_deep_gm
+    type: regression
+    descriptions: ["Estimate the deep grey-matter volume (basal ganglia, thalamus, ventral diencephalon), normalised for head size.", "How much deep grey matter is there?"]
+    sources: [{source: synthseg_measure, measure: deep_gm}]
+  - id: vol_parenchymal_fraction
+    type: regression
+    descriptions: ["Estimate the brain parenchymal fraction: brain tissue over brain plus CSF.", "What fraction of the intracranial space is brain tissue?"]
+    sources: [{source: synthseg_measure, measure: parenchymal_fraction}]
+  - id: vol_log_ventricle_brain_ratio
+    type: regression
+    descriptions: ["Estimate the ventricle-to-brain volume ratio (log).", "How large are the ventricles relative to the brain?"]
+    sources: [{source: synthseg_measure, measure: log_ventricle_brain_ratio}]
+  - id: vol_gm_wm_ratio
+    type: regression
+    descriptions: ["Estimate the grey-to-white matter volume ratio.", "What is the ratio of grey matter to white matter?"]
+    sources: [{source: synthseg_measure, measure: gm_wm_ratio}]
+  - id: vol_hippocampus_asym
+    type: regression
+    descriptions: ["Quantify left-right asymmetry of hippocampal volume.", "How different are the left and right hippocampi in size?"]
+    sources: [{source: synthseg_measure, measure: hippocampus_asym}]
+  - id: vol_ventricle_asym
+    type: regression
+    descriptions: ["Quantify left-right asymmetry of the lateral ventricles.", "How different are the left and right lateral ventricles in size?"]
+    sources: [{source: synthseg_measure, measure: ventricle_asym}]
+  - id: vol_cortex_asym
+    type: regression
+    descriptions: ["Quantify left-right asymmetry of cortical volume.", "How different are the cortical volumes of the two hemispheres?"]
+    sources: [{source: synthseg_measure, measure: cortex_asym}]
+
+  # ================================================================ held out (never trained; few-shot evaluation)
+  - id: cq500_hemorrhage
+    role: held_out
+    analog: hemorrhage_any
+    type: binary
+    descriptions: ["Does this head CT show intracranial bleeding?"]
+    sources: [{source: cq500, finding: ICH}]
+  - id: cq500_intraparenchymal
+    role: held_out
+    analog: hemorrhage_intraparenchymal
+    type: binary
+    descriptions: ["Is there bleeding in the brain parenchyma?"]
+    sources: [{source: cq500, finding: IPH}]
+  - id: cq500_subdural
+    role: held_out
+    analog: hemorrhage_subdural
+    type: binary
+    descriptions: ["Is there a subdural hemorrhage?"]
+    sources: [{source: cq500, finding: SDH}]
+  - id: cq500_fracture
+    role: held_out
+    type: binary
+    descriptions: ["Is there a fracture of the skull vault?"]
+    sources: [{source: cq500, finding: CalvarialFracture}]
+  - id: cq500_midline_shift
+    role: held_out
+    analog: brain_asymmetry
+    type: binary
+    descriptions: ["Is there a shift of the midline structures?"]
+    sources: [{source: cq500, finding: MidlineShift}]
+  - id: cq500_mass_effect
+    role: held_out
+    type: binary
+    descriptions: ["Is there mass effect compressing brain structures?"]
+    sources: [{source: cq500, finding: MassEffect}]
+  - id: dementia
+    role: held_out
+    analog: neuro_diagnosis
+    type: binary
+    descriptions: ["Does this person have dementia?"]
+    sources:
+      - {source: fomo_participants, field: group, families: [fomo_nigerian], map: {Dementia: 1, Control: 0}}
+      - {source: downstream, task: oasis1_cdr}
+  - id: stroke_lesion
+    role: held_out
+    type: segmentation
+    descriptions: ["Segment the stroke lesion."]
+    sources: [{source: downstream, task: atlas}, {source: downstream, task: isles22}]
+  - id: white_matter_hyperintensities
+    role: held_out
+    type: segmentation
+    descriptions: ["Segment the white matter hyperintensities."]
+    sources: [{source: downstream, task: wmh}]
+  - id: ms_lesions
+    role: held_out
+    type: segmentation
+    descriptions: ["Segment the multiple sclerosis lesions."]
+    sources: [{source: downstream, task: ms3seg, ids: [3]}]
+  - id: hemorrhage_segmentation
+    role: held_out
+    analog: hemorrhage_any
+    type: segmentation
+    descriptions: ["Segment the intracranial hemorrhage."]
+    sources: [{source: downstream, task: seg_cq500}, {source: downstream, task: instance}]

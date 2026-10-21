@@ -1,0 +1,80 @@
+# Prefix-token ablation, arm B: one CLS token; it carries the pooled (global) objectives, patch tokens the dense ones.
+# Identical to configs/lejepa3d/small.yaml except model.n_cls / model.n_registers and output.out_dir.
+#   jobs/submit_ablation_prefix.sh   (all arms, then the downstream suite per arm)
+# 3D LeJEPA small: the tiny dense native-grid recipe, scaled the way 2D small was.
+#
+# Encoder is ViT-S/16 (dim 384, 6 heads, 12 blocks) instead of tiny (192 / 3 / 12).
+# Per-GPU batch is halved (96 vs 192) so activations fit an L40S; lr is linearly
+# scaled from tiny's 5e-4. No masked-prediction head: it did not move Dice on tiny.
+# Masked prediction is on (context term + 2x2x2 cell-mean local term), as on tiny predict_8k:
+# it raised lesion-lift MLP and position R2; it did not change Dice. Score later at 8x8x4.
+#
+# Crops lie on the volume's own token grid, so crops that overlap share tokens exactly.
+
+seed: 42
+
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  default_origin_mm: [0.0, 0.0, 0.0]
+  volume_size_xyz: [256, 256, 160]
+  num_workers: 10
+  balance_alpha: 0.5
+
+model:
+  n_cls: 1
+  n_registers: 0
+  size: small
+  in_chans: 1
+  proj_dim: 128
+  proj_hidden: 2048
+  qk_norm: true
+  rope_base_mm: 100.0
+  checkpoint: true
+  proj_norm: batch
+  length_buckets: 4
+  dense_dim: 128
+  dense_hidden: 1024
+
+views:
+  patch_xyz: [16, 16, 8]
+  global: {n: 2, size_xyz: [128, 128, 64]}
+  local: {n: 2, size_xyz: [64, 64, 32]}
+  fine: {n: 2, size_xyz: [32, 32, 16], patch_xyz: [8, 8, 4]}
+  nested: true
+  fg_min: 0.15
+  retries: 8
+  gate: {ct_hu: [-500.0, 200.0], mri_lo: -5.5}
+
+aug:
+  window: {mode: random, mix: brain}
+  noise: {p: 0.5, sigma: [0.02, 0.15]}
+  blur: {p: 0.3, sigma_vox: [0.5, 1.5]}
+  drift: {p: 0.3, amp: 0.25}
+
+loss:
+  lamb: 0.02
+  win_weight: 1.0
+  local_pooled: false
+  n_proj: 256
+  gather_ddp: true
+  dense: {weight: 1.0, tokens_per_view: 32}
+  predict: {weight: 1.0, pixel_weight: 0.5, pixel_cells: [2, 2, 2], blocks: 3, block_tokens: [3, 6], depth: 4, ramp_steps: 2000}
+
+optim:
+  lr: 0.00025
+  weight_decay: 0.05
+  warmup_steps: 2000
+  clip_grad: 1.0
+  batch_size: 96
+
+train:
+  max_steps: 30000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 3000
+
+output:
+  out_dir: runs/ablate_prefix/cls

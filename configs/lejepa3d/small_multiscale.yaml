@@ -21,7 +21,7 @@ data:
   index_name: volumes.csv
   default_spacing_mm: [1.0, 1.0, 1.0]
   default_origin_mm: [0.0, 0.0, 0.0]
-  volume_size_xyz: [256, 256, 128]
+  volume_size_xyz: [256, 256, 160]
   num_workers: 10
   balance_alpha: 0.5
 
@@ -60,7 +60,7 @@ loss:
   local_pooled: false
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 1.0, tokens_per_view: 4, stopgrad_mean: true, fine_weight: 1.0}
+  dense: {weight: 1.0, tokens_per_view: 32, stopgrad_mean: true, fine_weight: 1.0}
   predict:
     weight: 1.0
     pixel_weight: 0.5

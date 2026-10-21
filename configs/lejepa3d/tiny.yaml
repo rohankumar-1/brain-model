@@ -14,7 +14,7 @@ data:
   index_name: volumes.csv
   default_spacing_mm: [1.0, 1.0, 1.0]
   default_origin_mm: [0.0, 0.0, 0.0]
-  volume_size_xyz: [256, 256, 128]
+  volume_size_xyz: [256, 256, 160]
   num_workers: 10
   balance_alpha: 0.5     # family sampling mass ~ n**alpha (1 = natural mix, ~60% RSNA CT)
 
@@ -53,7 +53,7 @@ loss:
   local_pooled: false
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 1.0, tokens_per_view: 4}
+  dense: {weight: 1.0, tokens_per_view: 32}
 
 optim:
   lr: 0.0005

@@ -1,59 +1,87 @@
-# Downstream on the 3D BrainModel
+# Downstream evaluation and the experiment database
 
-The existing suite (`brain/downstream/run_suite.py`) stays the same tasks, splits, heads, and windows. A 3D checkpoint is detected automatically. Classification and regression reuse the frozen heads as-is. Segmentation is `brain/downstream/seg3d.py`. Set `BRAIN_FINE_POOL=1` to cache half-size tokens averaged onto the 16³ grid.
+Every pretrained checkpoint is scored on one fixed suite of frozen-encoder evaluations. Every evaluation writes an
+**experiment record**, and the records fold into one SQLite database. Results from different models, heads, seeds and
+store versions can then be compared without re-reading logs.
 
-## Why not encode 2D slices?
-
-`BrainEncoder` is a 3D ViT with anisotropic patches (default global `16×16×8`) and RoPE in millimetres. A single axial slice is thinner than one z-patch, so pushing 256×256×1 through the 3D stem is undefined. Downstream has to stay volumetric.
-
-## Classification / regression (3D tokens)
-
-1. Load the native v4 volume `(X, Y, Z)` (256×256×128).
-2. Apply the same asinh window(s) as the 2D suite (`canonical` / `multi` / `shifted`).
-3. Center-crop to a multiple of the train global patch (16×16×8) and tokenize **in place**. No resize onto the 128×128×64 train canvas. A 256×256×128 volume is 16×16×16 = 4096 tokens, each 16×16×8 mm. The encoder has no CLS token.
-4. Cache `(N, T, D)` tokens and `(N, T, 3)` centers normalized to `[0, 1]`. Multi-window concatenates on `D`.
-5. Linear / tree heads mean+max pool the token set `token_attn_mlp` scores each token with its `(x, y, z)`.
-
-Cache files are tagged `v5_3d_tok`. The older `v4_3d` caches packed 8 axial planes into a fake 32/64-slice sequence and are not read.
+## Running the suite
 
 ```bash
-python -m brain.downstream.run_suite --task oasis1_age --ckpt runs/lejepa3d/last.pt --window multi
-sbatch --export=ALL,CKPT=runs/lejepa3d/last.pt,TASKS=oasis1_age:oasis1_cdr:cq500 jobs/downstream_vit.sbatch
+jobs/submit_eval.sh runs/<run>/last.pt                     # all 25 entries as a Slurm array (pi_dbertsim), then ingest
+jobs/submit_eval.sh runs/<run>/last.pt cq500 wmh probe3d   # a subset
+python -m brain.downstream.suite list                      # the entries
+python -m brain.downstream.suite run --task wmh --ckpt runs/<run>/last.pt -- --steps 3000   # one entry, extra args
 ```
 
-## Segmentation (`brain/downstream/seg3d.py`)
-
-The encoder runs once per volume; its 16×16×16 token map is cached (`runs/downstream/_cache/_seg3d/<task>/`). A small 3D conv decoder (`TokenDecoder3D`: 1×1 stem, two 3×3×3 convs, three 2× steps, one in-plane 2× step, 1×1 head) trained on the cached tokens upsamples to one logit per voxel of the 128×256×256 grid. Loss = CE + soft Dice per region (same as 2D). Training volumes also get three encoded copies (a shift off the patch grid, a left-right flip, both), the mask moving with them; input dropout 0.1. Test Dice is scored on slices 1, 3, 5, … (the slices the 2D reference scores, `dice_*`) and on the whole volume (`dice_full_*`). BraTS encodes each of the four sequences separately and concatenates tokens.
-
-```bash
-sbatch --export=ALL,TASKS="wmh seg_cq500",CKPTS="runs/snap/predict_8k.pt" jobs/seg3d.sbatch
-sbatch --export=ALL,FINE=1,TASKS="wmh",CKPTS="runs/snap/predict_8k.pt" jobs/seg3d.sbatch   # 8x8x4 tiled + blocks 3 and 7
-```
-
-`--fine` is 8×8×4 patches with tiled 128×128×64 windows (in-plane match to the 2D 16×16 patch). It stores one copy of the final tokens (no mid-depth taps, no extra encoded copies). Training flips/rolls that token grid instead. Do not put commas in `EXTRA_ARGS`: Slurm `--export` splits on them (use `:` or `FINE=1`).
-
-Compare against 2D with `--seg-last-only` (decoder reads only the final block, like the 3D decoder): `run_suite --task wmh --ckpt <2D> --seg-last-only --run-name last_only`. The default 2D decoder reads four depths, which adds 0.01–0.08 Dice.
-
-Test Dice (BrainModel tiny, 3000 decoder steps). The pretraining objective (predict vs control vs 28.5k) does not move any of these; patch size does.
-
-| Setup | WMH | BraTS gli | CQ500 ICH |
-|---|---|---|---|
-| 3D 16×16×8, final tokens | 0.46 | 0.78 | 0.18–0.20 |
-| 3D 16×16×8, taps 3+7 | 0.48–0.49 | 0.79–0.80 | 0.24–0.26 |
-| 3D 8×8×4 tiled, taps 3+7 | **0.62** | running | running |
-| 2D last block only (tiny / small) | 0.56 / 0.61 | 0.83 / 0.86 | 0.25 / 0.25 |
-| 2D all taps (tiny / small) | 0.65 / 0.65 | 0.88 / 0.88 | 0.26 / 0.28 |
-
-Lesion-probe lift at the coarse grid also jumps when each coarse token is the mean of its 8 half-size tokens (`probe3d --fine`): control 4.97 → 5.69, predict 5.24 → 5.91, vs 2D small 6.15.
-
-## Memory / fidelity knobs (config later)
-
-| Knob | Default | Notes |
+| Entries | Evaluator | Heads / probes |
 |---|---|---|
-| Eval grid | native volume, global patch | 4096 tokens at 16×16×8 mm on v4 |
-| Train crops | native-grid crops of the volume (global 128×128×64 mm = 512 tokens) | same 16×16×8 mm patch as eval; no resizing |
-| Overlapping tiles | stitch by `coords_mm` | train-small / infer-big check from the spec |
+| Classification: `cq500`, `rsna_ich`, `oasis1_cdr`, `oasis2_cdr`, `oasis2_conversion`, `abide_asd`, `msd` | `run_suite` | PCA readouts (`plane_*`, `grid_*`, `pca_global_*`), 3D conv probe `tok_conv`; `--readout raw` gives pooled `logreg_pool` |
+| Regression: `oasis1_age`, `ixi_age`, `pixar_age`, `piop1_age`, `piop2_age`, `id1000_age` | `run_suite` | same, with ridge |
+| Segmentation: `seg_cq500`, `brats2023_{gli,men,ped}`, `brats2024_gli`, `atlas`, `isles22`, `wmh`, `isles24`, `aisd`, `instance` | `seg3d` (3D ckpt) / `run_suite` UNETR (2D ViT) | `tok_unet3d` (`--patch-fcn`: `tok_pfcn`) |
+| `probe3d` | `probe3d` | dense lesion probe (linear, MLP) per held-out family; fingerprint (modality, dataset); location; pixel and random-init controls |
 
-## Comparability
+A random-init baseline (`python -m brain.downstream.random_init --config configs/lejepa3d/small.yaml --out
+runs/baselines/random_small/last.pt`) is the floor every trained model should beat.
 
-Numbers are **not** apples-to-apples with Tiny 2D: the 3D model sees 16×16×8 mm patches on the native grid; 2D sees 32–64 full-res slices. Same labels, splits, heads, and windows. Read deltas as “3D encoder + same probes”, not as a drop-in replacement of the 2D feature.
+## Geometry
+
+The volume is 256 × 256 × 160 at 1 mm (`brain/common/grid.py`). The 16 × 16 × 8 patch gives a 20 × 16 × 16 token grid
+(5120 tokens). The tiled 8 × 8 × 4 patch (`--fine`, `BRAIN_FINE_GRID`) gives 40 × 32 × 32. Every module takes these
+from `TOKEN_GRID` / `FINE_TOKEN_GRID`. Segmentation `dice_*` is scored on the 64 bin-centre axial slices that the 2D
+reference decoder sees; `dice_full_*` uses the whole volume.
+
+Caches live under `runs/downstream/_cache/v<store format>/`: embeddings, seg3d token and mask memmaps, and 2D pixel
+caches. A re-prepped store therefore never reuses tensors of the old shape.
+
+## Experiment records (`brain/downstream/records.py`)
+
+There is one JSON per (model, task, head) or (model, probe, head), written atomically to `results/records/<YYYY-MM>/`
+in the repo. That directory is on the backed-up home filesystem and is git-ignored. Each record holds:
+
+- **model**: checkpoint path, content fingerprint, step and best step, run name, training config, and the provenance
+  stored in the checkpoint at training time (git commit, store format, grid, index hash).
+- **data**: evaluation store format, grid, `volumes.csv` SHA-1, split sizes, and `pretrain_overlap` (the fraction of
+  the task's volumes that were in the SSL set).
+- **protocol**: every evaluator argument, plus `argv`.
+- **metrics**: `test` (headline, CI, per label / class / cohort) and `val`. Training curves stay in the run directory.
+- **env**: git commit and dirty flag, host, Slurm job / array ids, GPU, library versions, start and end time.
+- **artifacts**: the run directory on scratch, predictions (`.npz` / per-volume CSV), the decoder, and the probe JSON
+  with its bootstrap draws.
+
+## Database (`brain/downstream/db.py`)
+
+```bash
+python -m brain.downstream.db ingest                 # idempotent; the suite's last job runs it
+python -m brain.downstream.db report --wide          # models x tasks, headline test metric
+python -m brain.downstream.db report --task cq500 --all-heads
+python -m brain.downstream.db report --probes
+python -m brain.downstream.db query "select e.task, e.head, m.grp, m.value from metrics m join evals e using(eval_id)
+                                     where m.name = 'auc_per_label' and e.model_id like 'brainmodel_small%'"
+python -m brain.downstream.db export --out results/evals.csv
+```
+
+The tables are `models`, `evals` and `metrics`. `metrics` has one row per (eval, split, metric, group), with the CI
+bounds alongside. The report picks each (model, task) head **on val**. It falls back to test only when a head has
+no val score, and marks that case `test!`. Deleting `results/experiments.sqlite` and re-ingesting rebuilds the
+database from the records.
+
+## Reading the numbers
+
+- Splits are the SSL subject splits from `volumes.csv`, so downstream test subjects were never trained on. Several
+  task families were still in the SSL pool as unlabeled images: OASIS, IXI, ABIDE, PIOP/PIXAR/ID1000, BraTS and RSNA.
+  `pretrain_overlap` makes that visible per eval. CQ500, ISLES, ATLAS, WMH, AISD, INSTANCE, BrainMetShare and MSD are
+  held out entirely.
+- CQ500 keeps a study once when Seg-CQ500 re-releases it.
+- Label tables are read from the store copy (`labels/sources/`, synced with `python -m brain.downstream.tasks
+  --sync-labels`), because pool keeps only archives.
+
+## Small tasks: repeated subject-grouped k-fold CV
+
+`run_suite --cv auto|on|off` (default auto; `brain/downstream/cv.py`). Small frozen-head tasks score every subject
+instead of a handful in a fixed test split: 5 folds x 3 repeats, grouped by `dedup_key` (all scans of a person stay
+together), stratified by label (regression by quantile bin); inside each fold a random 15% of the training subjects is
+the validation set. Each head's score is computed on the pooled out-of-fold predictions per repeat; the record gives
+the mean over repeats (`<metric>_repeats` lists them), a bootstrap CI over the first repeat's pooled predictions, and
+`cv: {folds, repeats}`. Auto = fewer than 200 subjects and no volume in the SSL pretraining pool (for pretraining
+families only the fixed test split was kept out of SSL, so CV would test on images the encoder saw); `--cv on` forces
+it and the record keeps `pretrain_overlap`. Today auto selects `valdo_epvs` (40 subjects) and `ms3seg_age` (100).
