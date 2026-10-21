@@ -1,4 +1,4 @@
-# Preprocessing (store format 5)
+# Preprocessing (store format 6)
 
 `python -m brain.prep.run --root STORE --datasets cq500,oasis,brats,rsna --template $BRAIN_TEMPLATE --shard 0/8 --workers 16`, usually through `jobs/prep_v6.sbatch` (and `jobs/prep_v6_local.sbatch` for archives unpacked on node-local disk). Then `python -m brain.prep.index --root STORE --manifests "manifest_v6_*.jsonl"` builds `volumes.csv`, `subjects.csv` and `slices.parquet`.
 
@@ -15,7 +15,7 @@
 
 ## Store layout
 
-`<folder>/<case>.zip` holds `image`, a float16 Zarr array `(128, 1, 256, 256)`, with all prep measurements as attributes. Masks are sibling zips `<case>.<name>.zip`; the computed brain mask is `<case>.brain.zip`. `store.FORMAT_VERSION` is 5. Runs skip a case only if its zip is current-format; changing registration or mask settings needs `--force` or a new root. `index` copies the geometry, registration and brain-mask columns of each manifest into `volumes.csv` (`NATIVE_COLS`).
+`<folder>/<case>.zip` holds `image`, a float16 Zarr array `(160, 1, 256, 256)` (1 mm, MNI-registered RAS grid), with all prep measurements as attributes, and `brain`, the computed brain mask. Label masks are sibling zips `<case>.<name>.zip` (SynthSeg anatomy: `<case>.synthseg.zip`). `store.FORMAT_VERSION` is 6. Runs skip a case only if its zip is current-format; changing registration or mask settings needs `--force` or a new root. `index` copies the geometry, registration and brain-mask columns of each manifest into `volumes.csv` (`NATIVE_COLS`).
 
 ## Resume and failures
 
@@ -76,7 +76,7 @@ before timestamps prefer the one with a stored transform). After all prep: `jobs
 `--no-slices` skips the 2D slice table, which only the 2D trainers read), `jobs/store_cleanup_v6.sbatch` (drops
 non-format-6 zips, old manifests, index backups and retired folders) and `jobs/verify_v6.sbatch`, which checks every
 indexed volume (format 6, stored transform, brain array, label masks) and writes `excluded.csv` (cases whose latest
-manifest row is flagged or errored). Raw archives are packed last (`jobs/rawpack_pool.sbatch`), because phase B reads
+manifest row is flagged or errored). Raw archives are packed last (`jobs/archive/rawpack_pool.sbatch`), because phase B reads
 raw data from pool.
 
 ### Known issue: RSNA DICOM assembly
@@ -92,6 +92,46 @@ For now, the index drops RSNA volumes that fail brain-mask QC from SSL (`ssl_qc_
 tasks). The stored `native_*` geometry of tilted RSNA studies is SimpleITK's untilted reading, so `brain.prep.native`
 exports for them are not exact.
 
-**Fix before the next re-prep:** assemble slices by their true position along the slice normal. Drop duplicate
-positions, shift tilted slices back onto the normal axis, interpolate onto even spacing, and flag large gaps.
-This is what `dcm2niix` does.
+**dcm2niix pilot (2026-10-21): not the fix.** `BRAIN_DICOM_READER=dcm2niix` switches `brain.prep.dicom` to
+position-based assembly with dcm2niix. On 60 RSNA studies (40 failing SynthSeg QC, 20 passing) it rescued none and
+broke 5, and dcm2niix found no gantry tilt in any study (the released DICOMs appear to lack it). The failing studies
+lack the posterior fossa in the data itself (cerebellum ~30 ml under both readers): RSNA seems to ship only the main
+axial series. Decision: keep the SimpleITK reader and RSNA as is; QC (below) keeps the unusable scans out of training.
+
+### Known issue: OASIS-1 Analyze orientation (fixed 2026-10-21)
+
+OASIS-1 ships Analyze 7.5 files with `orient = 2` (sagittal). ITK ignores that byte and read the 128-slice left-right
+axis as superior-inferior, which no affine registration recovers (template brain Dice ~0.83; every scan failed
+SynthSeg). `brain.prep.geometry.read` now reorders sagittal Analyze files into RAS (`_read_sagittal_analyze`), and
+`sources.oasis` takes the raw MPRAGE (`*_mpr-1_anon`) like OASIS-2 instead of the distributed Talairach image. After
+the fix: template Dice 0.91-0.94, SynthStrip masks, SynthSeg QC 6/6. Left-right of these scans cannot be determined
+from the files and is taken as stored.
+
+### Dropped from the training pools
+
+`POOL_DROP_DATASETS` (`brain/prep/index.py`) keeps whole datasets out of SSL and multitask training (they stay in the
+store): `fomo_hbn_pd` (HBN proton density; many scans are noise / artefact, SynthSeg QC 61% vs 99% for HBN T1w).
+
+### Source quirks of evaluation cohorts
+
+- AISD (CT) is distributed pre-windowed: stored values are clipped at 80 HU, so bone is flat (other CT cohorts reach
+  1500-2900 HU).
+- INSTANCE (CT) volumes are cropped short of the whole head (SynthSeg full field of view on 12% of a sample).
+- CQ500 arrives as NIfTI converted upstream; its affines already encode gantry tilt as a rotated orthogonal frame.
+
+## Anatomy labels: SynthSeg-robust 2.0 (`brain/prep/synthseg.py`)
+
+A PyTorch port of FreeSurfer's `mri_synthseg --robust` (three U-Nets in cascade; weights `synthseg_robust_2.0.h5`
+from FreeSurfer's model annex, in `tools/synthseg/` on scratch). Validated against the Keras model on six scans of
+different cohorts and modalities: >= 99.998% voxel agreement, every structure Dice >= 0.995, identical volumes.
+TF32 must stay off (the cascade's argmax between networks propagates its rounding). ~1.5 s per volume on an L40S.
+
+    python -m brain.prep.synthseg_run --select --n 30000      # family-balanced train/val selection, once
+    for s in 0 1 2 3; do sbatch -J synthseg-$s --export=ALL,SHARD=$s jobs/synthseg.sbatch; done
+
+Output per volume: `<folder>/<case_id>.synthseg.zip` (array `mask`, uint8 index into the 33 FreeSurfer labels) and a
+row of structure volumes (template-space ml, i.e. head-size normalised) in `labels/synthseg/volumes_*.csv`.
+`brain.multitask.labels.synthseg_volumes` turns them into group masks, volumes, ratios and asymmetries with two flags:
+`qc_ok` (cortex asymmetry <= 0.15, thalamus >= 8 ml, hippocampus >= 4 ml with a full field of view, brain 700-2600 ml:
+fails gross hemisphere mislabelling, not pathology) and `fov_ok` (cerebellum >= 110 ml and brainstem >= 18 ml: volume
+targets need the whole brain in view).

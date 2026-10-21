@@ -265,9 +265,7 @@ def tissue_frac(slc: np.ndarray, modality: str) -> float:
 def _index_one(args):
     """Read one volume, drop empty slices, Bernoulli mid-slab sample. Returns (kept, dropped, stats)."""
     image_path, volume_id_, modality, split, extra = args
-    vol = store.read(Path(image_path), "image")
-    if vol.ndim == 4:
-        vol = vol[:, 0]
+    vol = store.read_image(Path(image_path))
     z = vol.shape[0]
     mu = 0.5 * (z - 1)
     rows, empty = [], []

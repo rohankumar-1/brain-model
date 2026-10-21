@@ -29,29 +29,19 @@ from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import slot_losses
 from brain.multitask.model import MultitaskModel
 from brain.multitask.registry import load_registry
-from brain.train.multitask import build_encoder
 
 METRIC = {"binary": "auc", "regression": "r2", "multiclass": "bacc", "segmentation": "dice"}
 
 
 def load_model(ckpt_path: Path, device: torch.device):
+    """The full multitask model of a checkpoint (encoder built by the frozen suite's loader), frozen."""
+    from brain.downstream.embed3d import load_brain3d
+
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
-    cfg["model"]["init_from"] = None                       # the architecture is in the config; weights below
     reg = load_registry(cfg["data"].get("registry")).subset(list(ck["tasks"]))      # the checkpoint's task order
-    from brain.models.vit3d import BrainEncoder
-
-    m, v = cfg["model"], cfg["views"]
-    enc = BrainEncoder(size=m["size"], patch_xyz=tuple(v["patch_xyz"]), qk_norm=bool(m.get("qk_norm", False)),
-                       rope_base_mm=float(m.get("rope_base_mm", 100.0)), checkpoint_blocks=False,
-                       proj_dim=int(m.get("proj_dim", 128)), proj_hidden=m.get("proj_hidden"),
-                       proj_norm="batch" if any("running_mean" in k for k in ck["model"]) else "layer",
-                       dense_dim=int(ck["model"]["token_head.net.6.weight"].shape[0])
-                       if "token_head.net.6.weight" in ck["model"] else 0,
-                       dense_hidden=int(m.get("dense_hidden", 512)), n_cls=int(m.get("n_cls", 0)),
-                       n_registers=int(m.get("n_registers", 0)), mlp=str(m.get("mlp", "gelu")),
-                       layer_scale=m.get("layer_scale"))
-    model = MultitaskModel(enc, reg, m).to(device)
+    enc = load_brain3d(ck, torch.device("cpu"), pretrained=False).model
+    model = MultitaskModel(enc, reg, cfg["model"]).to(device)
     model.load_state_dict(ck["multitask"])
     return model.eval().requires_grad_(False), reg, cfg
 

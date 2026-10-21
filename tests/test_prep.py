@@ -124,37 +124,34 @@ def test_mri_center_skull_on_and_off():
         assert np.hypot(cx - 47.5, cy - 47.5) * 4.0 < 10.0, (skull, cx, cy, info)
 
 
-def test_pipeline_end_to_end_nifti(tmp_dir=None):
-    import tempfile
+def test_pipeline_end_to_end_nifti(tmp_path):
     from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "CT.nii.gz"
-        sitk.WriteImage(ct_phantom((40.0, -30.0), spacing=(0.5, 0.5, 2.0), n=(400, 400, 100)), str(path))
-        res = pipeline.process(Case("cq500", "phantom", "ct", path, (("brain", path),)))
+    d = tmp_path
+    path = Path(d) / "CT.nii.gz"
+    sitk.WriteImage(ct_phantom((40.0, -30.0), spacing=(0.5, 0.5, 2.0), n=(400, 400, 100)), str(path))
+    res = pipeline.process(Case("cq500", "phantom", "ct", path, (("brain", path),)))
     assert res.vol.shape == (DEPTH, 256, 256) and res.vol.dtype == np.float16
     assert res.masks["brain"].shape == (DEPTH, 256, 256)
     assert res.info["center_method"] == "brain" and res.info["shift_mm"] > 30
 
 
-def test_z_anchor_covers_brain_when_head_is_off_center_in_z():
-    import tempfile
+def test_z_anchor_covers_brain_when_head_is_off_center_in_z(tmp_path):
     from pathlib import Path
 
-    with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "CT.nii.gz"
-        sitk.WriteImage(ct_phantom((0.0, 0.0), spacing=(0.6, 0.6, 3.0), n=(400, 400, 100), hz=60.0), str(path))
-        case = Case("cq500", "phantom_z", "ct", path)
-        vol_res = pipeline.process(case, z_anchor="volume")
-        brain_res = pipeline.process(case, z_anchor="brain")
+    d = tmp_path
+    path = Path(d) / "CT.nii.gz"
+    sitk.WriteImage(ct_phantom((0.0, 0.0), spacing=(0.6, 0.6, 3.0), n=(400, 400, 100), hz=60.0), str(path))
+    case = Case("cq500", "phantom_z", "ct", path)
+    vol_res = pipeline.process(case, z_anchor="volume")
+    brain_res = pipeline.process(case, z_anchor="brain")
     assert vol_res.info["brain_cover"] < 0.8, vol_res.info
     assert brain_res.info["brain_cover"] > 0.88, brain_res.info
     assert brain_res.info["fg_frac"] > vol_res.info["fg_frac"] * 0.9
 
 
-def test_coregistered_sequences_share_one_grid():
+def test_coregistered_sequences_share_one_grid(tmp_path):
     """A sequence with signal dropout would center differently alone; with the reference both use one grid."""
-    import tempfile
     from pathlib import Path
 
     def write(v, path):
@@ -166,72 +163,69 @@ def test_coregistered_sequences_share_one_grid():
     a = mri_phantom(skull=False)
     b = a.copy()
     b[:, :, 60:] = 0.0                                     # one side lost: the foreground (and its center) moves
-    with tempfile.TemporaryDirectory() as d:
-        pa, pb = Path(d) / "t1n.nii.gz", Path(d) / "t2f.nii.gz"
-        write(a, pa), write(b, pb)
-        ref = pipeline.process(Case("brats_t1n", "s-t1n", "mri", pa), keep_debug=True)
-        alone = pipeline.process(Case("brats_t2f", "s-t2f", "mri", pb), keep_debug=True)
-        shared = pipeline.process(Case("brats_t2f", "s-t2f", "mri", pb, ref=pa), keep_debug=True)
+    d = tmp_path
+    pa, pb = Path(d) / "t1n.nii.gz", Path(d) / "t2f.nii.gz"
+    write(a, pa), write(b, pb)
+    ref = pipeline.process(Case("brats_t1n", "s-t1n", "mri", pa), keep_debug=True)
+    alone = pipeline.process(Case("brats_t2f", "s-t2f", "mri", pb), keep_debug=True)
+    shared = pipeline.process(Case("brats_t2f", "s-t2f", "mri", pb, ref=pa), keep_debug=True)
     assert np.abs(np.array(alone.debug["grid"].origin) - ref.debug["grid"].origin).max() > 1.0
     assert np.allclose(shared.debug["grid"].origin, ref.debug["grid"].origin)
 
 
-def test_instance_pairs_data_and_label_folders():
-    import tempfile
+def test_instance_pairs_data_and_label_folders(tmp_path):
     from pathlib import Path
     from brain.prep.sources import instance
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / "data").mkdir()
-        (root / "label").mkdir()
-        (root / "data" / "001.nii.gz").write_bytes(b"x")
-        (root / "label" / "001.nii.gz").write_bytes(b"y")
-        (root / "data" / "002.nii.gz").write_bytes(b"x")
-        (root / "label" / "002_label.nii.gz").write_bytes(b"y")
-        cases = instance(root)
+    tmp = tmp_path
+    root = Path(tmp)
+    (root / "data").mkdir()
+    (root / "label").mkdir()
+    (root / "data" / "001.nii.gz").write_bytes(b"x")
+    (root / "label" / "001.nii.gz").write_bytes(b"y")
+    (root / "data" / "002.nii.gz").write_bytes(b"x")
+    (root / "label" / "002_label.nii.gz").write_bytes(b"y")
+    cases = instance(root)
     assert [c.case_id for c in cases] == ["001", "002"]
     assert all(c.dataset == "instance" and c.modality == "ct" and c.masks[0][0] == "ICH" for c in cases)
 
 
-def test_msd_source_lists_labeled_train_cases():
-    import tempfile
+def test_msd_source_lists_labeled_train_cases(tmp_path):
     from pathlib import Path
     from brain.prep.sources import msd
 
-    with tempfile.TemporaryDirectory() as d:
-        root = Path(d)
-        (root / "imagesTr").mkdir()
-        (root / "labelsTr").mkdir()
-        (root / "imagesTr" / "BRATS_001.nii.gz").write_bytes(b"x")
-        (root / "labelsTr" / "BRATS_001.nii.gz").write_bytes(b"y")
-        (root / "imagesTr" / "._BRATS_002.nii.gz").write_bytes(b"skip")
-        cases = msd(root)
+    d = tmp_path
+    root = Path(d)
+    (root / "imagesTr").mkdir()
+    (root / "labelsTr").mkdir()
+    (root / "imagesTr" / "BRATS_001.nii.gz").write_bytes(b"x")
+    (root / "labelsTr" / "BRATS_001.nii.gz").write_bytes(b"y")
+    (root / "imagesTr" / "._BRATS_002.nii.gz").write_bytes(b"skip")
+    cases = msd(root)
     assert len(cases) == 1
     assert cases[0].dataset == "msd_braintumor" and cases[0].case_id == "BRATS_001"
     assert cases[0].modality == "mri" and cases[0].masks[0][0] == "seg"
 
 
-def test_sinoct_source_groups_reconstructed_series(tmp_path=None):
-    import tempfile
+def test_sinoct_source_groups_reconstructed_series(tmp_path):
     from pathlib import Path
     from brain.prep.sources import sinoct
 
-    with tempfile.TemporaryDirectory() as d:
-        root = Path(d)
-        keep = root / "batch_1" / "series_9" / "reconstructed_image"
-        skip = root / "batch_1" / "series_10" / "reconstructed_image"
-        keep.mkdir(parents=True)
-        skip.mkdir(parents=True)
-        for i in range(12):
-            (keep / f"image_{i}.dcm").write_bytes(b"dicom")
-        for i in range(3):
-            (skip / f"image_{i}.dcm").write_bytes(b"dicom")
-        cases = sinoct(root)
-        assert len(cases) == 1
-        assert cases[0].dataset == "sinoct" and cases[0].modality == "ct"
-        assert cases[0].case_id == "batch_1_series_9"
-        assert cases[0].path == keep
+    d = tmp_path
+    root = Path(d)
+    keep = root / "batch_1" / "series_9" / "reconstructed_image"
+    skip = root / "batch_1" / "series_10" / "reconstructed_image"
+    keep.mkdir(parents=True)
+    skip.mkdir(parents=True)
+    for i in range(12):
+        (keep / f"image_{i}.dcm").write_bytes(b"dicom")
+    for i in range(3):
+        (skip / f"image_{i}.dcm").write_bytes(b"dicom")
+    cases = sinoct(root)
+    assert len(cases) == 1
+    assert cases[0].dataset == "sinoct" and cases[0].modality == "ct"
+    assert cases[0].case_id == "batch_1_series_9"
+    assert cases[0].path == keep
 
 
 def test_sinoct_pixel_fingerprint_ignores_fov_pad_and_matches():
@@ -300,22 +294,21 @@ def test_sinoct_drops_sinograms_and_rsna_ids():
     assert (out.kind == "sinogram").sum() == 1
 
 
-def test_brainmetshare_pairs_sequences_and_seg_on_bravo():
-    import tempfile
+def test_brainmetshare_pairs_sequences_and_seg_on_bravo(tmp_path):
     from pathlib import Path
     from brain.prep.sources import brainmetshare
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        train = root / "train" / "Mets_001"
-        test = root / "test" / "Mets_002"
-        train.mkdir(parents=True)
-        test.mkdir(parents=True)
-        for name in ("bravo", "t1_pre", "t1_gd", "flair"):
-            (train / f"{name}.nii.gz").write_bytes(b"x")
-            (test / f"{name}.nii.gz").write_bytes(b"x")
-        (train / "seg.nii.gz").write_bytes(b"y")
-        cases = brainmetshare(root)
+    tmp = tmp_path
+    root = Path(tmp)
+    train = root / "train" / "Mets_001"
+    test = root / "test" / "Mets_002"
+    train.mkdir(parents=True)
+    test.mkdir(parents=True)
+    for name in ("bravo", "t1_pre", "t1_gd", "flair"):
+        (train / f"{name}.nii.gz").write_bytes(b"x")
+        (test / f"{name}.nii.gz").write_bytes(b"x")
+    (train / "seg.nii.gz").write_bytes(b"y")
+    cases = brainmetshare(root)
     tags = {(c.dataset, c.case_id, bool(c.masks), c.ref is not None) for c in cases}
     assert ("brainmetshare_bravo", "Mets_001", True, False) in tags
     assert ("brainmetshare_flair", "Mets_001", False, True) in tags
@@ -329,18 +322,17 @@ def test_aisd_id_pads_numeric_manifest_stems():
     assert aisd_id(72762) == "0072762" and aisd_id("73410") == "0073410"
 
 
-def test_aisd_pairs_image_and_mask_and_pads_ids():
-    import tempfile
+def test_aisd_pairs_image_and_mask_and_pads_ids(tmp_path):
     from pathlib import Path
     from brain.prep.sources import aisd
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / "image").mkdir()
-        (root / "mask").mkdir()
-        (root / "image" / "73410.nii.gz").write_bytes(b"x")
-        (root / "mask" / "0073410.nii.gz").write_bytes(b"y")
-        cases = aisd(root)
+    tmp = tmp_path
+    root = Path(tmp)
+    (root / "image").mkdir()
+    (root / "mask").mkdir()
+    (root / "image" / "73410.nii.gz").write_bytes(b"x")
+    (root / "mask" / "0073410.nii.gz").write_bytes(b"y")
+    cases = aisd(root)
     assert len(cases) == 1 and cases[0].case_id == "0073410" and cases[0].masks[0][0] == "lesion"
 
 
@@ -356,52 +348,50 @@ def test_aisd_png_to_hu_keeps_ventricles_and_air():
     assert 20 < float(hu[2, 9, 9]) < 30
 
 
-def test_aisd_png_stack_writes_nifti_and_pairs():
-    import tempfile
+def test_aisd_png_stack_writes_nifti_and_pairs(tmp_path):
     from pathlib import Path
     from brain.datasets.download_aisd import PNG_SPACING_XYZ, pngs_to_nifti
     from brain.prep.sources import aisd
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        for kind in ("image", "mask"):
-            d = root / kind / "73410"
-            d.mkdir(parents=True)
-            for z in range(4):
-                a = np.zeros((16, 16), np.uint8)
-                a[4:12, 4:12] = 80 if kind == "image" else 3
-                a[6:10, 6:10] = 0
-                sitk.WriteImage(sitk.GetImageFromArray(a), str(d / f"{z:03d}.png"))
-        pngs_to_nifti(root, workers=1)
-        cases = aisd(root)
-        assert len(cases) == 1 and cases[0].case_id == "0073410" and cases[0].masks[0][0] == "lesion"
-        img = sitk.ReadImage(str(cases[0].path))
-        assert img.GetSize() == (16, 16, 4)
-        assert img.GetSpacing() == PNG_SPACING_XYZ
-        arr = sitk.GetArrayFromImage(img)
-        assert arr[1, 0, 0] == -1024.0
-        assert arr[1, 5, 5] > 20
+    tmp = tmp_path
+    root = Path(tmp)
+    for kind in ("image", "mask"):
+        d = root / kind / "73410"
+        d.mkdir(parents=True)
+        for z in range(4):
+            a = np.zeros((16, 16), np.uint8)
+            a[4:12, 4:12] = 80 if kind == "image" else 3
+            a[6:10, 6:10] = 0
+            sitk.WriteImage(sitk.GetImageFromArray(a), str(d / f"{z:03d}.png"))
+    pngs_to_nifti(root, workers=1)
+    cases = aisd(root)
+    assert len(cases) == 1 and cases[0].case_id == "0073410" and cases[0].masks[0][0] == "lesion"
+    img = sitk.ReadImage(str(cases[0].path))
+    assert img.GetSize() == (16, 16, 4)
+    assert img.GetSpacing() == PNG_SPACING_XYZ
+    arr = sitk.GetArrayFromImage(img)
+    assert arr[1, 0, 0] == -1024.0
+    assert arr[1, 5, 5] > 20
 
 
-def test_fomo_ingest_zip_keeps_structural_and_deletes_archive():
+def test_fomo_ingest_zip_keeps_structural_and_deletes_archive(tmp_path):
     import zipfile
-    import tempfile
     from pathlib import Path
     from brain.datasets.download_fomo import already_extracted, ingest_zip
 
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        zp = root / "PT018_HBN" / "sub-01" / "ses-01.zip"
-        zp.parent.mkdir(parents=True)
-        with zipfile.ZipFile(zp, "w") as zf:
-            zf.writestr("anat/sub-01_ses-01_T1w.nii.gz", b"t1")
-            zf.writestr("dwi/sub-01_ses-01_dwi.nii.gz", b"dwi")
-        n_ok, n_skip = ingest_zip(zp, root, delete=True)
-        out = root / "extracted" / "PT018_HBN" / "sub-01" / "ses-01"
-        assert n_ok == 1 and n_skip == 0 and not zp.exists()
-        assert (out / "sub-01_ses-01_T1w.nii.gz").read_bytes() == b"t1"
-        assert not (out / "sub-01_ses-01_dwi.nii.gz").exists()
-        assert already_extracted(root, "PT018_HBN/sub-01/ses-01.zip")
+    tmp = tmp_path
+    root = Path(tmp)
+    zp = root / "PT018_HBN" / "sub-01" / "ses-01.zip"
+    zp.parent.mkdir(parents=True)
+    with zipfile.ZipFile(zp, "w") as zf:
+        zf.writestr("anat/sub-01_ses-01_T1w.nii.gz", b"t1")
+        zf.writestr("dwi/sub-01_ses-01_dwi.nii.gz", b"dwi")
+    n_ok, n_skip = ingest_zip(zp, root, delete=True)
+    out = root / "extracted" / "PT018_HBN" / "sub-01" / "ses-01"
+    assert n_ok == 1 and n_skip == 0 and not zp.exists()
+    assert (out / "sub-01_ses-01_T1w.nii.gz").read_bytes() == b"t1"
+    assert not (out / "sub-01_ses-01_dwi.nii.gz").exists()
+    assert already_extracted(root, "PT018_HBN/sub-01/ses-01.zip")
 
 
 def test_fomo_mapping_holds_out_entire_openneuro_ds():
@@ -432,35 +422,34 @@ def test_fomo_mapping_holds_out_entire_openneuro_ds():
     assert set(hits["held_out"]) == {"isles22"}
 
 
-def test_fomo_brats_restores_ids_and_joins_local_seg():
-    import tempfile
+def test_fomo_brats_restores_ids_and_joins_local_seg(tmp_path):
     from pathlib import Path
     from brain.prep.sources import brats_fomo
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        fomo = tmp / "fomo"
-        local = tmp / "brats" / "extracted"
-        dest = fomo / "extracted" / "PT009_BraTS-GEN" / "sub-0001" / "ses-01"
-        dest.mkdir(parents=True)
-        (dest / "T1w.nii.gz").write_bytes(b"x")
-        (dest / "T1c.nii.gz").write_bytes(b"x")
-        gli = local / "2023_GLI" / "BraTS-GLI-00005-000"
-        gli.mkdir(parents=True)
-        (gli / "BraTS-GLI-00005-000-seg.nii.gz").write_bytes(b"y")
-        (gli / "BraTS-GLI-00005-000-t1n.nii.gz").write_bytes(b"z")
-        mapping = fomo / "PT009_BraTS-GEN" / "mapping.tsv"
-        mapping.parent.mkdir(parents=True)
-        mapping.write_text(
-            "old_path\tnew_path\told_filename\tnew_filename\tparticipant_id\tsession_id\tmodality\n"
-            "BraTS2023/BraTS-GLI-00005-000/BraTS-GLI-00005-000-t1n.nii.gz\t"
-            "sub-0001/ses-01/anat/sub-0001_ses-01_T1w.nii.gz\t"
-            "BraTS-GLI-00005-000-t1n.nii.gz\tsub-0001_ses-01_T1w.nii.gz\tsub-0001\tses-01\tanat\n"
-            "BraTS2023/BraTS-GLI-00005-000/BraTS-GLI-00005-000-t1c.nii.gz\t"
-            "sub-0001/ses-01/anat/sub-0001_ses-01_T1c.nii.gz\t"
-            "BraTS-GLI-00005-000-t1c.nii.gz\tsub-0001_ses-01_T1c.nii.gz\tsub-0001\tses-01\tanat\n"
-        )
-        cases = brats_fomo(fomo, local)
+    tmp = tmp_path
+    tmp = Path(tmp)
+    fomo = tmp / "fomo"
+    local = tmp / "brats" / "extracted"
+    dest = fomo / "extracted" / "PT009_BraTS-GEN" / "sub-0001" / "ses-01"
+    dest.mkdir(parents=True)
+    (dest / "T1w.nii.gz").write_bytes(b"x")
+    (dest / "T1c.nii.gz").write_bytes(b"x")
+    gli = local / "2023_GLI" / "BraTS-GLI-00005-000"
+    gli.mkdir(parents=True)
+    (gli / "BraTS-GLI-00005-000-seg.nii.gz").write_bytes(b"y")
+    (gli / "BraTS-GLI-00005-000-t1n.nii.gz").write_bytes(b"z")
+    mapping = fomo / "PT009_BraTS-GEN" / "mapping.tsv"
+    mapping.parent.mkdir(parents=True)
+    mapping.write_text(
+        "old_path\tnew_path\told_filename\tnew_filename\tparticipant_id\tsession_id\tmodality\n"
+        "BraTS2023/BraTS-GLI-00005-000/BraTS-GLI-00005-000-t1n.nii.gz\t"
+        "sub-0001/ses-01/anat/sub-0001_ses-01_T1w.nii.gz\t"
+        "BraTS-GLI-00005-000-t1n.nii.gz\tsub-0001_ses-01_T1w.nii.gz\tsub-0001\tses-01\tanat\n"
+        "BraTS2023/BraTS-GLI-00005-000/BraTS-GLI-00005-000-t1c.nii.gz\t"
+        "sub-0001/ses-01/anat/sub-0001_ses-01_T1c.nii.gz\t"
+        "BraTS-GLI-00005-000-t1c.nii.gz\tsub-0001_ses-01_T1c.nii.gz\tsub-0001\tses-01\tanat\n"
+    )
+    cases = brats_fomo(fomo, local)
     by = {c.dataset: c for c in cases}
     assert "brats2023_gli_t1n" in by and "brats2023_gli_t1c" in by
     assert by["brats2023_gli_t1n"].case_id == "BraTS-GLI-00005-000-t1n"

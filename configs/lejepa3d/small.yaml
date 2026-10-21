@@ -63,7 +63,7 @@ aug:
   noise: {p: 0.5, kind: rician, snr: [15, 100], sigma: [0.02, 0.15]}
   # MRI only: borrow another same-contrast scan's tissue histogram (blended), so scanner contrast is not a cheap cue.
   # Never CT (HU are physical).
-  histmatch: {p: 0.10, alpha: [0.3, 0.7], quantiles: 64}
+  histmatch: {p: 0.10, alpha: [0.3, 0.7]}   # 32 whole-volume quantiles (volumes.HIST_LEVELS)
   # Contrast curve relaxed and never inverted: the v3 diagnosis showed the encoder discarding tissue contrast that
   # carries biology (myelination, WMH, MS lesions). Gentler, rarer re-rendering keeps cross-scanner robustness.
   curve: {p: 0.5, knots: 5, strength: 0.3, flip: 0.0}

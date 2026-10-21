@@ -338,10 +338,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
 def read_volume_xyz(path: Path) -> np.ndarray:
     from brain.prep import store
 
-    vol = store.read(path, "image")
-    if vol.ndim == 4:
-        vol = vol[:, 0]
-    return np.transpose(np.asarray(vol, dtype=np.float32), (2, 1, 0))
+    return np.transpose(store.read_image(path).astype(np.float32), (2, 1, 0))
 
 
 def _crop_to_patch(vol: torch.Tensor, patch_xyz: tuple[int, int, int]) -> tuple[torch.Tensor, tuple[int, int, int], tuple[int, int, int]]:

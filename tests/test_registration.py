@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -94,19 +93,19 @@ def test_native_info_reports_the_coarsest_axis():
     assert (info["src_nx"], info["src_ny"], info["src_nz"]) == (30, 20, 10)
 
 
-def test_process_with_registration_stores_the_head_at_the_template_center():
-    with tempfile.TemporaryDirectory() as td:
-        tpath, mpath = Path(td) / "template.nii.gz", Path(td) / "scan.nii.gz"
-        sitk.WriteImage(head(), str(tpath))
-        sitk.WriteImage(head(center=(12.0, -8.0, 5.0), scale=1.05, noise=2.0, seed=2), str(mpath))
-        opts = pipeline.Options(registration="rigid", template=str(tpath), brain_mask="classical")
-        res = pipeline.process(Case("oasis1", "phantom", "mri", mpath), size=(64, 64, 32), opts=opts)
-        assert res.info["reg_method"] in ("rigid", "affine", "translation") and "reg_rot_deg" in res.info
-        assert res.vol.shape == (32, 64, 64) and res.brain is not None
-        fg = res.vol > -5.5
-        zc, yc, xc = (np.argwhere(fg).mean(0) - (np.array(fg.shape) - 1) / 2)
-        assert abs(xc) < 6 and abs(yc) < 6 and abs(zc) < 6, (xc, yc, zc, res.info)
-        assert res.info["thick_axis"] in (0, 1, 2) and res.info["brain_method"] == "classical"
+def test_process_with_registration_stores_the_head_at_the_template_center(tmp_path):
+    td = tmp_path
+    tpath, mpath = Path(td) / "template.nii.gz", Path(td) / "scan.nii.gz"
+    sitk.WriteImage(head(), str(tpath))
+    sitk.WriteImage(head(center=(12.0, -8.0, 5.0), scale=1.05, noise=2.0, seed=2), str(mpath))
+    opts = pipeline.Options(registration="rigid", template=str(tpath), brain_mask="classical")
+    res = pipeline.process(Case("oasis1", "phantom", "mri", mpath), size=(64, 64, 32), opts=opts)
+    assert res.info["reg_method"] in ("rigid", "affine", "translation") and "reg_rot_deg" in res.info
+    assert res.vol.shape == (32, 64, 64) and res.brain is not None
+    fg = res.vol > -5.5
+    zc, yc, xc = (np.argwhere(fg).mean(0) - (np.array(fg.shape) - 1) / 2)
+    assert abs(xc) < 6 and abs(yc) < 6 and abs(zc) < 6, (xc, yc, zc, res.info)
+    assert res.info["thick_axis"] in (0, 1, 2) and res.info["brain_method"] == "classical"
 
 
 def test_stripped_scan_registers_to_the_brain_only_template_and_gets_scaled():
@@ -182,38 +181,38 @@ def test_torch_backend_retries_out_of_memory_and_never_falls_back_to_translation
     assert res.info["reg_method"] == "rigid", res.info
 
 
-def test_stored_masks_map_back_onto_the_source_scan_and_keep_their_true_volume():
+def test_stored_masks_map_back_onto_the_source_scan_and_keep_their_true_volume(tmp_path):
     from brain.prep import native, store
 
-    with tempfile.TemporaryDirectory() as td:
-        td = Path(td)
-        tpath, mpath, lpath = td / "template.nii.gz", td / "scan.nii.gz", td / "lesion.nii.gz"
-        sitk.WriteImage(head(), str(tpath))
-        scan = head(center=(10.0, -6.0, 4.0), scale=1.10, noise=2.0, seed=5)    # a bigger head than the template
-        sitk.WriteImage(scan, str(mpath))
-        ax = (np.arange(N) - (N - 1) / 2) * SP
-        Z, Y, X = np.meshgrid(ax, ax, ax, indexing="ij")
-        truth = (((X - 30) ** 2 + (Y + 4) ** 2 + (Z - 10) ** 2) < 12.0 ** 2).astype(np.uint8)  # 12 mm lesion
-        les = sitk.GetImageFromArray(truth)
-        les.CopyInformation(scan)
-        sitk.WriteImage(les, str(lpath))
-        opts = pipeline.Options(registration="affine", template=str(tpath), brain_mask="classical", reg_backend="torch")
-        res = pipeline.process(Case("oasis1", "phantom", "mri", mpath, (("seg", lpath),)), size=(96, 96, 96), opts=opts)
-        assert res.info["reg_method"] == "affine" and native.has_native(res.info), res.info
-        # default: the source grid as prep read it (RAS index order) -> compare with the lesion read the same way
-        ras = sitk.GetArrayFromImage(geometry.read(lpath)) > 0.5
-        back = sitk.GetArrayFromImage(native.to_native(res.masks["seg"], res.info)) > 0
-        assert back.shape == ras.shape
-        dice = 2 * (back & ras).sum() / (back.sum() + ras.sum())
-        assert dice > 0.85, dice                                   # 2 mm source grid, one nearest-neighbour step
-        # like=<original file>: its exact grid and index order, ready to hand over with the scan
-        orig = sitk.GetArrayFromImage(native.to_native(res.masks["seg"], res.info, like=sitk.ReadImage(str(lpath)))) > 0
-        assert orig.shape == truth.shape and 2 * (orig & (truth > 0)).sum() / (orig.sum() + truth.sum()) > 0.85
-        true_ml = float(truth.sum()) * SP ** 3 / 1000
-        stored_ml = float((res.masks["seg"] > 0).sum()) / 1000     # 1 mm stored voxels, inflated by the scaling
-        assert abs(native.volume_ml(res.masks["seg"], res.info) - true_ml) / true_ml < 0.08
-        assert abs(stored_ml - true_ml) / true_ml > 0.15           # why the transform matters: raw counts are off
-        store.write(td / "v.zip", "image", res.vol[:, None], res.info)     # lists survive the attribute round trip
-        attrs = store.read_attrs(td / "v.zip", "image")
-        assert attrs["reg_affine"] == res.info["reg_affine"] and len(attrs["native_direction"]) == 9
-        assert attrs["native_source"].endswith("scan.nii.gz")
+    td = tmp_path
+    td = Path(td)
+    tpath, mpath, lpath = td / "template.nii.gz", td / "scan.nii.gz", td / "lesion.nii.gz"
+    sitk.WriteImage(head(), str(tpath))
+    scan = head(center=(10.0, -6.0, 4.0), scale=1.10, noise=2.0, seed=5)    # a bigger head than the template
+    sitk.WriteImage(scan, str(mpath))
+    ax = (np.arange(N) - (N - 1) / 2) * SP
+    Z, Y, X = np.meshgrid(ax, ax, ax, indexing="ij")
+    truth = (((X - 30) ** 2 + (Y + 4) ** 2 + (Z - 10) ** 2) < 12.0 ** 2).astype(np.uint8)  # 12 mm lesion
+    les = sitk.GetImageFromArray(truth)
+    les.CopyInformation(scan)
+    sitk.WriteImage(les, str(lpath))
+    opts = pipeline.Options(registration="affine", template=str(tpath), brain_mask="classical", reg_backend="torch")
+    res = pipeline.process(Case("oasis1", "phantom", "mri", mpath, (("seg", lpath),)), size=(96, 96, 96), opts=opts)
+    assert res.info["reg_method"] == "affine" and native.has_native(res.info), res.info
+    # default: the source grid as prep read it (RAS index order) -> compare with the lesion read the same way
+    ras = sitk.GetArrayFromImage(geometry.read(lpath)) > 0.5
+    back = sitk.GetArrayFromImage(native.to_native(res.masks["seg"], res.info)) > 0
+    assert back.shape == ras.shape
+    dice = 2 * (back & ras).sum() / (back.sum() + ras.sum())
+    assert dice > 0.85, dice                                   # 2 mm source grid, one nearest-neighbour step
+    # like=<original file>: its exact grid and index order, ready to hand over with the scan
+    orig = sitk.GetArrayFromImage(native.to_native(res.masks["seg"], res.info, like=sitk.ReadImage(str(lpath)))) > 0
+    assert orig.shape == truth.shape and 2 * (orig & (truth > 0)).sum() / (orig.sum() + truth.sum()) > 0.85
+    true_ml = float(truth.sum()) * SP ** 3 / 1000
+    stored_ml = float((res.masks["seg"] > 0).sum()) / 1000     # 1 mm stored voxels, inflated by the scaling
+    assert abs(native.volume_ml(res.masks["seg"], res.info) - true_ml) / true_ml < 0.08
+    assert abs(stored_ml - true_ml) / true_ml > 0.15           # why the transform matters: raw counts are off
+    store.write(td / "v.zip", "image", res.vol[:, None], res.info)     # lists survive the attribute round trip
+    attrs = store.read_attrs(td / "v.zip", "image")
+    assert attrs["reg_affine"] == res.info["reg_affine"] and len(attrs["native_direction"]) == 9
+    assert attrs["native_source"].endswith("scan.nii.gz")

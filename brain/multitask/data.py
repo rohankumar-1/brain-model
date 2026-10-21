@@ -124,7 +124,7 @@ class MultitaskDataset(Dataset):
         rel = Path(self.paths[idx])
         arrays = store.read_many(rel if rel.is_absolute() else self.store_root / rel,
                                  ("image", "brain") if need_brain else ("image",))
-        img = arrays["image"][:, 0] if arrays["image"].ndim == 4 else arrays["image"]
+        img = store.squeeze_channel(arrays["image"])
         mod = self.mods[idx]
         live = None
         tasks, ys, seg_masks, seg_slot = [], [], [], []
@@ -144,8 +144,7 @@ class MultitaskDataset(Dataset):
                 else:
                     path, ids = ref.split("|")
                     if path not in mask_cache:
-                        raw = np.asarray(store.read(self.store_root / path, "mask"))
-                        mask_cache[path] = raw[:, 0] if raw.ndim == 4 else raw
+                        mask_cache[path] = store.read_image(self.store_root / path, "mask")
                     m = np.isin(mask_cache[path], [int(i) for i in ids.split(",")])
                 if m.shape != img.shape:
                     continue
@@ -234,6 +233,17 @@ def augment_theta(b: int, shape_zyx, aug: dict, device) -> torch.Tensor | None:
     return torch.cat([a, (shift * on / half).unsqueeze(-1)], dim=-1)
 
 
+def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None):
+    """Native-unit volumes ``raw`` (B, 1, Z, Y, X) -> the encoder input, windowed with each row's canonical window
+    (CT or MRI, as frozen evaluation), and the foreground token mask (B, N) gated on the raw values."""
+    gate = gate or {}
+    keep = token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
+                      mri_lo=float(gate.get("mri_lo", -5.5))).reshape(raw.shape[0], -1)   # gate works on (B,1,X,Y,Z)
+    cw = torch.tensor([canonical_c_w("ct"), canonical_c_w("mri")], device=raw.device, dtype=torch.float32)[mod]
+    x = asinh_window(raw, cw[:, 0].view(-1, 1, 1, 1, 1), cw[:, 1].view(-1, 1, 1, 1, 1))
+    return x, keep
+
+
 def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool) -> dict:
     """Raw batch -> encoder input (B, 1, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
     flipped / rotated with their image. Rows whose modality is CT window with the CT canonical window, MRI with the
@@ -257,12 +267,7 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool) -> dict:
         if len(seg):
             seg = F.grid_sample(seg, grid[rows], mode="bilinear", padding_mode="zeros", align_corners=False)
         del grid
-    xyz = raw.permute(0, 1, 4, 3, 2)                                   # gate works on (B, 1, X, Y, Z)
-    gate = (cfg.get("model") or {}).get("gate") or {}
-    keep = token_keep(xyz, mod, patch_xyz, ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
-                      mri_lo=float(gate.get("mri_lo", -5.5))).reshape(b, -1)
-    cw = torch.tensor([canonical_c_w("ct"), canonical_c_w("mri")], device=device, dtype=torch.float32)[mod]
-    x = asinh_window(raw, cw[:, 0].view(-1, 1, 1, 1, 1), cw[:, 1].view(-1, 1, 1, 1, 1))
+    x, keep = gate_and_window(raw, mod, patch_xyz, (cfg.get("model") or {}).get("gate"))
     return {"x": x, "keep": keep, "modality": mod, "task": batch["task"].to(device), "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device)}
 

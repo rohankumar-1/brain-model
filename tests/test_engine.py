@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import torch
@@ -69,15 +68,15 @@ def test_is_new_best_keeps_lower_val_loss_and_rejects_nan():
     assert is_new_best({"loss": 0.5}, "missing_metric", 1.5) == 0.5  # falls back to loss
 
 
-def test_find_resume_prefers_last_then_the_configured_fallback():
-    with tempfile.TemporaryDirectory() as td:
-        out, fallback = Path(td) / "run", Path(td) / "old.pt"
-        assert find_resume(out, fallback) is None
-        atomic_torch_save({"step": 1}, fallback)
-        assert find_resume(out, fallback) == fallback
-        atomic_torch_save({"step": 2}, out / "last.pt")
-        assert find_resume(out, fallback) == out / "last.pt"
-        assert load_ckpt(out / "last.pt")["step"] == 2 and not list(out.glob("*.tmp"))
+def test_find_resume_prefers_last_then_the_configured_fallback(tmp_path):
+    td = tmp_path
+    out, fallback = Path(td) / "run", Path(td) / "old.pt"
+    assert find_resume(out, fallback) is None
+    atomic_torch_save({"step": 1}, fallback)
+    assert find_resume(out, fallback) == fallback
+    atomic_torch_save({"step": 2}, out / "last.pt")
+    assert find_resume(out, fallback) == out / "last.pt"
+    assert load_ckpt(out / "last.pt")["step"] == 2 and not list(out.glob("*.tmp"))
 
 
 def test_nan_guards():

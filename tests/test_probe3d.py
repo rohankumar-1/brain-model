@@ -61,7 +61,6 @@ def test_slice2d_provider_lands_on_the_3d_grid():
 
 
 def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path=None):
-    import tempfile
     from pathlib import Path
 
     from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
@@ -72,12 +71,12 @@ def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path=None):
            "loss": {**DEFAULT_CONFIG["loss"], "predict": {**DEFAULT_CONFIG["loss"]["predict"], "weight": 1.0, "depth": 1}}}
     enc = build_encoder(cfg, torch.device("cpu"))
     assert enc.token_head is not None and enc.predictor is not None  # training-only parts must not block loading
-    with tempfile.TemporaryDirectory() as d:
-        path = Path(d) / "m.pt"
-        torch.save({"model": enc.state_dict(), "config": cfg, "step": 1}, path)
-        loaded = load_frozen_encoder(path, torch.device("cpu"))
-        assert loaded.kind == "brain3d" and loaded.model.token_head is not None
-        feat, fg = P.Brain3D(loaded, "new").tokens(_vol(), "mri")
+    d = tmp_path
+    path = Path(d) / "m.pt"
+    torch.save({"model": enc.state_dict(), "config": cfg, "step": 1}, path)
+    loaded = load_frozen_encoder(path, torch.device("cpu"))
+    assert loaded.kind == "brain3d" and loaded.model.token_head is not None
+    feat, fg = P.Brain3D(loaded, "new").tokens(_vol(), "mri")
     assert feat.shape == (N_TOK, 64) and fg.shape == (N_TOK,)
     assert float(feat[~fg].abs().sum()) == 0.0 and float(feat[fg].abs().sum()) > 0.0
 
@@ -206,11 +205,12 @@ def test_fine_grid_tokens_keep_the_native_grid():
     enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), GRID_XYZ, (1.0, 1.0, 1.0))
     vol = _vol()
     native, _, fg = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_grid=True, fine_pool=False)
-    pooled, _, _ = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_pool=True, fine_grid=False)
+    pooled, _, fg_coarse = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_pool=True, fine_grid=False)
     assert native.shape[0] == N_FINE and fg.shape == (N_FINE,)
     assert enc.patch_xyz == (16, 16, 8)
     d = native.shape[-1]
     avg = native.float().view(TOKEN_GRID[0], 2, TOKEN_GRID[1], 2, TOKEN_GRID[2], 2, d).mean(dim=(1, 3, 5)).reshape(-1, d)
+    avg = avg * fg_coarse.unsqueeze(-1)            # the pooled path keeps only coarse positions that pass the gate
     assert torch.allclose(avg, pooled.float(), atol=1e-3, rtol=1e-3)
     assert float(native[~fg].abs().sum()) == 0.0 and float(native[fg].abs().sum()) > 0.0
 
@@ -235,8 +235,7 @@ if __name__ == "__main__":
             print("ok", name)
 
 
-def test_cls_embedding_reaches_the_embedding_cache_and_comes_back_from_it():
-    import tempfile
+def test_cls_embedding_reaches_the_embedding_cache_and_comes_back_from_it(tmp_path):
     from pathlib import Path
 
     import numpy as np
@@ -248,20 +247,20 @@ def test_cls_embedding_reaches_the_embedding_cache_and_comes_back_from_it():
 
     cfg = smoke_config(default_config("lejepa3d"))
     cfg["model"].update(n_cls=1, n_registers=4)
-    with tempfile.TemporaryDirectory() as d:
-        d = Path(d)
-        ck = d / "run" / "last.pt"
-        ck.parent.mkdir()
-        torch.save({"model": build_encoder(cfg, torch.device("cpu")).state_dict(), "config": cfg, "step": 1}, ck)
-        paths = {}
-        for i in range(3):
-            vol = np.full((16, 1, 32, 32), -6.0, np.float16)
-            vol[2:14, 0, 4:28, 4:28] = np.random.default_rng(i).normal(1.0, 0.5, (12, 24, 24))
-            store.write(d / "store" / "x" / f"v{i}.zip", "image", vol)
-            paths[f"mri:v{i}"] = f"x/v{i}.zip"
-        kw = dict(ckpt=ck, slices_root=d / "store", image_paths=paths, volume_ids=list(paths),
-                  cache_dir=d / "cache", task="t", window="canonical", modalities={v: "mri" for v in paths})
-        built = load_or_build_embeddings(**kw)
-        again = load_or_build_embeddings(**kw)
+    d = tmp_path
+    d = Path(d)
+    ck = d / "run" / "last.pt"
+    ck.parent.mkdir()
+    torch.save({"model": build_encoder(cfg, torch.device("cpu")).state_dict(), "config": cfg, "step": 1}, ck)
+    paths = {}
+    for i in range(3):
+        vol = np.full((16, 1, 32, 32), -6.0, np.float16)
+        vol[2:14, 0, 4:28, 4:28] = np.random.default_rng(i).normal(1.0, 0.5, (12, 24, 24))
+        store.write(d / "store" / "x" / f"v{i}.zip", "image", vol)
+        paths[f"mri:v{i}"] = f"x/v{i}.zip"
+    kw = dict(ckpt=ck, slices_root=d / "store", image_paths=paths, volume_ids=list(paths),
+              cache_dir=d / "cache", task="t", window="canonical", modalities={v: "mri" for v in paths})
+    built = load_or_build_embeddings(**kw)
+    again = load_or_build_embeddings(**kw)
     assert built["cls"] is not None and built["cls"].shape[0] == 3 and np.isfinite(built["cls"]).all()
     assert np.allclose(again["cls"], built["cls"]) and again["mus"].shape == built["mus"].shape

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -180,27 +179,27 @@ def _rsna_labels() -> pd.DataFrame:
     return pd.DataFrame([{"volume_id": "ct:RSNA-1", **{k: 1 for k in RSNA_LABELS}}])
 
 
-def test_load_task_covers_every_name():
+def test_load_task_covers_every_name(tmp_path):
     vols = _volumes()
     xls = pd.DataFrame({"IXI_ID": [12], "AGE": [41.0]})
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        msd = _write_clinical(root)
-        with (
-            patch("brain.downstream.tasks.DATASETS", root),
-            patch("brain.downstream.tasks.LABEL_SOURCES", root / "_not_synced"),
-            patch("brain.downstream.tasks.build_rsna_volume_labels", return_value=_rsna_labels()),
-            patch("pandas.read_excel", return_value=xls),
-        ):
-            for name in TASK_NAMES:
-                task = load_task(name, vols, msd_labels=msd)
-                assert task.name == name, name
-                assert task.task_type == TASK_TYPES[name], (name, task.task_type)
-                assert len(task.volume_ids) >= 1, name
-                assert set(task.splits) == set(task.volume_ids)
+    tmp = tmp_path
+    root = Path(tmp)
+    msd = _write_clinical(root)
+    with (
+        patch("brain.downstream.tasks.DATASETS", root),
+        patch("brain.downstream.tasks.LABEL_SOURCES", root / "_not_synced"),
+        patch("brain.downstream.tasks.build_rsna_volume_labels", return_value=_rsna_labels()),
+        patch("pandas.read_excel", return_value=xls),
+    ):
+        for name in TASK_NAMES:
+            task = load_task(name, vols, msd_labels=msd)
+            assert task.name == name, name
+            assert task.task_type == TASK_TYPES[name], (name, task.task_type)
+            assert len(task.volume_ids) >= 1, name
+            assert set(task.splits) == set(task.volume_ids)
 
 
-def test_msd_joins_store_ids_and_builds_enhancing_high():
+def test_msd_joins_store_ids_and_builds_enhancing_high(tmp_path):
     assert msd_join_key("msd_braintumor:BRATS_001") == "BRATS_001"
     assert msd_join_key("mri:MSD-BRATS_001") == "BRATS_001"
     vols = pd.DataFrame([{
@@ -211,13 +210,13 @@ def test_msd_joins_store_ids_and_builds_enhancing_high():
         "modality": "mri",
         "case_id": "BRATS_001",
     }])
-    with tempfile.TemporaryDirectory() as tmp:
-        src = Path(tmp) / "volume_labels.csv"
-        pd.DataFrame({
-            "name": ["BRATS_001", "BRATS_002"],
-            "enhancing_vox": [30000, 10],
-        }).to_csv(src, index=False)
-        task = load_msd_task(vols, labels_csv=src)
+    tmp = tmp_path
+    src = Path(tmp) / "volume_labels.csv"
+    pd.DataFrame({
+        "name": ["BRATS_001", "BRATS_002"],
+        "enhancing_vox": [30000, 10],
+    }).to_csv(src, index=False)
+    task = load_msd_task(vols, labels_csv=src)
     assert task.name == "msd" and task.task_type == "binary"
     assert task.volume_ids == ["msd_braintumor:BRATS_001"]
     assert int(task.y[0]) == 1

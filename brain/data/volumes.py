@@ -138,10 +138,7 @@ class VolumeDataset(Dataset):
         per_view = bool(skull.get("per_view", False)) and not self.fixed_crops and self._skull_mask_ok(row)
         drop = not per_view and not self.fixed_crops and self._draw_skull_dropout(row, gen)
         arrays = store.read_many(img_path, ("image", "brain") if (drop or per_view) else ("image",))  # one zip open
-        vol = arrays["image"]
-        if vol.ndim == 4:
-            vol = vol[:, 0]
-        volume = torch.from_numpy(np.ascontiguousarray(vol))  # (Z, Y, X) in the stored dtype
+        volume = torch.from_numpy(np.ascontiguousarray(store.squeeze_channel(arrays["image"])))  # (Z, Y, X)
         if volume.ndim != 3:
             raise ValueError(f"expected (Z,Y,X), got {tuple(volume.shape)}")
         spacing, origin = self._spacing_origin(row)
@@ -161,8 +158,7 @@ class VolumeDataset(Dataset):
             # lesion-aware MAE masking: per-token lesion flags are derived from this in the worker (not shipped)
             les, path = None, self._lesion_path(row)
             if path is not None and path.exists():
-                m = np.asarray(store.read(path, "mask"))
-                m = m[:, 0] if m.ndim == 4 else m
+                m = store.read_image(path, "mask")
                 if m.shape == tuple(volume.shape):
                     les = torch.from_numpy(np.ascontiguousarray(m > 0))
             extra["lesion"] = (les if les is not None else torch.zeros(volume.shape, dtype=torch.bool))[None, None]

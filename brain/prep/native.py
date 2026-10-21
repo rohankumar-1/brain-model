@@ -28,6 +28,8 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
+from brain.prep import store
+
 KEYS = ("reg_affine", "grid_origin", "grid_spacing", "grid_direction", "grid_size",
         "native_origin", "native_spacing", "native_direction", "native_size")
 
@@ -78,9 +80,7 @@ def to_native(arr_zyx: np.ndarray, attrs: dict, *, nearest: bool = True, default
         missing = [k for k in KEYS if k not in attrs]
         raise ValueError(f"volume has no native-space record (missing {missing}); re-prep it with format-6 code that "
                          "stores the transform")
-    arr = np.asarray(arr_zyx)
-    if arr.ndim == 4:
-        arr = arr[:, 0]
+    arr = store.squeeze_channel(arr_zyx)
     want = tuple(attrs["grid_size"])[::-1]
     if arr.shape != want:
         raise ValueError(f"array {arr.shape} is not on the stored grid {want}")
@@ -112,7 +112,6 @@ def volume_ml(mask_zyx: np.ndarray, attrs: dict, label=None) -> float:
 
 
 def main() -> None:
-    from brain.prep import store
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", type=Path, required=True, help="stored image zip (holds the transform)")

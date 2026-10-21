@@ -111,6 +111,17 @@ def read(path: Path, name: str) -> np.ndarray:
         store.close()
 
 
+def squeeze_channel(arr: np.ndarray) -> np.ndarray:
+    """Stored ``(Z, 1, Y, X)`` image / mask arrays -> ``(Z, Y, X)``; 3D arrays pass through."""
+    arr = np.asarray(arr)
+    return arr[:, 0] if arr.ndim == 4 else arr
+
+
+def read_image(path: Path, name: str = "image") -> np.ndarray:
+    """One stored volume array as ``(Z, Y, X)`` in the stored dtype."""
+    return squeeze_channel(read(path, name))
+
+
 def read_many(path: Path, names: tuple[str, ...] | list[str]) -> dict[str, np.ndarray]:
     """Several arrays from one zip with a single open; names the zip lacks are omitted."""
     from zarr.storage import ZipStore

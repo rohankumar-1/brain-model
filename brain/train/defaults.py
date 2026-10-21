@@ -68,6 +68,7 @@ LEJEPA3D: dict[str, Any] = {
         "volume_size_xyz": list(GRID_XYZ),
         "num_workers": 10,
         "balance_alpha": 1.0,  # family sampling mass ~ n**alpha: 1 natural mix, 0 uniform over families
+        "balance_groups": None,  # {group: [family, ...]}: two-level balance (volumes.family_weights)
     },
     "model": {
         "size": "tiny", "in_chans": 1, "proj_dim": 128, "proj_hidden": 2048, "qk_norm": True,
@@ -98,13 +99,19 @@ LEJEPA3D: dict[str, Any] = {
         "curve": {"p": 0.8, "knots": 5, "strength": 0.6, "flip": 0.3},
         # Smooth multiplicative bias field (MRI coil shading). Skipped for CT.
         "bias": {"p": 0.5, "amp": 0.3},
-        "noise": {"p": 0.5, "sigma": [0.02, 0.15]},
+        # kind gaussian (sigma in window units) or rician (snr range, magnitude MRI noise; CT stays gaussian)
+        "noise": {"p": 0.5, "sigma": [0.02, 0.15], "kind": "gaussian", "snr": [15.0, 100.0]},
         "blur": {"p": 0.3, "sigma_vox": [0.5, 1.5]},
         # Anisotropic blur along one axis, as in thick-slice acquisitions resampled to 1 mm.
         "through_plane": {"p": 0.5, "fwhm_vox": [2.0, 6.0]},
         "drift": {"p": 0.3, "amp": 0.25},
-        # With probability p a whole volume is cut to its brain mask (needs a store built with brain masks).
-        "skull": {"p": 0.5},
+        # With probability p a whole volume is cut to its brain mask (needs a store built with brain masks);
+        # per_view draws it per crop instead of per volume.
+        "skull": {"p": 0.5, "per_view": False},
+        # Per-view rotation / scale / left-right flip on the GPU (crops3d.draw_geometry); p 0 = off.
+        "geometric": {"p": 0.0, "rot_deg": [10.0, 10.0, 15.0], "scale": [0.85, 1.15], "flip_lr": 0.5},
+        # MRI histogram matching to another volume of the same contrast group (augment.histogram_match); p 0 = off.
+        "histmatch": {"p": 0.0, "alpha": [0.3, 0.7]},
     },
     "loss": {
         "lamb": 0.02,
@@ -118,7 +125,9 @@ LEJEPA3D: dict[str, Any] = {
         # hidden token's full-crop embedding and, with pixel_weight > 0, the voxel cell means of kept patches.
         "predict": {"weight": 0.0, "pixel_weight": 0.5, "pixel_cells": [2, 2, 2], "blocks": 3,
                     "block_tokens": [3, 6], "depth": 4, "ramp_steps": 2000,
-                    "fine_weight": 0.0, "fine_blocks": 2, "fine_block_tokens": [2, 3]},
+                    "fine_weight": 0.0, "fine_blocks": 2, "fine_block_tokens": [2, 3],
+                    # MAE (mae3d): voxels | split target; lesion = {visible, weight} lesion-aware masking (None = off)
+                    "target": "voxels", "lesion": None},
     },
     "optim": {"lr": 2.5e-4, "weight_decay": 0.05, "warmup_steps": 2000, "clip_grad": 1.0, "batch_size": 4},
     "train": {"max_steps": 45000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500, "keep_every": 5000,
@@ -137,7 +146,8 @@ def _mae3d_defaults() -> dict[str, Any]:
     c["views"].update(patch_xyz=[8, 8, 4], nested=False, win=False,
                       local={"n": 0, "size_xyz": [64, 64, 32]}, fine={"n": 0, "size_xyz": [32, 32, 16]})
     c["aug"].update(curve={"p": 0.0}, skull={"p": 0.3, "per_view": True})
-    c["loss"] = {"predict": {"weight": 1.0, "mask_ratio": 0.75, "blocks": 0, "block_tokens": [3, 6]}}
+    c["loss"] = {"predict": {"weight": 1.0, "mask_ratio": 0.75, "blocks": 0, "block_tokens": [3, 6],
+                             "target": "voxels", "lesion": None}}
     c["optim"].update(lr=1.5e-4, weight_decay=0.05, warmup_steps=2000, batch_size=24)
     c["train"].update(max_steps=30000, keep_every=3000)
     c["output"]["out_dir"] = "runs/mae3d"

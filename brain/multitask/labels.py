@@ -32,6 +32,7 @@ from brain.downstream.tasks import (
     load_task,
 )
 from brain.multitask.registry import Registry, Task, load_registry
+from brain.prep import store
 
 STORE = DEFAULT_VOLUMES.parent
 OUT_DIR = STORE / "labels" / "multitask"
@@ -52,18 +53,28 @@ def _pool2(a: np.ndarray) -> np.ndarray:
     return a[:z, :y, :x].reshape(z // 2, 2, y // 2, 2, x // 2, 2).mean(axis=(1, 3, 5))
 
 
+def pooled_brain(brain: np.ndarray) -> np.ndarray:
+    """Brain mask on the 2x block-averaged grid (a voxel is brain when at least half its block is)."""
+    return _pool2(np.asarray(brain, dtype=np.float32)) >= 0.5
+
+
+def lr_mismatch(b: np.ndarray) -> float:
+    """Share of a mask that does not match its mirror across the X midline (0 = left-right symmetric)."""
+    bf = b[..., ::-1]
+    return float((b ^ bf).sum() / max((b | bf).sum(), 1))
+
+
 def live_targets(image: np.ndarray, brain: np.ndarray, modality: str) -> dict[str, float]:
     """Per-scan targets from a (Z, Y, X) image and its brain mask, on a 2x block-averaged grid (block averaging, unlike
     strided subsampling, commutes with the mirror). Left-right measures mirror the X axis about the grid centre, as the
     loader's flip does, so they are invariant to that augmentation."""
     img = _pool2(np.asarray(image, dtype=np.float32))
-    b = _pool2(np.asarray(brain, dtype=np.float32)) >= 0.5
+    b = pooled_brain(brain)
     out = {k: float("nan") for k in LIVE}
     if b.sum() < 1000:
         return out
-    bf = b[..., ::-1]
-    out["mask_asym"] = float((b ^ bf).sum() / max((b | bf).sum(), 1))
-    both = b & bf
+    out["mask_asym"] = lr_mismatch(b)
+    both = b & b[..., ::-1]
     x = asinh_window(img, *canonical_c_w(modality))
     d = np.abs(x - x[..., ::-1])[both]
     out["intensity_asym"] = float(d.mean() / (x[both].std() + 1e-6))
@@ -76,15 +87,12 @@ def live_targets(image: np.ndarray, brain: np.ndarray, modality: str) -> dict[st
 
 
 def _live_one(args) -> dict[str, float]:
-    from brain.prep import store
-
     path, modality = args
     try:
         a = store.read_many(STORE / path, ("image", "brain"))
     except Exception:   # noqa: BLE001  a sample for statistics: skip unreadable volumes
         return {k: float("nan") for k in LIVE}
-    img = a["image"][:, 0] if a["image"].ndim == 4 else a["image"]
-    return live_targets(img, a["brain"], modality)
+    return live_targets(store.squeeze_channel(a["image"]), a["brain"], modality)
 
 
 # ------------------------------------------------------------------------------------------------ sources
@@ -184,8 +192,6 @@ def src_brats_seg(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
 
 
 def _mask_ml(args) -> float:
-    from brain.prep import store
-
     path, ids = args
     m = np.asarray(store.read(STORE / path, "mask"))
     return float(np.isin(m, ids).sum()) / 1000.0
@@ -297,12 +303,11 @@ def _synthseg_rows(v: pd.DataFrame, need_fov: bool = False) -> tuple[pd.DataFram
 
 def src_synthseg_seg(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     """Binary mask of a SynthSeg structure group (QC-passed volumes); the zip holds indices into ``LABELS``."""
-    from brain.prep import store as st
     from brain.prep.synthseg import LABELS
 
     rows, _ = _synthseg_rows(v)
     idx = ",".join(str(int(i)) for i in np.searchsorted(LABELS, SS_GROUPS[s["group"]]))
-    refs = [f"{st.path_for(Path(''), f, c, 'synthseg')}|{idx}" for f, c in zip(rows["folder"], rows["case_id"].astype(str))]
+    refs = [f"{store.path_for(Path(''), f, c, 'synthseg')}|{idx}" for f, c in zip(rows["folder"], rows["case_id"].astype(str))]
     return _rows(rows, np.nan, np.asarray(refs, dtype=object))
 
 
@@ -328,15 +333,11 @@ REG_DICE_MIN = 0.85     # brain mask vs registered template brain (OASIS-1-style
 
 
 def _mask_asym(path: str) -> float:
-    from brain.prep import store
-
     try:
         b = np.asarray(store.read(STORE / path, "brain")) > 0
     except Exception:   # noqa: BLE001  no brain mask: unknown, decided by the other checks
         return float("nan")
-    b2 = _pool2(b.astype(np.float32)) >= 0.5
-    bf = b2[..., ::-1]
-    return float((b2 ^ bf).sum() / max((b2 | bf).sum(), 1))
+    return lr_mismatch(pooled_brain(b))
 
 
 def registration_qc(volumes: pd.DataFrame, workers: int = 8, path: Path | None = None) -> pd.DataFrame:

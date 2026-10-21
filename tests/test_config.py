@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import tempfile
 from pathlib import Path
 
 import yaml
@@ -31,14 +30,14 @@ def test_parse_overrides_builds_nested_dict_with_yaml_values():
         "optim": {"lr": 0.001}, "train": {"max_steps": 10}, "views": {"global": {"size_xyz": [64, 64, 32]}}}
 
 
-def test_load_config_precedence_defaults_file_overrides():
-    with tempfile.TemporaryDirectory() as td:
-        path = Path(td) / "c.yaml"
-        path.write_text("optim: {lr: 0.5}\nextra: 1\n")
-        cfg = load_config(path, defaults={"optim": {"lr": 1.0, "wd": 0.1}}, overrides={"optim": {"wd": 0.2}})
-        assert cfg == {"optim": {"lr": 0.5, "wd": 0.2}, "extra": 1}
-        save_config(cfg, Path(td) / "out" / "saved.yaml")
-        assert yaml.safe_load((Path(td) / "out" / "saved.yaml").read_text()) == cfg
+def test_load_config_precedence_defaults_file_overrides(tmp_path):
+    td = tmp_path
+    path = Path(td) / "c.yaml"
+    path.write_text("optim: {lr: 0.5}\nextra: 1\n")
+    cfg = load_config(path, defaults={"optim": {"lr": 1.0, "wd": 0.1}}, overrides={"optim": {"wd": 0.2}})
+    assert cfg == {"optim": {"lr": 0.5, "wd": 0.2}, "extra": 1}
+    save_config(cfg, Path(td) / "out" / "saved.yaml")
+    assert yaml.safe_load((Path(td) / "out" / "saved.yaml").read_text()) == cfg
 
 
 def test_every_shipped_config_only_uses_known_keys():
@@ -52,7 +51,7 @@ def test_every_shipped_config_only_uses_known_keys():
             elif isinstance(v, dict) and isinstance(base[k], dict):
                 walk(base[k], v, path + [k])
 
-    files = sorted((ROOT / "configs").glob("*/*.yaml"))
+    files = sorted(f for f in (ROOT / "configs").glob("*/*.yaml") if f.name != "registry.yaml")   # task registry
     assert files
     for f in files:
         walk(d.default_config(f.parent.name), yaml.safe_load(f.read_text()), [f.name])

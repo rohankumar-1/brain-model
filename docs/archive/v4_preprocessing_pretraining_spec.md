@@ -1,4 +1,4 @@
-> Historical design spec for store format 4. Module paths below predate the `brain/` package (`data/prep` is now `brain/prep`, `lib/*` is split across `brain/common` and `brain/data`). Current behaviour: `docs/prep.md`, `docs/lejepa3d.md`, `docs/restructure.md`.
+> Historical design spec for store format 4. Module paths below predate the `brain/` package (`data/prep` is now `brain/prep`, `lib/*` is split across `brain/common` and `brain/data`). Current behaviour: `docs/prep.md`, `docs/lejepa3d.md`, `docs/archive/restructure.md`.
 
 # v4 spec: native-unit preprocessing and window-randomized pretraining
 

@@ -18,12 +18,14 @@ blocks attention between slots. ``slot.width`` narrows the slot before the heads
 from __future__ import annotations
 
 import math
+import re
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
+from brain.models.conv3d import Res, conv3, group_norm
 from brain.models.vit3d import BrainEncoder
 from brain.multitask.data import TYPE_ID
 from brain.multitask.registry import Registry
@@ -55,24 +57,6 @@ class SlotLayer(nn.Module):
         return q + self.mlp(self.n3(q))
 
 
-def _gn(c: int) -> nn.GroupNorm:
-    return nn.GroupNorm(8 if c % 8 == 0 else 1, c)
-
-
-def _conv(cin: int, cout: int, stride=1) -> nn.Sequential:
-    return nn.Sequential(nn.Conv3d(cin, cout, 3, stride=stride, padding=1, bias=False), _gn(cout), nn.GELU())
-
-
-class _Res(nn.Module):
-    def __init__(self, cin: int, cout: int):
-        super().__init__()
-        self.a, self.b = _conv(cin, cout), _conv(cout, cout)
-        self.skip = nn.Identity() if cin == cout else nn.Conv3d(cin, cout, 1, bias=False)
-
-    def forward(self, x):
-        return self.b(self.a(x)) + self.skip(x)
-
-
 class SegDecoder(nn.Module):
     """Token grid (+ earlier-block taps) -> one logit map at ``out_stride`` per segmentation slot.
 
@@ -90,24 +74,33 @@ class SegDecoder(nn.Module):
         widths = tuple(widths[len(widths) - 1 - n_xy:])                # the finest n_xy + 1 widths
         n_up = n_xy
         self.steps = [(2 if i < n_z else 1, 2, 2) for i in range(n_up)]
-        self.stem = nn.Sequential(nn.Conv3d(in_dim, widths[0], 1, bias=False), _gn(widths[0]), nn.GELU(),
-                                  _Res(widths[0], widths[0]))
+        self.stem = nn.Sequential(nn.Conv3d(in_dim, widths[0], 1, bias=False), group_norm(widths[0]), nn.GELU(),
+                                  Res(widths[0], widths[0]))
         # image pyramid, finest first: stride 2 then the decoder's steps in reverse
         pyr, cin = [], 1
         for i in range(n_up):
             stride = (2, 2, 2) if i == 0 else self.steps[n_up - i]
-            pyr.append(nn.Sequential(_conv(cin, widths[n_up - i], stride), _conv(widths[n_up - i], widths[n_up - i])))
+            pyr.append(nn.Sequential(conv3(cin, widths[n_up - i], stride), conv3(widths[n_up - i], widths[n_up - i])))
             cin = widths[n_up - i]
         self.pyramid = nn.ModuleList(pyr)
         self.ups = nn.ModuleList(
-            nn.Sequential(nn.ConvTranspose3d(widths[i], widths[i + 1], s, stride=s, bias=False), _gn(widths[i + 1]),
+            nn.Sequential(nn.ConvTranspose3d(widths[i], widths[i + 1], s, stride=s, bias=False), group_norm(widths[i + 1]),
                           nn.GELU()) for i, s in enumerate(self.steps))
-        self.fuse = nn.ModuleList(_Res(2 * widths[i + 1], widths[i + 1]) for i in range(n_up))
+        self.fuse = nn.ModuleList(Res(2 * widths[i + 1], widths[i + 1]) for i in range(n_up))
         self.film = nn.ModuleList(nn.Linear(cond_dim, 2 * w) for w in widths)
         for f in self.film:
             nn.init.zeros_(f.weight)
             nn.init.zeros_(f.bias)
         self.head = nn.Conv3d(widths[-1], 1, 1)
+        self._register_load_state_dict_pre_hook(self._legacy_keys)
+
+    @staticmethod
+    def _legacy_keys(state, prefix, *_):
+        """Checkpoints from before the shared ``conv3d.Res`` named its two convolutions ``a`` / ``b``."""
+        for k in [k for k in state if k.startswith(prefix)]:
+            new = re.sub(r"\.a\.(\d)", r".block.0.\1", re.sub(r"\.b\.(\d)", r".block.1.\1", k[len(prefix):]))
+            if new != k[len(prefix):]:
+                state[prefix + new] = state.pop(k)
 
     @staticmethod
     def _mod(x, film, cond):

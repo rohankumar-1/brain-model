@@ -1,12 +1,14 @@
 # brain-model
 
-Modality-agnostic self-supervised embeddings for brain CT and MRI. One package, `brain/`, holds the pipeline end to end: prep (raw archives to registered 1 mm Zarr volumes) -> SSL pretraining (three methods on one engine) -> frozen-encoder downstream evaluation.
+Modality-agnostic embeddings for brain CT and MRI. One package, `brain/`, holds the pipeline end to end: prep (raw archives to registered 1 mm Zarr volumes) -> SSL pretraining (several methods on one engine) -> task-conditioned multitask post-training -> frozen-encoder downstream evaluation.
 
 | Method | Command | What it is |
 |---|---|---|
 | `lejepa3d` | `python -m brain.train lejepa3d` | **Project model.** 3D LeJEPA on native-grid crops with a dense token objective, RoPE in mm, optional masked-block prediction. `docs/lejepa3d.md` |
 | `lejepa2d` | `python -m brain.train lejepa2d` | 2D LeJEPA ViT on slices (crop matching + SIGReg); the slice-level reference. |
 | `dino2d` | `python -m brain.train dino2d` | **BrainDINO comparison**: DINOv2 + iBOT + KoLeo, the MRI-only foundation-model recipe, on the same slice store. |
+| `mae3d` | `python -m brain.train mae3d` | 3D MAE, Primus-style ViT on 8 x 8 x 4 mm tokens (split voxel target, lesion-aware masking). |
+| `multitask` | `python -m brain.train multitask` | Task-conditioned multitask post-training of an SSL encoder on whole volumes. `docs/multitask.md` |
 
 ## Layout
 
@@ -14,17 +16,20 @@ Modality-agnostic self-supervised embeddings for brain CT and MRI. One package, 
 brain/
   common/      config (defaults + YAML + --set), dist (torchrun, StopFlag), optim (lr, param groups), metrics,
                checkpoint (atomic save, resume), windowing (asinh windows), paths
-  prep/        read -> center -> register -> resample -> native units -> brain mask; index; QC; pilot
+  prep/        read -> center -> register -> resample -> native units -> brain mask; index; QC; pilot;
+               SynthSeg-robust 2.0 (PyTorch port) + runner for anatomy labels
   data/        volume + slab datasets, crops (2D/3D), appearance augmentation, token gate
   models/      vit2d, vit3d, viewnet3d, braindino (DINO head), projector, patch_embed, rope3d
   objectives/  sigreg (+ batch gather), lejepa3d, dense, dino
   train/       engine (CLI, loop, resume, checkpoints), defaults, one Trainer per method
-  downstream/  frozen-encoder tasks, heads, probes, segmentation
+  multitask/   task registry, label builder (incl. registration / SynthSeg QC), data, model, losses, few-shot
+  downstream/  frozen-encoder tasks, heads, probes, segmentation, results views
   datasets/    download / fetch scripts, SinoCT overlap
 configs/<method>/*.yaml    only the keys that differ from brain/train/defaults.py need be set
-jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep_v6*, eval_task/submit_eval.sh
-tests/                     CPU tests (python -m pytest tests -q)
-docs/                      prep.md, lejepa3d.md, downstream_3d.md, restructure.md (what changed and why)
+jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep_v6*, synthseg, multitask_*, eval_run /
+                           submit_eval.sh; jobs/archive/ = finished one-off jobs
+tests/                     CPU tests (python tests/run.py tests/test_*.py; pytest also works where installed)
+docs/                      prep.md, lejepa3d.md, downstream_3d.md, multitask.md; docs/archive/ = superseded plans
 ```
 
 ## Storage (ORCD)

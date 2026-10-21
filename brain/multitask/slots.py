@@ -14,8 +14,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from brain.common.windowing import asinh_window, canonical_c_w
-from brain.data.gate import token_keep
+from brain.multitask.data import gate_and_window
 from brain.multitask.model import MultitaskModel
 from brain.multitask.registry import load_registry
 
@@ -49,9 +48,7 @@ def attach(enc, ckpt: dict, device: torch.device) -> None:
     def slot_features(vol_xyz: torch.Tensor, modality: str) -> tuple[np.ndarray, np.ndarray]:
         raw = vol_xyz.float().permute(2, 1, 0)[None, None]           # (1, 1, Z, Y, X) as in training
         mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=raw.device)
-        keep = token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch, ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
-                          mri_lo=float(gate.get("mri_lo", -5.5))).reshape(1, -1)
-        x = asinh_window(raw, *canonical_c_w(modality))
+        x, keep = gate_and_window(raw, mod, patch, gate)
         amp = dict(device_type=raw.device.type, dtype=torch.bfloat16, enabled=raw.is_cuda)
         with torch.autocast(**amp):
             e = model.encode(x, keep)

@@ -42,6 +42,7 @@ from brain.common.grid import DEPTH
 from brain.common.paths import REPO_ROOT
 from brain.prep.store import FORMAT_VERSION
 from brain.downstream.embeddings import uniform_slice_indices
+from brain.models.conv3d import Res, group_norm, up3
 
 VOX = (DEPTH, 256, 256)  # voxels (Z, Y, X)
 PATCH = (16, 16, 8)  # the encoder's native patch (x, y, z)
@@ -133,29 +134,6 @@ def crop_tokens(tok, mask, origin, crop, patch_xyz):
 
 # ----------------------------------------------------------------------------- decoder
 
-def _gn(c: int) -> nn.GroupNorm:
-    g = 8 if c % 8 == 0 else 4 if c % 4 == 0 else 1
-    return nn.GroupNorm(g, c)
-
-
-def _conv(cin: int, cout: int) -> nn.Sequential:
-    return nn.Sequential(nn.Conv3d(cin, cout, 3, padding=1, bias=False), _gn(cout), nn.GELU())
-
-
-def _up(cin: int, cout: int, stride: tuple[int, int, int]) -> nn.Sequential:
-    return nn.Sequential(nn.ConvTranspose3d(cin, cout, stride, stride=stride, bias=False), _gn(cout), nn.GELU())
-
-
-class _Res(nn.Module):
-    def __init__(self, cin: int, cout: int):
-        super().__init__()
-        self.block = nn.Sequential(_conv(cin, cout), _conv(cout, cout))
-        self.skip = nn.Identity() if cin == cout else nn.Conv3d(cin, cout, 1, bias=False)
-
-    def forward(self, x):
-        return self.block(x) + self.skip(x)
-
-
 class TokenDecoder3D(nn.Module):
     """Token-grid U-Net, then upsample to voxel logits.
 
@@ -179,17 +157,17 @@ class TokenDecoder3D(nn.Module):
         steps = [(2 if i < n_z else 1, 2, 2) for i in range(n_xy)]
         vox_w = [w0] + list(widths[len(widths) - n_xy:])
         self.drop = nn.Dropout(dropout)
-        self.stem = nn.Sequential(nn.Conv3d(in_dim, w0, 1, bias=False), _gn(w0), nn.GELU(), _Res(w0, w0))
+        self.stem = nn.Sequential(nn.Conv3d(in_dim, w0, 1, bias=False), group_norm(w0), nn.GELU(), Res(w0, w0))
         self.downs = nn.ModuleList(
-            [nn.Sequential(nn.Conv3d(w0, w0, 3, stride=2, padding=1, bias=False), _gn(w0), nn.GELU(), _Res(w0, w0))
+            [nn.Sequential(nn.Conv3d(w0, w0, 3, stride=2, padding=1, bias=False), group_norm(w0), nn.GELU(), Res(w0, w0))
              for _ in range(self.n_down)]
         )
-        self.enc_ups = nn.ModuleList([_up(w0, w0, (2, 2, 2)) for _ in range(self.n_down)])
-        self.fuses = nn.ModuleList([_Res(2 * w0, w0) for _ in range(self.n_down)])
-        self.pe_proj = nn.Sequential(nn.Conv3d(self.pe_dim, w0, 1, bias=False), _gn(w0), nn.GELU()) if self.pe_dim else None
-        self.pe_fuse = _Res(2 * w0, w0) if self.pe_dim else None
+        self.enc_ups = nn.ModuleList([up3(w0, w0, (2, 2, 2)) for _ in range(self.n_down)])
+        self.fuses = nn.ModuleList([Res(2 * w0, w0) for _ in range(self.n_down)])
+        self.pe_proj = nn.Sequential(nn.Conv3d(self.pe_dim, w0, 1, bias=False), group_norm(w0), nn.GELU()) if self.pe_dim else None
+        self.pe_fuse = Res(2 * w0, w0) if self.pe_dim else None
         self.stages = nn.ModuleList(
-            [nn.Sequential(_up(vox_w[i], vox_w[i + 1], s), _Res(vox_w[i + 1], vox_w[i + 1])) for i, s in enumerate(steps)]
+            [nn.Sequential(up3(vox_w[i], vox_w[i + 1], s), Res(vox_w[i + 1], vox_w[i + 1])) for i, s in enumerate(steps)]
         )
         self.head = nn.Conv3d(vox_w[-1], n_classes, 1)
         self.aux_tok = nn.Conv3d(w0, n_classes, 1) if deep_sup else None
@@ -238,8 +216,8 @@ class PatchFCN(nn.Module):
         self.out_vox = tuple(out_vox)
         self.drop = nn.Dropout(dropout)
         self.net = nn.Sequential(
-            nn.Conv3d(in_dim, width, 1, bias=False), _gn(width), nn.GELU(),
-            _Res(width, width), _Res(width, width),
+            nn.Conv3d(in_dim, width, 1, bias=False), group_norm(width), nn.GELU(),
+            Res(width, width), Res(width, width),
             nn.Conv3d(width, n_classes, 1),
         )
 

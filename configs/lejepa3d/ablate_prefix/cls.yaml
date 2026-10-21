@@ -1,6 +1,6 @@
 # Prefix-token ablation, arm B: one CLS token; it carries the pooled (global) objectives, patch tokens the dense ones.
 # Identical to configs/lejepa3d/small.yaml except model.n_cls / model.n_registers and output.out_dir.
-#   jobs/submit_ablation_prefix.sh   (all arms, then the downstream suite per arm)
+#   jobs/archive/submit_ablation_prefix.sh   (all arms, then the downstream suite per arm)
 # 3D LeJEPA small: the tiny dense native-grid recipe, scaled the way 2D small was.
 #
 # Encoder is ViT-S/16 (dim 384, 6 heads, 12 blocks) instead of tiny (192 / 3 / 12).

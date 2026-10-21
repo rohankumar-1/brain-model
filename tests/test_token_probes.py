@@ -5,7 +5,7 @@ import torch
 
 from brain.downstream.heads import AttnEnsemble
 from brain.downstream.token_probes import AttnProbe, ConvProbe, GRID_ZYX, make_token_heads
-from brain.common.grid import DEPTH, FINE_TOKEN_GRID, GRID_XYZ, TOKEN_GRID
+from brain.common.grid import FINE_TOKEN_GRID, TOKEN_GRID
 
 N_TOK = TOKEN_GRID[0] * TOKEN_GRID[1] * TOKEN_GRID[2]
 N_FINE = FINE_TOKEN_GRID[0] * FINE_TOKEN_GRID[1] * FINE_TOKEN_GRID[2]
