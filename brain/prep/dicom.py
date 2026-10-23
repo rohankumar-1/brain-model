@@ -73,7 +73,20 @@ def read_series_dir(folder: str | Path) -> tuple[sitk.Image, dict]:
     assembles slices by position (dcm2niix: duplicate / mixed slices, gantry-tilt de-shear, even spacing); the
     default SimpleITK series reader assumes even, untilted slices (docs/prep.md, "RSNA DICOM assembly")."""
     if os.environ.get("BRAIN_DICOM_READER", "sitk") == "dcm2niix":
-        return read_series_dcm2niix(folder)
+        # dcm2niix refuses some series (ImageType DERIVED / SECONDARY CTAs, malformed overlay tags): read those with
+        # the SimpleITK series reader instead
+        try:
+            return read_series_dcm2niix(folder)
+        except RuntimeError as e:
+            if "wrote nothing" not in str(e):
+                raise
+            img, info = read_series_dir_sitk(folder)
+            return img, {**info, "dcm2niix_variant": "sitk_fallback"}
+    return read_series_dir_sitk(folder)
+
+
+def read_series_dir_sitk(folder: str | Path) -> tuple[sitk.Image, dict]:
+    """SimpleITK / GDCM series reader (the default ``read_series_dir``)."""
     folder = str(folder)
     reader = sitk.ImageSeriesReader()
     reader.MetaDataDictionaryArrayUpdateOn()

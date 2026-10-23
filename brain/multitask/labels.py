@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from brain.common.windowing import asinh_window, canonical_c_w
+from brain.prep.fomo import PT_SHORT
 from brain.downstream.tasks import (
     CQ500_LABELS,
     DEFAULT_VOLUMES,
@@ -38,12 +39,8 @@ STORE = DEFAULT_VOLUMES.parent
 OUT_DIR = STORE / "labels" / "multitask"
 GRID_ML = 256 * 256 * 160 / 1000.0          # store grid volume in ml (1 mm voxels): brain_frac -> template-space ml
 # volumes.csv family -> FOMO participants.tsv dataset
-FOMO_PT = {
-    "fomo_hbn": "PT018_HBN", "fomo_nki": "PT027_NKI", "fomo_corr": "PT014_CoRR", "fomo_brainlat": "PT010_BrainLat",
-    "fomo_yale_mets": "PT035_Yale_Brain_Mets_Longitudinal", "fomo_nigerian": "PT002_Nigerian_Clinical",
-    "fomo_m4raw": "PT024_M4Raw",
-}
-LIVE = ("mask_asym", "intensity_asym", "ct_csf_frac", "ct_brain_hu")
+FOMO_PT = {"fomo_" + short: pt for pt, short in PT_SHORT.items()}
+LIVE = ("mask_asym", "intensity_asym", "ct_csf_frac", "ct_brain_hu", "ct_calcification", "ct_skull_hu")
 COLS = ["volume_id", "task", "value", "ref", "split"]
 
 
@@ -83,6 +80,11 @@ def live_targets(image: np.ndarray, brain: np.ndarray, modality: str) -> dict[st
         out["ct_csf_frac"] = float(((hu >= 0) & (hu <= 15)).mean())
         tissue = hu[(hu > 0) & (hu < 100)]
         out["ct_brain_hu"] = float(np.median(tissue)) if tissue.size else float("nan")
+        # full-resolution (calcifications are a few voxels): intracranial calcification share, skull bone density
+        from brain.multitask.measures import ct_measures
+
+        full = ct_measures(np.asarray(image, dtype=np.float32), np.asarray(brain), None)
+        out["ct_calcification"], out["ct_skull_hu"] = full["ct_calcification"], full["ct_skull_hu"]
     return out
 
 
@@ -130,9 +132,22 @@ def src_fomo_participants(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     val = [by_ses.get((a, b, c), by_sub.get((a, b))) for a, b, c in zip(rows["pt"], rows["sub"], rows["ses"])]
     rows["raw"] = val
     rows = rows.dropna(subset=["raw"])
-    if "map" in s:
-        m = {str(k): v_ for k, v_ in s["map"].items()}
-        rows["raw"] = rows["raw"].astype(str).map(m)
+    # free-text groups: ``drop`` exact values; ``map`` exact values, else ``prefix`` (first matching prefix), else
+    # ``default`` (unmatched rows are dropped without one)
+    rows = rows[~rows["raw"].astype(str).isin([str(d) for d in s.get("drop", [])])]
+    if "map" in s or "prefix" in s:
+        m = {str(k): v_ for k, v_ in (s.get("map") or {}).items()}
+        pre = [(str(k), v_) for k, v_ in (s.get("prefix") or {}).items()]
+
+        def lookup(x: str):
+            if x in m:
+                return m[x]
+            for k, v_ in pre:
+                if x.startswith(k):
+                    return v_
+            return s.get("default")
+
+        rows["raw"] = rows["raw"].astype(str).map(lookup)
         rows = rows.dropna(subset=["raw"])
         if task.type == "multiclass":
             rows["raw"] = rows["raw"].map({c: i for i, c in enumerate(task.classes)})
@@ -311,10 +326,36 @@ def src_synthseg_seg(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     return _rows(rows, np.nan, np.asarray(refs, dtype=object))
 
 
+def src_synthseg_scan_measure(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """A per-scan clinical measure from ``labels/synthseg/measures.csv`` (``brain.multitask.measures``) of QC-passed
+    SynthSeg scans; ``modality`` restricts it (e.g. CT-only grey-white ratio)."""
+    path = SYNTHSEG / "measures.csv"
+    if not path.exists():
+        return _rows(v.head(0), np.nan)
+    meas = pd.read_csv(path).set_index("volume_id")[s["measure"]].dropna()
+    rows, _ = _synthseg_rows(v)
+    rows = rows[rows["volume_id"].isin(meas.index)]
+    if s.get("modality"):
+        rows = rows[rows["modality"].astype(str).str.lower().str.startswith(s["modality"])]
+    return _rows(rows, meas.loc[rows["volume_id"]].to_numpy())
+
+
 def src_synthseg_measure(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     """A volume / ratio / asymmetry of QC-passed scans with the whole brain in the field of view."""
     rows, m = _synthseg_rows(v, need_fov=True)
     return _rows(rows, m[s["measure"]].to_numpy())
+
+
+def src_wmh(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """log(1 + WMH ml) from ``labels/wmh`` (``brain.prep.wmh_run``; FLAIR / T2 outside tumour cohorts)."""
+    import glob
+
+    files = sorted(glob.glob(str(STORE / "labels" / "wmh" / "volumes_*.csv")))
+    if not files:
+        return _rows(v.head(0), np.nan)
+    w = pd.concat([pd.read_csv(f) for f in files]).drop_duplicates("volume_id", keep="last").set_index("volume_id")
+    rows = v[v["volume_id"].isin(w.index)]
+    return _rows(rows, np.log1p(w.loc[rows["volume_id"], s.get("measure", "wmh_ml")].to_numpy()))
 
 
 SOURCES = {
@@ -323,6 +364,7 @@ SOURCES = {
     "brats_seg": src_brats_seg, "brats_seg_volume": src_brats_seg_volume, "mask_column": src_mask_column,
     "cq500": src_cq500, "downstream": src_downstream,
     "synthseg_seg": src_synthseg_seg, "synthseg_measure": src_synthseg_measure,
+    "synthseg_scan_measure": src_synthseg_scan_measure, "wmh": src_wmh,
 }
 
 
@@ -330,6 +372,15 @@ SOURCES = {
 REG_ASYM_MAX = 0.09     # brain-mask left-right mismatch about the grid midline (tilted / shifted heads); tumour
                         # cohorts stay below ~0.10, misregistered OASIS-1 / RSNA / HBN scans reach 0.10-0.27
 REG_DICE_MIN = 0.85     # brain mask vs registered template brain (OASIS-1-style misregistration; children ~0.85+)
+# Targets that are only right when the registration is: template-space volumes (registration scale) and left-right
+# asymmetries (grid midline). Registration QC drops a failing scan's rows for these tasks only; its study-level labels
+# (hemorrhage, age, diagnosis, ...) and image-space masks (brain, tumour, SynthSeg structures) still train.
+REG_SENSITIVE = ("brain_volume", "brain_asymmetry", "intensity_asymmetry", "tumor_volume")
+REG_SENSITIVE_PREFIXES = ("vol_",)
+
+
+def registration_sensitive(task_id: str) -> bool:
+    return task_id in REG_SENSITIVE or task_id.startswith(REG_SENSITIVE_PREFIXES)
 
 
 def _mask_asym(path: str) -> float:
@@ -344,7 +395,7 @@ def registration_qc(volumes: pd.DataFrame, workers: int = 8, path: Path | None =
     """Per-volume registration check for pretraining-pool volumes, cached (``regqc.parquet``; only new volumes are
     read). ``ok`` is False when the brain mask is left-right asymmetric about the grid midline (> REG_ASYM_MAX),
     overlaps the template brain poorly (< REG_DICE_MIN), or a SynthSeg segmentation of the scan failed its QC.
-    Volumes failing it are left out of training for every task."""
+    Volumes failing it lose their registration-sensitive training rows (``registration_sensitive``) only."""
     path = path or OUT_DIR / "regqc.parquet"
     pool = volumes[volumes["pretrain"].astype(bool) & ~volumes["held_out"].astype(bool)]
     old = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=["volume_id", "mask_asym"])
@@ -359,14 +410,20 @@ def registration_qc(volumes: pd.DataFrame, workers: int = 8, path: Path | None =
     q = pool[["volume_id", "dataset_family", "brain_dice_tpl"]].merge(old, on="volume_id", how="left")
     ss = synthseg_volumes()
     q["synthseg_ok"] = q["volume_id"].map(ss["qc_ok"]) if "qc_ok" in ss else np.nan
-    q["ok"] = ~((q["mask_asym"] > REG_ASYM_MAX) | (q["brain_dice_tpl"] < REG_DICE_MIN)
-                | (q["synthseg_ok"].astype("boolean") == False))   # noqa: E712  NaN (not segmented) passes
+    # a missing value (no brain mask / not segmented) never fails a check on its own: plain booleans, no NA
+    asym_bad = q["mask_asym"].gt(REG_ASYM_MAX).to_numpy(bool)
+    dice_bad = q["brain_dice_tpl"].lt(REG_DICE_MIN).to_numpy(bool)
+    seg_bad = q["synthseg_ok"].map(lambda x: x is False or x is np.False_).to_numpy(bool)
+    q["ok"] = ~(asym_bad | dice_bad | seg_bad)
     return q
 
 
 # ------------------------------------------------------------------------------------------------ build
 def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFrame | None = None) -> pd.DataFrame:
-    pool = volumes[volumes["pretrain"].astype(bool) & ~volumes["held_out"].astype(bool)]
+    # training sources read the pretraining pool, plus BHSD: its RSNA studies were kept out of SSL only, and its
+    # hemorrhage masks train the multitask model (split == train rows, like every other source)
+    bhsd = volumes["bhsd"].astype(bool) if "bhsd" in volumes else False
+    pool = volumes[(volumes["pretrain"].astype(bool) | bhsd) & ~volumes["held_out"].astype(bool)]
     split = dict(zip(volumes["volume_id"].astype(str), volumes["split"].astype(str)))
     frames = []
     for t in reg.tasks:
@@ -385,10 +442,12 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
                   f"splits={f['split'].value_counts().to_dict()}", flush=True)
     out = pd.concat(frames, ignore_index=True)
     out = out.drop_duplicates(["volume_id", "task"], keep="first")
-    if qc is not None:                     # registration QC: failed volumes train nothing (evaluation rows stay)
+    if qc is not None:                     # registration QC: failing volumes lose their alignment-dependent targets
         bad = set(qc.loc[~qc["ok"], "volume_id"])
-        drop = (out["use"] == "train") & out["volume_id"].isin(bad)
-        print(f"[labels] registration QC: {len(bad)} volumes fail; {int(drop.sum())} training rows dropped", flush=True)
+        sensitive = out["task"].map(registration_sensitive).astype(bool)
+        drop = (out["use"] == "train") & out["volume_id"].isin(bad) & sensitive
+        print(f"[labels] registration QC: {len(bad)} volumes fail; {int(drop.sum())} training rows of "
+              f"registration-sensitive tasks dropped (their other labels kept)", flush=True)
         out = out[~drop]
     return out[COLS + ["use"]].reset_index(drop=True)
 

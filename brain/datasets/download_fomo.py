@@ -3,6 +3,7 @@
     python -m brain.datasets.download_fomo              # mapping + holdouts + pull + extract
     python -m brain.datasets.download_fomo --mapping    # tables and hold-out lists only
     python -m brain.datasets.download_fomo --extract    # unzip structural NIfTIs already on disk
+    python -m brain.datasets.download_fomo --folders small   # only brain.prep.fomo.SMALL_FOLDERS (or a comma list)
 
 Scratch is a 1 TB quota. Each session zip is extracted to ``extracted/`` (structural
 NIfTIs only) and then deleted. Pass ``--keep-zips`` to leave archives on disk.
@@ -22,6 +23,7 @@ from brain.prep.fomo import (
     FOMO_ROOT,
     PULL_FOLDERS,
     SKIP_FOLDERS,
+    SMALL_FOLDERS,
     extracted_path,
     is_structural,
     load_mappings,
@@ -194,7 +196,7 @@ def extract_structural(root: Path = FOMO_ROOT, folders: tuple[str, ...] = PULL_F
 
 
 def fetch(root: Path = FOMO_ROOT, workers: int = 2, mapping_only: bool = False,
-          extract_only: bool = False, keep_zips: bool = False) -> Path:
+          extract_only: bool = False, keep_zips: bool = False, folders: tuple[str, ...] = PULL_FOLDERS) -> Path:
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
     if not extract_only:
         fetch_tables(root)
@@ -202,10 +204,10 @@ def fetch(root: Path = FOMO_ROOT, workers: int = 2, mapping_only: bool = False,
         if mapping_only:
             return root
     extract_workers = max(2, min(workers, 8))
-    extract_structural(root, PULL_FOLDERS, workers=extract_workers, delete_zips=not keep_zips)
+    extract_structural(root, folders, workers=extract_workers, delete_zips=not keep_zips)
     if not extract_only:
-        fetch_folders(PULL_FOLDERS, root, workers=workers, keep_zips=keep_zips)
-        extract_structural(root, PULL_FOLDERS, workers=extract_workers, delete_zips=not keep_zips)
+        fetch_folders(folders, root, workers=workers, keep_zips=keep_zips)
+        extract_structural(root, folders, workers=extract_workers, delete_zips=not keep_zips)
     return root
 
 
@@ -216,8 +218,11 @@ def main() -> None:
     ap.add_argument("--mapping", action="store_true", help="tables + hold-out lists only")
     ap.add_argument("--extract", action="store_true", help="extract zips already on disk")
     ap.add_argument("--keep-zips", action="store_true", help="leave session archives after extracting NIfTIs")
+    ap.add_argument("--folders", default="", help="'small' (SMALL_FOLDERS) or a comma list; default PULL_FOLDERS")
     a = ap.parse_args()
-    fetch(a.out, workers=a.workers, mapping_only=a.mapping, extract_only=a.extract, keep_zips=a.keep_zips)
+    folders = (SMALL_FOLDERS if a.folders == "small" else tuple(a.folders.split(","))) if a.folders else PULL_FOLDERS
+    fetch(a.out, workers=a.workers, mapping_only=a.mapping, extract_only=a.extract, keep_zips=a.keep_zips,
+          folders=folders)
     print("[fomo] done", flush=True)
 
 

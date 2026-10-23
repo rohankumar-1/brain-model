@@ -58,11 +58,32 @@ TASK_DATASETS = {
     "ms3seg": {"ms3seg_flair"},
     "valdo_cmb": {"valdo_t2s"},
     "valdo_lacunes": {"valdo_t1"},
+    "isles24_mrs": {"isles24_ncct"},
+    "isles24_mrs_discharge": {"isles24_ncct"},
+    "isles24_nihss": {"isles24_ncct"},
+    "isles24_nihss_discharge": {"isles24_ncct"},
+    "isles24_lvo_side": {"isles24_cta", "isles24_ncct"},
+    "isles24_cow": {"isles24_cta", "isles24_ncct"},
+    "cq500_bleed_side": {"cq500", "seg_cq500"},
+    "cq500_chronic_bleed": {"cq500", "seg_cq500"},
+    "cq500_edh": {"cq500", "seg_cq500"},
+    "cq500_other_fracture": {"cq500", "seg_cq500"},
+    "aisd_remote_infarct": {"aisd"},
+    "oasis1_mmse": {"oasis1"},
+    "oasis2_mmse": {"oasis2"},
+    "abide_ados": {"abide1"},
+    "atlas_lesion_volume": {"atlas"},
+    "atlas_lesion_side": {"atlas"},
+    "atlas_days_post_stroke": {"atlas"},
+    "ms3seg_lesion_load": {"ms3seg_flair"},
+    "gli_survival_12m": {"brats2023_gli_t1c"},
+    "gli_lgg": {"brats2023_gli_t1c"},
+    "gli_idh": {"brats2023_gli_t1c"},
 }
 
 TASK_TYPES = {
     **{n: "multilabel" for n in ("cq500", "rsna_ich")},
-    **{n: "binary" for n in ("oasis1_cdr", "oasis2_cdr", "oasis2_conversion", "abide_asd", "msd")},
+    **{n: "binary" for n in CLASSIFICATION_TASKS if n not in ("cq500", "rsna_ich")},
     **{n: "regression" for n in REGRESSION_TASKS},
     **{n: "segmentation" for n in SEGMENTATION_TASKS},
 }
@@ -123,6 +144,9 @@ def _volumes() -> pd.DataFrame:
         _row("id1000", "id1000:sub-01", case_id="sub-01"),
         _row("msd_braintumor", "msd:1"),
         _row("valdo_t1", "valdo_t1:t1_sub-201", case_id="t1_sub-201"),
+        _row("isles24_ncct", "isles24_ncct:sub-1", modality="ct", mask_cow="/tmp/c.cow.zip", mask_lvo="/tmp/c.lvo.zip"),
+        _row("isles24_cta", "isles24_cta:sub-1", modality="ct"),
+        _row("brats2023_gli_t1c", "mri:BraTS-GLI-00100-000-t1c", case_id="BraTS-GLI-00100-000-t1c"),
     ]
     for name, (col, path) in SEG_MASK.items():
         ds = next(iter(TASK_DATASETS[name]))
@@ -170,6 +194,37 @@ def _write_clinical(root: Path) -> Path:
     (root / "valdo").mkdir()
     pd.DataFrame({"task": ["t1"], "participant_id": ["sub-201"], "epvs_count": [12.0]}).to_csv(
         root / "valdo" / "labels.tsv", sep="\t", index=False)
+    reads = pd.read_csv(root / "cq500_meta" / "reads.csv")
+    for lab, val in (("BleedLocation-Left", 1), ("BleedLocation-Right", 0), ("ChronicBleed", 1), ("EDH", 0),
+                     ("OtherFracture", 1)):
+        for r in ("R1", "R2", "R3"):
+            reads[f"{r}:{lab}"] = val
+    reads.to_csv(root / "cq500_meta" / "reads.csv", index=False)
+    for f, col in ((o1 / "oasis_cross-sectional.csv", "MMSE"), (o2 / "oasis_longitudinal.csv", "MMSE")):
+        pd.read_csv(f).assign(**{col: 28.0}).to_csv(f, index=False)
+    pd.read_csv(a1 / "Phenotypic_V1_0b.csv").assign(ADOS_GOTHAM_SEVERITY=7).to_csv(a1 / "Phenotypic_V1_0b.csv",
+                                                                                  index=False)
+    pd.read_csv(root / "ms3seg" / "participants.tsv", sep="\t").assign(lesion_ml=5.0).to_csv(
+        root / "ms3seg" / "participants.tsv", sep="\t", index=False)
+    (root / "isles24").mkdir()
+    pd.DataFrame({"participant_id": ["sub-1"], "Center": [1], "mRS 3 months": [4], "NIHSS at admission": [12],
+                  "mRS discharge": [3], "NIHSS discharge": [6]}).to_csv(root / "isles24" / "clinical.tsv", sep="\t",
+                                                                       index=False)
+    pd.DataFrame({"volume_id": ["isles24_ncct:sub-1"], "case_id": ["sub-1"], "lvo_ml": [0.01], "left_ml": [0.01],
+                  "right_ml": [0.0], "lvo_vessel": [7]}).to_csv(root / "isles24" / "mask_stats.tsv", sep="\t",
+                                                                index=False)
+    (root / "atlas").mkdir()
+    pd.DataFrame({"volume_id": ["atlas:v0"], "case_id": ["v0"], "lesion_ml": [10.0], "left_ml": [0.0],
+                  "right_ml": [10.0]}).to_csv(root / "atlas" / "mask_stats.tsv", sep="\t", index=False)
+    pd.DataFrame({"participant_id": ["v0"], "DAYS_POST_STROKE": [400.0], "SITE": ["R001"]}).to_csv(
+        root / "atlas" / "metadata.tsv", sep="\t", index=False)
+    (root / "aisd").mkdir()
+    pd.DataFrame({"volume_id": ["aisd:v0"], "case_id": ["v0"], **{f"code{c}_ml": [1.0] for c in range(1, 6)}}).to_csv(
+        root / "aisd" / "mask_stats.tsv", sep="\t", index=False)
+    (root / "tcga_glioma").mkdir()
+    pd.DataFrame({"brats_id": ["BraTS-GLI-00100-000"], "tcga_id": ["TCGA-02-0085"], "cancer_type": ["GBM"],
+                  "os_months": [20.0], "deceased": [1], "idh_mutant": [0.0], "codeleted": [0.0]}).to_csv(
+        root / "tcga_glioma" / "clinical.tsv", sep="\t", index=False)
     msd = root / "msd_volume_labels.csv"
     pd.DataFrame({"volume_id": ["msd:1"], "enhancing_high": [1]}).to_csv(msd, index=False)
     return msd

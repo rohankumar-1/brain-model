@@ -169,6 +169,13 @@ class MultitaskModel(nn.Module):
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
         n_bins = max([len(t.survival_bins) for t in reg.tasks] + [1])
         self.survival = mlp(width, width, n_bins)
+        # general embedding: one task-agnostic query over the same tokens, trained with LeJEPA (loss.general); its
+        # slot is computed on its own so it never depends on which tasks a row asks
+        gen = cfg.get("general") or {}
+        self.has_general = bool(gen.get("enabled", False))
+        if self.has_general:
+            self.general_q = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+            self.general_proj = mlp(width, width, int(gen.get("proj_dim", 128)))
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
         self.seg = SegDecoder(d_enc * (len(self.taps) + 1), width, patch_zyx,
@@ -194,18 +201,35 @@ class MultitaskModel(nn.Module):
         base = self.task_proj(self.text_emb[t]) if self.embedding == "text" else self.task_emb(t)
         return base + self.type_emb(self.task_type[t])
 
+    def _kv(self, enc: dict, keep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if "_kv" not in enc:
+            c = enc["coords"]
+            cn = (c - c.mean(0)) / c.std(0).clamp_min(1e-6)
+            kv = self.kv(self.kv_norm(enc["tokens"])) + self.pos(cn).unsqueeze(0)
+            pad = ~keep
+            if enc.get("cls") is not None:
+                kv = torch.cat([self.kv(self.kv_norm(enc["cls"])).unsqueeze(1) + self.cls_pos, kv], 1)
+                pad = torch.cat([torch.zeros_like(pad[:, :1]), pad], 1)
+            enc["_kv"] = (kv, pad)
+        return enc["_kv"]
+
+    def general(self, enc: dict, keep: torch.Tensor) -> torch.Tensor:
+        """(B, width) task-agnostic embedding: the general query alone through the slot layers."""
+        if self.mode == "shared":
+            raise ValueError("the general embedding needs slot.mode=slots")
+        kv, pad = self._kv(enc, keep)
+        q = self.general_q.expand(kv.shape[0], -1, -1)
+        none = torch.zeros(kv.shape[0], 1, dtype=torch.bool, device=kv.device)
+        for layer in self.layers:
+            q = layer(q, none, kv, pad)
+        return self.bottleneck(self.out_norm(q))[:, 0]
+
     def slots(self, enc: dict, task: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
         q = self.task_queries(task)                                         # (B, K, dim)
         if self.mode == "shared":
             pooled = enc["pooled"].unsqueeze(1).expand(-1, q.shape[1], -1)
             return self.bottleneck(self.out_norm(self.shared(torch.cat([pooled, q], -1))))
-        c = enc["coords"]
-        cn = (c - c.mean(0)) / c.std(0).clamp_min(1e-6)
-        kv = self.kv(self.kv_norm(enc["tokens"])) + self.pos(cn).unsqueeze(0)
-        pad = ~keep
-        if enc.get("cls") is not None:
-            kv = torch.cat([self.kv(self.kv_norm(enc["cls"])).unsqueeze(1) + self.cls_pos, kv], 1)
-            pad = torch.cat([torch.zeros_like(pad[:, :1]), pad], 1)
+        kv, pad = self._kv(enc, keep)
         slot_pad = task < 0
         slot_pad = slot_pad & ~(slot_pad.all(1, keepdim=True) & (torch.arange(task.shape[1], device=task.device) == 0))
         for layer in self.layers:
@@ -225,6 +249,8 @@ class MultitaskModel(nn.Module):
             enc = self.encode(x, keep)
         z = self.slots(enc, task, keep)
         out = self.heads(z, task)
+        if self.has_general:
+            out["general"] = self.general_proj(self.general(enc, keep))
         out["seg"] = None
         if len(seg_pair):
             b = x.shape[0]

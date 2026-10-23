@@ -7,10 +7,15 @@
 * ``valdo`` (Zenodo 4687995): the three task tarballs -> ``valdo/extracted/Task{1,2,3}/sub-*/`` (macOS ``._``
   resource files skipped). Rater masks of a subject (or its single annotation) are merged by union into ``*_desc-union_<Label>.nii.gz``;
   ``labels.tsv`` holds per-subject EPVS counts (Task 1) and lesion counts.
+* ``isles24`` (already prepped from its pool zip): only the clinical table. ``clinical.tsv`` joins each subject's
+  ``demographic_baseline.xlsx`` (ses-01) and ``outcome.xlsx`` (ses-02): admission NIHSS / mRS, risk factors, timings,
+  post-interventional TICI, 24 h / discharge NIHSS and mRS, and the 3-month mRS.
+* ``atlas`` (already prepped): only ``metadata.tsv``, the per-session metadata CSVs (days post stroke, site).
 
 Label tables are also written to ``--labels`` (``<store>/labels/sources/<dataset>/``) for the downstream tasks.
 
     python -m brain.prep.stage_new --datasets ms3seg,valdo --dest $TMPDIR/datasets --labels $STORE/labels/sources
+    python -m brain.prep.stage_new --datasets isles24,atlas --dest $TMPDIR/datasets --labels $STORE/labels/sources
 """
 
 from __future__ import annotations
@@ -101,7 +106,34 @@ def stage_valdo(pool: Path, dest: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-STAGERS = {"ms3seg": (stage_ms3seg, "participants.tsv"), "valdo": (stage_valdo, "labels.tsv")}
+def stage_isles24(pool: Path, dest: Path) -> pd.DataFrame:
+    import io
+    import zipfile
+
+    z = zipfile.ZipFile(pool / "isles24.raw.zip")
+    tables = {}
+    for name in z.namelist():
+        m = re.search(r"phenotype/(sub-stroke\d+)/ses-0\d/[^/]+_(demographic_baseline|outcome)\.xlsx$", name)
+        if m:
+            row = pd.read_excel(io.BytesIO(z.read(name))).iloc[0].to_dict()
+            tables.setdefault(m.group(1), {}).update(row)
+    return pd.DataFrame([{"participant_id": sid, **row} for sid, row in sorted(tables.items())])
+
+
+def stage_atlas(pool: Path, dest: Path) -> pd.DataFrame:
+    import io
+    import zipfile
+
+    z = zipfile.ZipFile(pool / "atlas.raw.zip")
+    rows = [pd.read_csv(io.BytesIO(z.read(n))) for n in z.namelist() if n.endswith("_metadata.csv")]
+    meta = pd.concat(rows, ignore_index=True)
+    meta.insert(0, "participant_id", meta["SESSION_ID"].astype(str).str.split("_").str[0])
+    meta["DAYS_POST_STROKE"] = pd.to_numeric(meta["DAYS_POST_STROKE"], errors="coerce")
+    return meta
+
+
+STAGERS = {"ms3seg": (stage_ms3seg, "participants.tsv"), "valdo": (stage_valdo, "labels.tsv"),
+           "isles24": (stage_isles24, "clinical.tsv"), "atlas": (stage_atlas, "metadata.tsv")}
 
 
 def main() -> None:

@@ -7,6 +7,7 @@ then every trained task is asked on its own (one slot per query, as in training,
     slots    the trained tasks' slot vectors, concatenated (n_trained x slot width)
     taskout  the model's prediction for each trained task: binary logit, standardised regression value, multiclass
              class probabilities (segmentation tasks have no scalar output and contribute only through ``slots``)
+    general  the task-agnostic general-embedding slot (before its LeJEPA projector), when the model has one
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def attach(enc, ckpt: dict, device: torch.device) -> None:
     n_cls = [len(reg[t].classes) for t in trained]
 
     @torch.no_grad()
-    def slot_features(vol_xyz: torch.Tensor, modality: str) -> tuple[np.ndarray, np.ndarray]:
+    def slot_features(vol_xyz: torch.Tensor, modality: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         raw = vol_xyz.float().permute(2, 1, 0)[None, None]           # (1, 1, Z, Y, X) as in training
         mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=raw.device)
         x, keep = gate_and_window(raw, mod, patch, gate)
@@ -58,6 +59,7 @@ def attach(enc, ckpt: dict, device: torch.device) -> None:
                    "pooled": e["pooled"].expand(t, -1)}
             z = model.slots(rep, task, keep.expand(t, -1))                # (T, 1, W)
             out = model.heads(z, task)
+            gen = model.general(e, keep)[0].float().cpu().numpy() if model.has_general else np.zeros(0, np.float32)
         outs = []
         for i, kind in enumerate(kinds):
             if kind == "binary":
@@ -67,7 +69,7 @@ def attach(enc, ckpt: dict, device: torch.device) -> None:
             elif kind == "multiclass":
                 outs.append(out["multiclass"][i, 0, :n_cls[i]].float().softmax(-1))
         return (z[:, 0].float().reshape(-1).cpu().numpy(),
-                torch.cat(outs).cpu().numpy() if outs else np.zeros(0, np.float32))
+                torch.cat(outs).cpu().numpy() if outs else np.zeros(0, np.float32), gen)
 
     enc.slot_features = slot_features
     enc.slot_tasks = [reg[t].id for t in trained]

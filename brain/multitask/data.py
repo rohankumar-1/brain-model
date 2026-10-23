@@ -25,7 +25,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from brain.common.windowing import asinh_window, canonical_c_w
+from brain.common.windowing import asinh_window, canonical_c_w, floors
+from brain.data.augment import appearance
 from brain.data.gate import token_keep
 from brain.data.volumes import FamilySampler, _worker_threads
 from brain.multitask.labels import live_targets
@@ -75,7 +76,13 @@ class MultitaskDataset(Dataset):
             self.items.append((str(vid), list(zip(g["t"].astype(int), g["y"].astype(float),
                                                   g["ref"].fillna("").astype(str)))))
         meta = volumes.set_index("volume_id").loc[[v for v, _ in self.items]]
-        self.df = meta.reset_index()[["volume_id", "image_path", "modality", "dataset_family"]]
+        meta = meta.reset_index()
+        for col, fill in (("thick_mm", 1.0), ("thick_axis", -1)):
+            if col not in meta:
+                meta[col] = fill
+        self.df = meta[["volume_id", "image_path", "modality", "dataset_family", "thick_mm", "thick_axis"]]
+        self.thick = list(zip(self.df["thick_mm"].fillna(1.0).astype(float),
+                              self.df["thick_axis"].fillna(-1).astype(int)))
         self.paths = self.df["image_path"].astype(str).tolist()
         self.mods = self.df["modality"].astype(str).str.lower().tolist()
 
@@ -84,15 +91,14 @@ class MultitaskDataset(Dataset):
 
     def _draw(self, avail: list[tuple[int, float, str]], rng: np.random.Generator) -> list[tuple[int, float, str]]:
         if not self.train:
-            seg = 0
-            out = []
-            for a in sorted(avail):
-                if self.reg[a[0]].type == "segmentation":
-                    if seg >= self.max_seg:
-                        continue
-                    seg += 1
-                out.append(a)
-            return out[: self.k_max]
+            # every non-segmentation task, plus ``max_seg`` segmentation tasks taken from a per-volume rotation of the
+            # volume's list (``rng`` is seeded by the item index), so a validation set covers all of them
+            avail = sorted(avail)
+            seg = [a for a in avail if self.reg[a[0]].type == "segmentation"]
+            if len(seg) > self.max_seg:
+                start = int(rng.integers(len(seg)))
+                seg = (seg[start:] + seg[:start])[: self.max_seg]
+            return ([a for a in avail if self.reg[a[0]].type != "segmentation"] + seg)[: self.k_max]
         cap = min(len(avail), self.k_max)
         k = cap if rng.random() < self.p_all else int(rng.integers(1, cap + 1))
         left: dict[str, list] = {}
@@ -162,6 +168,7 @@ class MultitaskDataset(Dataset):
             "seg_slot": torch.tensor(seg_slot, dtype=torch.long),
             "seg": torch.stack(seg_masks) if seg_masks else torch.zeros(0, *img.shape, dtype=torch.uint8),
             "volume_id": vid,
+            "thick": torch.tensor(self.thick[idx], dtype=torch.float32),     # (mm, grid axis or -1)
         }
 
 
@@ -189,6 +196,7 @@ def collate(batch: list[dict]) -> dict:
         "seg": torch.stack(segs) if segs else torch.zeros(0, *shape, dtype=torch.uint8),
         "seg_pair": torch.tensor(pairs, dtype=torch.long).reshape(-1, 2),
         "volume_id": [b["volume_id"] for b in batch],
+        "thick": torch.stack([b.get("thick", torch.tensor([1.0, -1.0])) for b in batch]),
     }
 
 
@@ -233,21 +241,50 @@ def augment_theta(b: int, shape_zyx, aug: dict, device) -> torch.Tensor | None:
     return torch.cat([a, (shift * on / half).unsqueeze(-1)], dim=-1)
 
 
-def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None):
-    """Native-unit volumes ``raw`` (B, 1, Z, Y, X) -> the encoder input, windowed with each row's canonical window
-    (CT or MRI, as frozen evaluation), and the foreground token mask (B, N) gated on the raw values."""
+def foreground_tokens(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None) -> torch.Tensor:
+    """Foreground token mask (B, N) of native-unit volumes ``raw`` (B, 1, Z, Y, X)."""
     gate = gate or {}
-    keep = token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
+    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
                       mri_lo=float(gate.get("mri_lo", -5.5))).reshape(raw.shape[0], -1)   # gate works on (B,1,X,Y,Z)
+
+
+def canonical_window(raw: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
+    """Each row in its modality's canonical window (CT brain / MRI tissue), as frozen evaluation encodes."""
     cw = torch.tensor([canonical_c_w("ct"), canonical_c_w("mri")], device=raw.device, dtype=torch.float32)[mod]
-    x = asinh_window(raw, cw[:, 0].view(-1, 1, 1, 1, 1), cw[:, 1].view(-1, 1, 1, 1, 1))
-    return x, keep
+    return asinh_window(raw, cw[:, 0].view(-1, 1, 1, 1, 1), cw[:, 1].view(-1, 1, 1, 1, 1))
 
 
-def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool) -> dict:
+def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None):
+    """Native-unit volumes ``raw`` (B, 1, Z, Y, X) -> the canonically windowed encoder input and the foreground
+    token mask (B, N) gated on the raw values."""
+    return canonical_window(raw, mod), foreground_tokens(raw, mod, patch_xyz, gate)
+
+
+def fov_cut(raw: torch.Tensor, seg: torch.Tensor, rows: torch.Tensor, mod: torch.Tensor, allowed: torch.Tensor,
+            cfg: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Blank a random inferior slab (``mm`` range, 1 mm slices) of each allowed row with probability ``p``: the image
+    goes to its background floor and its masks to 0, as in a scan whose coverage stops above the skull base
+    (RSNA, M4Raw), so truncation stops being a cohort cue."""
+    b, z = raw.shape[0], raw.shape[2]
+    on = (torch.rand(b, device=raw.device) < float(cfg.get("p", 0.0))) & allowed
+    if not on.any():
+        return raw, seg
+    lo, hi = cfg.get("mm", (10, 40))
+    cut = torch.randint(int(lo), int(hi) + 1, (b,), device=raw.device) * on
+    below = torch.arange(z, device=raw.device).view(1, 1, z, 1, 1) < cut.view(-1, 1, 1, 1, 1)
+    raw = torch.where(below, floors(mod).view(-1, 1, 1, 1, 1).to(raw.device), raw)
+    if len(seg):
+        seg = torch.where(below[rows], torch.zeros((), device=seg.device), seg)
+    return raw, seg
+
+
+def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None) -> dict:
     """Raw batch -> encoder input (B, 1, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
-    flipped / rotated with their image. Rows whose modality is CT window with the CT canonical window, MRI with the
-    MRI one (as frozen evaluation does)."""
+    moved with their image. Training: flip, rotation / shift, a field-of-view cut on rows asking no task in
+    ``fov_unsafe`` (n_tasks bool: targets that need the whole brain in view), then appearance augmentation
+    (``aug.appearance``: bias / through-plane blur / noise / blur / drift, ``brain.data.augment``) with the window
+    pinned to each modality's canonical one (frozen evaluation's; CT density targets live in it). The foreground
+    gate is taken before appearance augmentation, so noise cannot flip background tokens."""
     aug = (cfg.get("aug") or {}) if train else {}
     raw = batch["image"].to(device, non_blocking=True).float().unsqueeze(1)
     mod = batch["modality"].to(device)
@@ -267,9 +304,49 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool) -> dict:
         if len(seg):
             seg = F.grid_sample(seg, grid[rows], mode="bilinear", padding_mode="zeros", align_corners=False)
         del grid
-    x, keep = gate_and_window(raw, mod, patch_xyz, (cfg.get("model") or {}).get("gate"))
-    return {"x": x, "keep": keep, "modality": mod, "task": batch["task"].to(device), "y": batch["y"].to(device),
+    task = batch["task"].to(device)
+    if train and (aug.get("fov_cut") or {}).get("p", 0.0):
+        unsafe = fov_unsafe.to(device)[task.clamp_min(0)] & (task >= 0) if fov_unsafe is not None \
+            else torch.ones_like(task, dtype=torch.bool)
+        raw, seg = fov_cut(raw, seg, rows, mod, ~unsafe.any(1), aug["fov_cut"])
+    keep = foreground_tokens(raw, mod, patch_xyz, (cfg.get("model") or {}).get("gate"))
+    app = aug.get("appearance")
+    if train and app:
+        thick = batch["thick"].to(device) if "thick" in batch else None
+        x = appearance(raw, mod, {**app, "window": {"mode": "fixed"}},
+                       thick=(thick[:, 0], thick[:, 1].long()) if thick is not None else None)
+    else:
+        x = canonical_window(raw, mod)
+    return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device)}
+
+
+def ssl_view(batch: dict, rows: torch.Tensor, cfg: dict, device, patch_xyz) -> tuple[torch.Tensor, torch.Tensor]:
+    """A second global view of batch ``rows`` for the general-embedding LeJEPA loss (``loss.general``): a small
+    rotation / shift and a random box crop (each axis keeps U(``crop_min``, 1) of its extent; the rest becomes
+    background), canonically windowed with no appearance augmentation. Returns (x, keep)."""
+    g = (cfg.get("loss") or {}).get("general") or {}
+    raw = batch["image"][rows.cpu()].to(device, non_blocking=True).float().unsqueeze(1)
+    mod = batch["modality"][rows.cpu()].to(device)
+    n, shape = raw.shape[0], raw.shape[2:]
+    bg = raw.amin(dim=(1, 2, 3, 4), keepdim=True)
+    theta = augment_theta(n, shape, {"p": 1.0, "rot_deg": g.get("rot_deg", [8, 8, 12]),
+                                     "shift_mm": float(g.get("shift_mm", 8.0))}, device)
+    grid = F.affine_grid(theta, list(raw.shape), align_corners=False)
+    raw = F.grid_sample(raw - bg, grid, mode="bilinear", padding_mode="zeros", align_corners=False) + bg
+    lo = float(g.get("crop_min", 0.7))
+    inside = torch.ones_like(raw, dtype=torch.bool)
+    for ax, size in enumerate(shape):
+        keep_len = (torch.empty(n, device=device).uniform_(lo, 1.0) * size).long().clamp_min(1)
+        start = (torch.rand(n, device=device) * (size - keep_len + 1)).long()
+        idx = torch.arange(size, device=device).view(1, -1)
+        m = (idx >= start.view(-1, 1)) & (idx < (start + keep_len).view(-1, 1))           # (n, size)
+        view = [n, 1, 1, 1, 1]
+        view[2 + ax] = size
+        inside &= m.view(view)
+    raw = torch.where(inside, raw, bg)
+    keep = foreground_tokens(raw, mod, patch_xyz, (cfg.get("model") or {}).get("gate"))
+    return canonical_window(raw, mod), keep
 
 
 def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:
@@ -322,4 +399,4 @@ class SyntheticMultitask(Dataset):
         return {"image": img.half(), "modality": 1, "task": torch.tensor(tasks, dtype=torch.long),
                 "y": torch.tensor(ys, dtype=torch.float32), "seg_slot": torch.tensor(slots, dtype=torch.long),
                 "seg": torch.stack(segs) if segs else torch.zeros(0, *self.shape, dtype=torch.uint8),
-                "volume_id": f"synthetic:{idx}"}
+                "volume_id": f"synthetic:{idx}", "thick": torch.tensor([1.0, -1.0])}

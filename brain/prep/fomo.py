@@ -29,6 +29,11 @@ PULL_FOLDERS = (
     "PT002_Nigerian_Clinical",
     "PT010_BrainLat",
     "PT024_M4Raw",
+    *(SMALL_FOLDERS := (        # added 2026-10-23 for variety: infants, elderly, 7T / quantitative, other countries
+        "PT023_Infant_Development_Brain", "PT031_SLIM", "PT033_WAND", "PT034_Wayne", "PT036_Yale_HighRes",
+        "PT008_AdolescentBrainDevelopment", "PT012_CHBMP", "PT017_HBN-SSI", "PT022_Bejing_Enhanced", "PT004_ACPI",
+        "PT025_age_ility", "PT006_AHEAD", "PT026_MICA_MICs", "PT003_CUNMET", "PT032_Tao_Wu", "PT001_ClevelandCCF",
+    )),
 )
 # Already in our store, or too leaky/large to ingest as a blob (OpenNeuro).
 SKIP_FOLDERS = (

@@ -216,3 +216,34 @@ def test_trainer_runs_on_phantoms(tmp_path):
 
     engine.run(["multitask", "--synthetic", "--max-steps", "3", "--log-every", "1", "--out-dir", str(tmp_path),
                 "--set", "optim.freeze_steps=1"])
+
+
+def test_registration_qc_only_drops_alignment_dependent_targets():
+    from brain.multitask.labels import registration_sensitive
+
+    assert all(registration_sensitive(t) for t in ("brain_volume", "brain_asymmetry", "vol_hippocampus",
+                                                    "vol_cortex_asym", "tumor_volume"))
+    assert not any(registration_sensitive(t) for t in ("hemorrhage_any", "age", "brain_mask", "seg_hippocampus",
+                                                        "whole_tumor", "ct_csf_fraction"))
+
+
+def test_fov_cut_blanks_image_and_masks_only_on_allowed_rows():
+    from brain.multitask.data import fov_cut
+
+    raw = torch.zeros(2, 1, 20, 8, 8)
+    seg = torch.ones(2, 1, 20, 8, 8)
+    mod = torch.tensor([0, 1])
+    out, s = fov_cut(raw, seg, torch.tensor([0, 1]), mod, torch.tensor([True, False]), {"p": 1.0, "mm": [5, 5]})
+    assert (out[0, :, :5] == -1024).all() and (out[0, :, 5:] == 0).all() and (s[0, :, :5] == 0).all()
+    assert torch.equal(out[1], raw[1]) and torch.equal(s[1], seg[1])            # row 1 not allowed
+
+
+def test_appearance_augmentation_keeps_the_foreground_gate():
+    app = {"bias": {"p": 1.0, "amp": 0.2}, "through_plane": {"p": 1.0, "fwhm_vox": [2.0, 6.0]},
+           "noise": {"p": 1.0, "kind": "rician", "snr": [15, 100], "sigma": [0.02, 0.1]},
+           "blur": {"p": 1.0, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 1.0, "amp": 0.1}}
+    raw = _raw()
+    plain = prepare(raw, _cfg(), CPU, (8, 8, 4), train=False)
+    aug = prepare(raw, _cfg(flip_lr=0.0, affine={"p": 0.0}, appearance=app), CPU, (8, 8, 4), train=True)
+    assert torch.equal(aug["keep"], plain["keep"]) and torch.isfinite(aug["x"]).all()
+    assert not torch.allclose(aug["x"], plain["x"])

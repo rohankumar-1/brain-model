@@ -28,6 +28,7 @@ GROUP_OF = {
     "tumor_volume": "tumor",
     "brain_volume": "derived", "brain_mask": "derived", "brain_asymmetry": "derived",
     "intensity_asymmetry": "derived", "ct_csf_fraction": "derived", "ct_brain_density": "derived",
+    "ct_calcification": "derived", "ct_skull_density": "derived",
 }
 
 

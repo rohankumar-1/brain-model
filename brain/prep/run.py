@@ -52,7 +52,7 @@ def discover(names: list[str]) -> list[sources.Case]:
              "oasis": sources.oasis, "brats": sources.brats, "rsna": sources.rsna,
              "abide": sources.abide1, "ixi": sources.ixi, "isles": sources.isles22, "atlas": sources.atlas,
              "pixar": sources.pixar, "piop1": sources.piop1, "piop2": sources.piop2, "id1000": sources.id1000,
-             "wmh": sources.wmh, "isles24": sources.isles24, "instance": sources.instance,
+             "wmh": sources.wmh, "isles24": sources.isles24, "instance": sources.instance, "bhsd": sources.bhsd, "hemseg": sources.hemseg, "rsna_ica": sources.rsna_ica,
              "ms3seg": sources.ms3seg, "valdo": sources.valdo,
              "aisd": sources.aisd, "brainmetshare": sources.brainmetshare, "fomo": sources.fomo,
              "msd": sources.msd}  # SinoCT dropped: ~36 mm slabs that cannot be placed in a whole-head template

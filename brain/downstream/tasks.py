@@ -53,6 +53,9 @@ MEN_REGIONS = {"meningioma": (1, 2, 3)}
 GLI2024_REGIONS = {"ET": (3,), "RC": (4,)}
 # A few Seg-CQ500 masks store the hemorrhage as 2 rather than 1.
 ICH_REGIONS = {"ICH": (1, 2)}
+# ISLES'24 Circle of Willis (TopCoW codes): 1 BA, 2/3 R/L PCA, 4/6 R/L ICA, 5/7 R/L MCA, 8/9 R/L Pcom, 10 Acom,
+# 11/12 R/L ACA, 13 third A2. Grouped by artery, sides merged.
+COW_REGIONS = {"ICA": (4, 6), "MCA": (5, 7), "ACA": (10, 11, 12, 13), "PCA": (2, 3, 8, 9), "BA": (1,)}
 
 CLASSIFICATION_TASKS = (
     "cq500",
@@ -62,6 +65,18 @@ CLASSIFICATION_TASKS = (
     "oasis2_conversion",
     "abide_asd",
     "msd",
+    "isles24_mrs",
+    "isles24_mrs_discharge",
+    "isles24_lvo_side",
+    "cq500_bleed_side",
+    "cq500_chronic_bleed",
+    "cq500_edh",
+    "cq500_other_fracture",
+    "aisd_remote_infarct",
+    "atlas_lesion_side",
+    "gli_survival_12m",
+    "gli_lgg",
+    "gli_idh",
 )
 REGRESSION_TASKS = (
     "oasis1_age",
@@ -72,6 +87,14 @@ REGRESSION_TASKS = (
     "id1000_age",
     "ms3seg_age",
     "valdo_epvs",
+    "isles24_nihss",
+    "isles24_nihss_discharge",
+    "oasis1_mmse",
+    "oasis2_mmse",
+    "abide_ados",
+    "atlas_lesion_volume",
+    "atlas_days_post_stroke",
+    "ms3seg_lesion_load",
 )
 SEGMENTATION_TASKS = (
     "seg_cq500",
@@ -88,7 +111,9 @@ SEGMENTATION_TASKS = (
     "ms3seg",
     "valdo_cmb",
     "valdo_lacunes",
+    "isles24_cow",
 )
+CQ500_FINDING_TASKS = {"cq500_chronic_bleed": "ChronicBleed", "cq500_edh": "EDH", "cq500_other_fracture": "OtherFracture"}
 # Frozen clf/reg suite (segmentation is ``seg3d`` / ``run_suite`` separately).
 FROZEN_TASKS = CLASSIFICATION_TASKS + REGRESSION_TASKS
 # Fast frozen-head tasks for a first smoke (both modalities, small n).
@@ -204,6 +229,8 @@ LABEL_FILES = (
     ("id1000", "participants.tsv"),
     ("msd_braintumor", "volume_labels.csv"),
     ("ms3seg", "participants.tsv"),        # written by brain.prep.stage_new
+    ("isles24", "clinical.tsv"),           # written by brain.prep.stage_new
+    ("atlas", "metadata.tsv"),             # written by brain.prep.stage_new
     ("valdo", "labels.tsv"),
     ("fomo260k", "participants.tsv"),     # demographics / diagnosis for the multitask model (brain.multitask)
 )
@@ -244,6 +271,34 @@ def cq500_majority(reads_csv: Path | None = None, threshold: float = 0.5) -> pd.
         votes = df[cols].apply(pd.to_numeric, errors="coerce")
         out[lab] = (votes.mean(axis=1) >= threshold).astype(np.int64)
     return out
+
+
+def _cq500_frame(volumes: pd.DataFrame, findings: list[str], threshold: float = 0.5) -> pd.DataFrame:
+    """CQ500 / Seg-CQ500 volumes (one per study, as ``load_cq500_task``) with 3-reader majority ``findings``."""
+    reads = pd.read_csv(label_file("cq500_meta", "reads.csv"))
+    labels = pd.DataFrame({"name": reads["name"].astype(str)})
+    for lab in findings:
+        cols = [c for c in reads.columns if c.endswith(":" + lab)]
+        labels[lab] = (reads[cols].apply(pd.to_numeric, errors="coerce").mean(axis=1) >= threshold).astype(np.int64)
+    ct = volumes[volumes["dataset"].isin(["cq500", "seg_cq500"])].copy()
+    ct["name"] = ct["volume_id"].map(_case_name)
+    ct = ct.sort_values("dataset").drop_duplicates("name", keep="first")
+    return ct.merge(labels, on="name", how="inner")
+
+
+def load_cq500_finding_task(volumes: pd.DataFrame, name: str, finding: str) -> TaskBundle:
+    """One CQ500 reader finding the main multilabel task leaves out (rare: cross-validate)."""
+    m = _cq500_frame(volumes, [finding])
+    return _bundle_from_frame(name, "binary", m, m[finding].to_numpy(np.int64), [finding], modality="ct",
+                              cohort_col="dataset")
+
+
+def load_cq500_bleed_side_task(volumes: pd.DataFrame) -> TaskBundle:
+    """Side of the bleed among unilateral hemorrhages (3-reader majority ICH, exactly one of left / right): 1 = left."""
+    m = _cq500_frame(volumes, ["ICH", "BleedLocation-Left", "BleedLocation-Right"])
+    m = m[(m["ICH"] == 1) & (m["BleedLocation-Left"] != m["BleedLocation-Right"])]
+    return _bundle_from_frame("cq500_bleed_side", "binary", m, m["BleedLocation-Left"].to_numpy(np.int64), ["left"],
+                              modality="ct", cohort_col="dataset")
 
 
 def load_cq500_task(
@@ -416,6 +471,31 @@ def load_oasis2_conversion_task(
     )
 
 
+def load_oasis_mmse_task(volumes: pd.DataFrame, which: str) -> TaskBundle:
+    """Mini-Mental State Examination (0-30) per OASIS-1 / OASIS-2 session."""
+    path, col = ((("oasis", "oasis1", "oasis_cross-sectional.csv"), "ID") if which == "oasis1"
+                 else (("oasis", "oasis2", "oasis_longitudinal.csv"), "MRI ID"))
+    merged = _oasis_sessions(volumes, which, pd.read_csv(label_file(*path)), col)
+    merged["MMSE"] = pd.to_numeric(merged["MMSE"], errors="coerce")
+    merged = merged.dropna(subset=["MMSE"])
+    return _bundle_from_frame(f"{which}_mmse", "regression", merged, merged["MMSE"].to_numpy(np.float64), ["MMSE"],
+                              modality="mri")
+
+
+def load_abide_ados_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ABIDE I autism severity: ADOS calibrated severity score (Gotham, 1-10; comparable across ADOS modules), ASD
+    participants only. Missing values are -9999 in the phenotypic file."""
+    pheno = pd.read_csv(label_file("abide1", "Phenotypic_V1_0b.csv"))
+    pheno["case_id"] = pheno["FILE_ID"].astype(str)
+    pheno["severity"] = pd.to_numeric(pheno["ADOS_GOTHAM_SEVERITY"], errors="coerce")
+    pheno = pheno[(pheno["DX_GROUP"] == 1) & pheno["severity"].between(1, 10)]
+    vol = volumes[volumes["dataset"] == "abide1"].copy()
+    merged = vol.merge(pheno[["case_id", "severity", "SITE_ID"]], on="case_id", how="inner").rename(
+        columns={"SITE_ID": "site"})
+    return _bundle_from_frame("abide_ados", "regression", merged, merged["severity"].to_numpy(np.float64),
+                              ["ADOS_severity"], modality="mri", cohort_col="site")
+
+
 def load_abide_asd_task(
     volumes: pd.DataFrame,
     phenotypic: Path | None = None,
@@ -555,6 +635,153 @@ def load_wmh_task(volumes: pd.DataFrame) -> TaskBundle:
 def load_isles24_task(volumes: pd.DataFrame) -> TaskBundle:
     return _load_seg("isles24", volumes, "isles24_ncct", LESION_REGIONS, ".lesion.zip",
                      mask_col="mask_lesion", modality="ct")
+
+
+def _isles24_clinical(volumes: pd.DataFrame, column: str) -> pd.DataFrame:
+    """ISLES'24 admission NCCT volumes joined to one clinical column (``clinical.tsv``, brain.prep.stage_new)."""
+    clin = pd.read_csv(label_file("isles24", "clinical.tsv"), sep="\t")
+    vol = volumes[volumes["dataset"] == "isles24_ncct"].copy()
+    vol["participant_id"] = vol["case_id"].astype(str)
+    merged = vol.merge(clin[["participant_id", column, "Center"]], on="participant_id", how="inner")
+    merged[column] = pd.to_numeric(merged[column], errors="coerce")
+    return merged.dropna(subset=[column]).rename(columns={"Center": "center"})
+
+
+def load_isles24_mrs_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ISLES'24 3-month functional outcome from the admission NCCT: poor outcome = mRS 3-6 (the usual dichotomy;
+    every patient had thrombectomy, so treatment success also drives it)."""
+    m = _isles24_clinical(volumes, "mRS 3 months")
+    return _bundle_from_frame("isles24_mrs", "binary", m, (m["mRS 3 months"] >= 3).astype(np.int64).to_numpy(),
+                              ["poor_outcome"], modality="ct", cohort_col="center")
+
+
+def load_isles24_mrs_discharge_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ISLES'24 poor outcome at discharge (mRS 3-6) from the admission NCCT."""
+    m = _isles24_clinical(volumes, "mRS discharge")
+    return _bundle_from_frame("isles24_mrs_discharge", "binary", m,
+                              (m["mRS discharge"] >= 3).astype(np.int64).to_numpy(), ["poor_outcome"],
+                              modality="ct", cohort_col="center")
+
+
+def load_isles24_nihss_discharge_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ISLES'24 stroke severity at discharge (NIHSS) from the admission NCCT."""
+    m = _isles24_clinical(volumes, "NIHSS discharge")
+    return _bundle_from_frame("isles24_nihss_discharge", "regression", m, m["NIHSS discharge"].to_numpy(np.float64),
+                              ["NIHSS"], modality="ct", cohort_col="center")
+
+
+def _isles24_cta(volumes: pd.DataFrame) -> pd.DataFrame:
+    """ISLES'24 CTA volumes (registered onto the NCCT grid) with the NCCT case's vessel masks."""
+    cta = volumes[volumes["dataset"] == "isles24_cta"].copy()
+    ncct = volumes[volumes["dataset"] == "isles24_ncct"][["case_id", "mask_cow", "mask_lvo"]]
+    return cta.drop(columns=["mask_cow", "mask_lvo"], errors="ignore").merge(ncct, on="case_id", how="inner")
+
+
+def load_isles24_lvo_side_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ISLES'24 side of the large-vessel occlusion from the CTA: 1 = left (``mask_labels``: >= 90% of the LVO mask
+    on one side of the brain-mask centroid; the rest are dropped)."""
+    stats = pd.read_csv(label_file("isles24", "mask_stats.tsv"), sep="\t")
+    stats["left_frac"] = stats["left_ml"] / (stats["left_ml"] + stats["right_ml"]).clip(lower=1e-6)
+    stats = stats[(stats["lvo_ml"] > 0) & ((stats["left_frac"] >= 0.9) | (stats["left_frac"] <= 0.1))]
+    m = _isles24_cta(volumes).merge(stats[["case_id", "left_frac"]], on="case_id", how="inner")
+    return _bundle_from_frame("isles24_lvo_side", "binary", m, (m["left_frac"] >= 0.9).astype(np.int64).to_numpy(),
+                              ["left"], modality="ct")
+
+
+def load_isles24_cow_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ISLES'24 Circle of Willis arteries on the CTA (``COW_REGIONS``)."""
+    m = _isles24_cta(volumes)
+    m = m[m["mask_cow"].fillna("").astype(str).str.len() > 0].assign(mask_path=lambda d: d["mask_cow"].astype(str))
+    return _bundle_from_frame("isles24_cow", "segmentation", m, np.zeros(len(m), np.int64), list(COW_REGIONS),
+                              modality="ct", mask_col="mask_path", regions=COW_REGIONS)
+
+
+def load_isles24_nihss_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ISLES'24 admission stroke severity (NIHSS, 0-42) from the admission NCCT."""
+    m = _isles24_clinical(volumes, "NIHSS at admission")
+    return _bundle_from_frame("isles24_nihss", "regression", m, m["NIHSS at admission"].to_numpy(np.float64),
+                              ["NIHSS"], modality="ct", cohort_col="center")
+
+
+def _mask_stats(volumes: pd.DataFrame, dataset: str, folder: str) -> pd.DataFrame:
+    stats = pd.read_csv(label_file(folder, "mask_stats.tsv"), sep="\t")
+    vol = volumes[volumes["dataset"] == dataset]
+    return vol.merge(stats.drop(columns=["case_id"]), on="volume_id", how="inner")
+
+
+def load_atlas_lesion_volume_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ATLAS chronic stroke lesion volume, log(1 + ml) (``mask_labels``)."""
+    m = _mask_stats(volumes, "atlas", "atlas")
+    return _bundle_from_frame("atlas_lesion_volume", "regression", m, np.log1p(m["lesion_ml"].to_numpy(np.float64)),
+                              ["log_lesion_ml"], modality="mri")
+
+
+def load_atlas_lesion_side_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ATLAS lesion side among unilateral lesions (>= 90% of the lesion on one side): 1 = left."""
+    m = _mask_stats(volumes, "atlas", "atlas")
+    m["left_frac"] = m["left_ml"] / m["lesion_ml"].clip(lower=1e-6)
+    m = m[(m["lesion_ml"] > 0) & ((m["left_frac"] >= 0.9) | (m["left_frac"] <= 0.1))]
+    return _bundle_from_frame("atlas_lesion_side", "binary", m, (m["left_frac"] >= 0.9).astype(np.int64).to_numpy(),
+                              ["left"], modality="mri")
+
+
+def load_atlas_days_post_stroke_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ATLAS time since the stroke, log(1 + days) (session metadata; staged by brain.prep.stage_new)."""
+    meta = pd.read_csv(label_file("atlas", "metadata.tsv"), sep="\t").dropna(subset=["DAYS_POST_STROKE"])
+    vol = volumes[volumes["dataset"] == "atlas"].copy()
+    m = vol.merge(meta[["participant_id", "DAYS_POST_STROKE", "SITE"]].rename(columns={"participant_id": "case_id"}),
+                  on="case_id", how="inner")
+    return _bundle_from_frame("atlas_days_post_stroke", "regression", m,
+                              np.log1p(m["DAYS_POST_STROKE"].clip(lower=0).to_numpy(np.float64)), ["log_days"],
+                              modality="mri", cohort_col="SITE")
+
+
+def load_aisd_remote_infarct_task(volumes: pd.DataFrame) -> TaskBundle:
+    """AISD acute-stroke CT: is an old (remote) infarct present besides the acute one (mask code 1, >= 0.1 ml)?"""
+    m = _mask_stats(volumes, "aisd", "aisd")
+    return _bundle_from_frame("aisd_remote_infarct", "binary", m, (m["code1_ml"] >= 0.1).astype(np.int64).to_numpy(),
+                              ["remote_infarct"], modality="ct")
+
+
+def load_ms3seg_lesion_load_task(volumes: pd.DataFrame) -> TaskBundle:
+    """MS3SEG MS lesion load, log(1 + ml) (from the staged masks)."""
+    part = pd.read_csv(label_file("ms3seg", "participants.tsv"), sep="\t", dtype={"participant_id": str})
+    vol = volumes[volumes["dataset"] == "ms3seg_flair"].copy()
+    vol["participant_id"] = vol["case_id"].astype(str)
+    m = vol.merge(part, on="participant_id", how="inner").dropna(subset=["lesion_ml"])
+    return _bundle_from_frame("ms3seg_lesion_load", "regression", m, np.log1p(m["lesion_ml"].to_numpy(np.float64)),
+                              ["log_lesion_ml"], modality="mri")
+
+
+def _gli_tcga(volumes: pd.DataFrame) -> pd.DataFrame:
+    """BraTS 2023 GLI post-contrast T1 of the TCGA cases, with TCGA clinical data (brain.datasets.tcga_glioma)."""
+    clin = pd.read_csv(label_file("tcga_glioma", "clinical.tsv"), sep="\t")
+    vol = volumes[volumes["dataset"] == "brats2023_gli_t1c"].copy()
+    vol["brats_id"] = vol["case_id"].astype(str).str.removesuffix("-t1c")
+    return vol.merge(clin, on="brats_id", how="inner").assign(cohort=lambda d: d["cancer_type"])
+
+
+def load_gli_survival_task(volumes: pd.DataFrame) -> TaskBundle:
+    """Glioma overall survival beyond 12 months (1) vs death within 12 months (0); patients censored alive before 12
+    months are dropped."""
+    m = _gli_tcga(volumes)
+    m = m[(m["deceased"] == 1) | (m["os_months"] >= 12)].dropna(subset=["os_months"])
+    return _bundle_from_frame("gli_survival_12m", "binary", m, (m["os_months"] >= 12).astype(np.int64).to_numpy(),
+                              ["survived_12m"], modality="mri", cohort_col="cohort")
+
+
+def load_gli_lgg_task(volumes: pd.DataFrame) -> TaskBundle:
+    """Lower-grade glioma (TCGA-LGG, WHO grade 2-3) vs glioblastoma (TCGA-GBM)."""
+    m = _gli_tcga(volumes)
+    return _bundle_from_frame("gli_lgg", "binary", m, (m["cancer_type"] == "LGG").astype(np.int64).to_numpy(),
+                              ["LGG"], modality="mri", cohort_col="cohort")
+
+
+def load_gli_idh_task(volumes: pd.DataFrame) -> TaskBundle:
+    """IDH mutation (TCGA PanCancer subtype; known for a subset)."""
+    m = _gli_tcga(volumes).dropna(subset=["idh_mutant"])
+    return _bundle_from_frame("gli_idh", "binary", m, m["idh_mutant"].astype(np.int64).to_numpy(), ["IDH_mutant"],
+                              modality="mri", cohort_col="cohort")
 
 
 def load_ms3seg_task(volumes: pd.DataFrame) -> TaskBundle:
@@ -751,6 +978,42 @@ def load_task(
         return load_ms3seg_age_task(volumes)
     if name == "valdo_epvs":
         return load_valdo_epvs_task(volumes)
+    if name == "isles24_mrs_discharge":
+        return load_isles24_mrs_discharge_task(volumes)
+    if name == "isles24_nihss_discharge":
+        return load_isles24_nihss_discharge_task(volumes)
+    if name == "isles24_lvo_side":
+        return load_isles24_lvo_side_task(volumes)
+    if name == "isles24_cow":
+        return load_isles24_cow_task(volumes)
+    if name == "cq500_bleed_side":
+        return load_cq500_bleed_side_task(volumes)
+    if name in ("cq500_chronic_bleed", "cq500_edh", "cq500_other_fracture"):
+        return load_cq500_finding_task(volumes, name, CQ500_FINDING_TASKS[name])
+    if name == "aisd_remote_infarct":
+        return load_aisd_remote_infarct_task(volumes)
+    if name in ("oasis1_mmse", "oasis2_mmse"):
+        return load_oasis_mmse_task(volumes, name.removesuffix("_mmse"))
+    if name == "abide_ados":
+        return load_abide_ados_task(volumes)
+    if name == "atlas_lesion_volume":
+        return load_atlas_lesion_volume_task(volumes)
+    if name == "atlas_lesion_side":
+        return load_atlas_lesion_side_task(volumes)
+    if name == "atlas_days_post_stroke":
+        return load_atlas_days_post_stroke_task(volumes)
+    if name == "ms3seg_lesion_load":
+        return load_ms3seg_lesion_load_task(volumes)
+    if name == "gli_survival_12m":
+        return load_gli_survival_task(volumes)
+    if name == "gli_lgg":
+        return load_gli_lgg_task(volumes)
+    if name == "gli_idh":
+        return load_gli_idh_task(volumes)
+    if name == "isles24_mrs":
+        return load_isles24_mrs_task(volumes)
+    if name == "isles24_nihss":
+        return load_isles24_nihss_task(volumes)
     if name == "msd":
         return load_msd_task(volumes, labels_csv=msd_labels, target=msd_target)
     raise KeyError(f"Unknown task {name}. Choices: {', '.join(TASK_NAMES)}")

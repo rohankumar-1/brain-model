@@ -139,7 +139,7 @@ def dedup_key(dataset: str, case_id: str) -> str:
         return "brats:" + fam.removeprefix("brats_") + ":" + brats_patient(case_id)
     if fam == "cq500":
         return "cq500:" + case_id
-    if fam == "rsna_ich":
+    if fam in ("rsna_ich", "bhsd", "hemseg"):       # BHSD / HemSeg volumes are RSNA studies (same subject, split)
         return "rsna:" + case_id
     if fam in ("oasis1", "oasis2"):
         return "oasis:" + oasis_subject(case_id)
@@ -499,8 +499,15 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
     vols["pretrain"] &= ~vols["ssl_qc_drop"]
     print(f"[ssl] QC drop (DICOM-assembled, brain_ok=False): {int(vols.ssl_qc_drop.sum())} volumes", flush=True)
     vols["pool_drop"] = vols["dataset"].isin(POOL_DROP_DATASETS)
-    vols["pretrain"] &= ~vols["pool_drop"]
     print(f"[ssl] dataset drop {POOL_DROP_DATASETS}: {int(vols.pool_drop.sum())} volumes", flush=True)
+    # per-volume drops (labels/pool_drop/*.csv: volume_id, reason): cross-dataset copies of a scan (brain.prep.dedup),
+    # partial-coverage slabs and unscaled fallback registrations found by prep QC; they stay out of SSL and training
+    for f in sorted((root / "labels" / "pool_drop").glob("*.csv")):
+        ids = set(pd.read_csv(f)["volume_id"].astype(str))
+        hit = vols["volume_id"].astype(str).isin(ids)
+        vols["pool_drop"] |= hit
+        print(f"[ssl] volume drop {f.name}: {int(hit.sum())} volumes", flush=True)
+    vols["pretrain"] &= ~vols["pool_drop"]
     # label masks only: mask_brain (the brain array inside the image zip) is not a downstream label
     vols["has_mask"] = vols.filter(like="mask_").drop(columns=["mask_brain"], errors="ignore").astype(str).ne("").any(axis=1)
 

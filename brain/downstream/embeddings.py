@@ -216,6 +216,7 @@ def load_or_build_embeddings(
                 "registers": data["registers"] if "registers" in data.files else None,
                 "slots": data["slots"] if "slots" in data.files else None,
                 "taskout": data["taskout"] if "taskout" in data.files else None,
+                "general": data["general"] if "general" in data.files else None,
             }
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     enc = load_frozen_encoder(ckpt, device)
@@ -244,6 +245,9 @@ def load_or_build_embeddings(
     slots, taskout = getattr(enc, "slot_bank", None), getattr(enc, "taskout_bank", None)   # multitask checkpoints
     if slots is not None:
         payload["slots"], payload["taskout"] = slots.astype(np.float32), taskout.astype(np.float32)
+    general = getattr(enc, "general_bank", None)             # multitask checkpoints with a general-embedding slot
+    if general is not None:
+        payload["general"] = general.astype(np.float32)
     # Uncompressed for the 32^3 grid: compressing ~20 GB of embeddings is slower than the encode.
     (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(path, **payload)
     return {
@@ -256,6 +260,7 @@ def load_or_build_embeddings(
         "registers": regs,
         "slots": slots,
         "taskout": taskout,
+        "general": general,
     }
 
 

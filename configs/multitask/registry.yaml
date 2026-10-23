@@ -27,7 +27,8 @@ tasks:
       - "Predict chronological age from brain anatomy."
     sources:
       - {source: fomo_participants, field: age,
-         families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian]}
+         families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian,
+                    fomo_infant, fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_abd, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland]}
       - {source: downstream, task: ms3seg_age, use: eval}
       - {source: downstream, task: oasis1_age, use: eval}
       - {source: downstream, task: ixi_age, use: eval}
@@ -39,7 +40,8 @@ tasks:
       - "Predict whether the subject's sex is male rather than female."
     sources:
       - {source: fomo_participants, field: sex, map: {M: 1, F: 0, m: 1, f: 0, male: 1, female: 0},
-         families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian]}
+         families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian,
+                    fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland, fomo_ahead, fomo_beijing]}
 
   # ---------------------------------------------------------------- diagnosis
   - id: neuro_diagnosis
@@ -52,6 +54,38 @@ tasks:
       - {source: fomo_participants, field: group, families: [fomo_brainlat],
          map: {CN: "cognitively normal", AD: "Alzheimer's disease", FTD: "frontotemporal dementia",
                MS: "multiple sclerosis"}}
+
+  # Infant Development Brain (FOMO PT023, age 0-3): radiological finding vs normal. "premature" alone and motion
+  # artefacts are neither, so they are dropped.
+  - id: infant_abnormal
+    type: binary
+    group: diagnosis
+    descriptions:
+      - "Does this infant brain MRI show an abnormality?"
+      - "Is there a pathological finding in this neonatal or infant brain?"
+    sources:
+      - {source: fomo_participants, field: group, families: [fomo_infant], map: {normal: 0, Normal: 0},
+         drop: [premature, Motion artefact], default: 1}
+
+  - id: adhd
+    type: binary
+    group: diagnosis
+    descriptions:
+      - "Does this person have ADHD?"
+      - "Classify attention-deficit/hyperactivity disorder versus control."
+    sources:
+      - {source: fomo_participants, field: group, families: [fomo_acpi, fomo_cunmet],
+         prefix: {ADHD: 1, LNCG: 0, Control: 0}}
+
+  - id: parkinsons
+    type: binary
+    group: diagnosis
+    descriptions:
+      - "Does this person have Parkinson's disease?"
+      - "Classify Parkinson's disease versus healthy control."
+    sources:
+      - {source: fomo_participants, field: group, families: [fomo_taowu, fomo_brainlat],
+         map: {PD: 1, Control: 0, CN: 0}}
 
   - id: tumor_type
     type: multiclass
@@ -90,6 +124,20 @@ tasks:
     type: binary
     descriptions: ["Is there a subdural hematoma?", "Detect a crescent of blood between the dura and the brain."]
     sources: [{source: rsna, subtype: subdural}]
+
+  # ---------------------------------------------------------------- lesion segmentation
+  # BHSD: 192 RSNA studies with voxel masks (1 EDH, 2 IPH, 3 IVH, 4 SAH, 5 SDH); HemSeg-500: 519 more (IPH- or
+  # IVH-only scans, binary masks). Both train on their RSNA train split.
+  # Seg-CQ500 and INSTANCE stay evaluation-only cohorts of the same task.
+  - id: hemorrhage_segmentation
+    type: segmentation
+    group: lesion
+    descriptions: ["Segment the intracranial hemorrhage.", "Outline all intracranial blood on this head CT."]
+    sources:
+      - {source: mask_column, families: [bhsd], column: mask_ich, ids: [1, 2, 3, 4, 5]}
+      - {source: mask_column, families: [hemseg], column: mask_ich, ids: [1]}      # HemSeg-500: IPH- or IVH-only
+      - {source: downstream, task: seg_cq500, use: eval}
+      - {source: downstream, task: instance, use: eval}
 
   # ---------------------------------------------------------------- derived, every scan (dense labels)
   - id: brain_volume
@@ -134,6 +182,46 @@ tasks:
       - "What is the typical CT density of the brain parenchyma?"
     sources: [{source: live, name: ct_brain_hu, modality: ct}]
 
+  - id: ct_calcification
+    type: regression
+    descriptions:
+      - "Estimate the burden of intracranial calcification on this head CT."
+      - "How much calcification is there in the basal ganglia, pineal, choroid plexus and vessels?"
+    sources: [{source: live, name: ct_calcification, modality: ct}]
+
+  - id: ct_skull_density
+    type: regression
+    descriptions:
+      - "Estimate the density of the skull bone in Hounsfield units."
+      - "How dense is the calvarium (opportunistic bone density)?"
+    sources: [{source: live, name: ct_skull_hu, modality: ct}]
+
+  # ---------------------------------------------------------------- clinical measures from SynthSeg (brain.multitask.measures)
+  - id: evans_index
+    type: regression
+    group: anatomy_volume
+    descriptions:
+      - "Estimate the Evans index: frontal horn width over maximal brain width."
+      - "How enlarged are the frontal horns of the lateral ventricles (ventriculomegaly)?"
+    sources: [{source: synthseg_scan_measure, measure: evans_index}]
+
+  # WMH-SynthSeg soft volume, FLAIR / T2 only (T1 does not show WMH; tumour cohorts excluded: oedema reads as WMH).
+  # Pilot: age rho 0.52 on FLAIR; BrainLat MS > AD > FTD > CN. The WMH challenge stays held out for evaluation.
+  - id: vol_wmh
+    type: regression
+    descriptions:
+      - "Estimate the white matter hyperintensity burden (log volume)."
+      - "How much small-vessel white matter disease is visible on this FLAIR or T2 scan?"
+    sources: [{source: wmh}]
+
+  - id: ct_gray_white_ratio
+    type: regression
+    group: derived
+    descriptions:
+      - "Estimate the grey-to-white matter attenuation ratio on this head CT."
+      - "How well preserved is grey-white matter differentiation (loss suggests ischaemia or hypoxia)?"
+    sources: [{source: synthseg_scan_measure, measure: ct_gray_white, modality: ct}]
+
   # ---------------------------------------------------------------- tumour (BraTS subject segmentations)
   - id: whole_tumor
     type: segmentation
@@ -167,6 +255,51 @@ tasks:
       - "Estimate the total volume of the tumor and edema."
       - "How large is the tumor burden?"
     sources: [{source: brats_seg_volume, families: [brats_gli, brats_men, brats_ped], ids: [1, 2, 3]}]
+
+  # Glioma clinical labels for the BraTS 2023 GLI cases from TCGA (brain.datasets.tcga_glioma; post-contrast T1).
+  # Train split only; the val / test BraTS scans stay the downstream gli_* evaluation.
+  - id: glioma_survival_12m
+    type: binary
+    group: tumor
+    descriptions:
+      - "Will this glioma patient survive beyond one year?"
+      - "Predict 12-month overall survival from the pre-operative tumor appearance."
+    sources: [{source: downstream, task: gli_survival_12m}]
+
+  - id: glioma_lower_grade
+    type: binary
+    group: tumor
+    descriptions:
+      - "Is this a lower-grade glioma rather than a glioblastoma?"
+      - "Grade the glioma: WHO grade 2-3 versus grade 4."
+    sources: [{source: downstream, task: gli_lgg}]
+
+  - id: glioma_idh
+    type: binary
+    group: tumor
+    descriptions:
+      - "Is this glioma IDH-mutant?"
+      - "Predict the IDH mutation status of the tumor from imaging."
+    sources: [{source: downstream, task: gli_idh}]
+
+  # ---------------------------------------------------------------- clinical scores (pretraining-pool cohorts)
+  - id: mmse
+    type: regression
+    group: clinical_scores
+    descriptions:
+      - "Estimate the Mini-Mental State Examination score (0-30)."
+      - "How impaired is this person's global cognition?"
+    sources:
+      - {source: downstream, task: oasis1_mmse}
+      - {source: downstream, task: oasis2_mmse}
+
+  - id: autism_severity
+    type: regression
+    group: clinical_scores
+    descriptions:
+      - "Estimate the calibrated ADOS autism severity score (1-10) of this autistic participant."
+      - "How severe are this person's autism symptoms?"
+    sources: [{source: downstream, task: abide_ados}]
 
 
   # ---------------------------------------------------------------- SynthSeg-robust 2.0 (brain.prep.synthseg)
@@ -351,9 +484,3 @@ tasks:
     type: segmentation
     descriptions: ["Segment the multiple sclerosis lesions."]
     sources: [{source: downstream, task: ms3seg, ids: [3]}]
-  - id: hemorrhage_segmentation
-    role: held_out
-    analog: hemorrhage_any
-    type: segmentation
-    descriptions: ["Segment the intracranial hemorrhage."]
-    sources: [{source: downstream, task: seg_cq500}, {source: downstream, task: instance}]

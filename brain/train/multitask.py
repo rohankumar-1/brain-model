@@ -15,15 +15,20 @@ import torch
 
 from brain.common.optim import NO_DECAY_SUFFIXES
 from brain.common.paths import resolve
-from brain.multitask.data import TYPE_ID, MultitaskDataset, SyntheticMultitask, collate, load_labels, make_loader, prepare
+from brain.multitask.data import (MultitaskDataset, SyntheticMultitask, collate, load_labels, make_loader, prepare,
+                                  ssl_view)
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
 from brain.multitask.model import MultitaskModel
 from brain.multitask.registry import load_registry
+from brain.objectives.sigreg import SIGReg, gather_batch, lejepa_loss
 from brain.train import engine
 
 NO_DECAY_TABLES = ("task_emb", "type_emb", "cls_emb", "cls_pos")      # identities, not weights to shrink
-TYPE_KEYS = (("bin", "binary"), ("reg", "regression"), ("mc", "multiclass"), ("seg", "segmentation"))
+# log column per task group: the raw (unbalanced) mean loss of the group's tasks, averaged over the steps of the
+# logging window in which the group was asked (the balanced ``loss`` sits near 1 by construction under ``ema``)
+GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich", "tumor": "tumor",
+                 "derived": "derived", "anatomy_seg": "aseg", "anatomy_volume": "avol", "lesion": "lesion"}
 
 
 def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
@@ -84,6 +89,11 @@ class Trainer(engine.Trainer):
         self.stride = int(cfg["loss"].get("seg_stride", 2))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
         self.reg = load_registry(d.get("registry"))
+        # trained tasks, optionally restricted to some groups (``tasks.groups``: e.g. the no-human-label control)
+        only = tk.get("groups")
+        self.train_ids = [t.id for t in self.reg.trained if not only or t.group in set(only)]
+        if not self.train_ids:
+            raise SystemExit(f"tasks.groups {only} selects no trained task (groups: {self.reg.groups})")
         enc = build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
         text = None
@@ -99,6 +109,21 @@ class Trainer(engine.Trainer):
                                  group_of=[groups.index(t.group) for t in self.reg.tasks],
                                  group_weight=[float(gw.get(g, 1.0)) for g in groups]).to(dev)
         self.module = self.raw
+        # tasks whose target needs the whole brain in view: no field-of-view cut on rows that ask them
+        from brain.multitask.labels import registration_sensitive
+
+        groups = self.reg.groups
+        self.group_of = torch.tensor([groups.index(t.group) for t in self.reg.tasks], device=dev)
+        self.log_groups = [(i, GROUP_COLUMNS.get(g, g[:8])) for i, g in enumerate(groups) if g != "held_out"]
+        self.g_sum = torch.zeros(len(groups), device=dev)
+        self.g_cnt = torch.zeros(len(groups), device=dev)
+        unsafe = [registration_sensitive(t.id) or any(s.get("source") == "live" for s in t.sources) for t in self.reg.tasks]
+        self.fov_unsafe = torch.tensor(unsafe, device=dev)
+        # general embedding (LeJEPA on a task-agnostic slot, two global views): model.general.enabled + loss.general
+        self.gen = cfg["loss"].get("general") or {}
+        self.gen_w = float(self.gen.get("weight", 0.0)) if (cfg["model"].get("general") or {}).get("enabled") else 0.0
+        self.sigreg = SIGReg(n_proj=int(self.gen.get("n_proj", 256))).to(dev)
+        self.gen_sum, self.gen_cnt = torch.zeros(2, device=dev), 0
         seed = int(cfg["seed"]) + rt.rank
         if args.synthetic:
             shape = tuple(reversed(cfg["data"]["volume_size_xyz"]))
@@ -116,7 +141,8 @@ class Trainer(engine.Trainer):
             volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
             kw = dict(k_max=int(tk["k_max"]), p_all=float(tk["p_all"]), rare_beta=float(tk["rare_beta"]),
                       max_seg=int(tk["max_seg"]), group_weights=tk.get("group_weights"))
-            ds = MultitaskDataset(store, labels, volumes, self.reg, self.stats, split="train", train=True, **kw)
+            ds = MultitaskDataset(store, labels, volumes, self.reg, self.stats, split="train", train=True,
+                                  tasks=self.train_ids, **kw)
             workers = int(d.get("num_workers", 10))
             self.loader = make_loader(ds, batch_size=self.batch, shuffle=True, seed=seed + int(step), workers=workers,
                                       balance_alpha=float(d.get("balance_alpha", 1.0)),
@@ -124,12 +150,13 @@ class Trainer(engine.Trainer):
             self.val_loader = None
             if rt.main:
                 val = labels[(labels["split"] == "val") & (labels["use"] == "train")
-                             & labels["task"].isin([t.id for t in self.reg.trained])]
+                             & labels["task"].isin(self.train_ids)]
                 # a fixed set: up to val_per_task volumes per task (deterministic), each asked all its tasks
                 pick = (val.sort_values("volume_id").groupby("task").head(int(d.get("val_per_task", 24)))
                         ["volume_id"].unique().tolist())
                 vds = MultitaskDataset(store, labels, volumes, self.reg, self.stats, split="val", train=False,
-                                       k_max=64, max_seg=int(d.get("val_max_seg", 4)), volume_ids=pick)
+                                       tasks=self.train_ids, k_max=64, max_seg=int(d.get("val_max_seg", 4)),
+                                       volume_ids=pick)
                 self.val_loader = make_loader(vds, batch_size=2, shuffle=False, seed=0, workers=min(4, workers),
                                               drop_last=False)
             self._banner_extra = f"train_volumes={len(ds)}"
@@ -149,7 +176,7 @@ class Trainer(engine.Trainer):
         n_enc = sum(p.numel() for p in enc.parameters())
         n_all = sum(p.numel() for p in self.raw.parameters())
         self._banner = (f"enc={enc.size} patch={self.patch} enc_params={n_enc:,} head_params={n_all - n_enc:,} "
-                        f"tasks={len(self.reg.trained)}/{len(self.reg)} batch={self.batch}x{rt.world} "
+                        f"tasks={len(self.train_ids)}/{len(self.reg)} batch={self.batch}x{rt.world} "
                         f"freeze={self.freeze_steps} " + getattr(self, "_banner_extra", ""))
 
     def banner(self) -> str:
@@ -166,25 +193,61 @@ class Trainer(engine.Trainer):
             self.iter = iter(self.loader)
             return next(self.iter)
 
+    def _with_general_views(self, raw: dict, b: dict) -> tuple[dict, torch.Tensor]:
+        """Append a second view of the first ``loss.general.frac`` rows (asking no task) to the batch, so both views
+        go through the encoder in one pass. Returns the widened batch and the rows that have a second view."""
+        n = b["x"].shape[0]
+        rows = torch.arange(max(2, round(n * float(self.gen.get("frac", 0.5)))), device=b["x"].device)
+        x2, keep2 = ssl_view(raw, rows, self.cfg, self.rt.device, self.patch)
+        pad = lambda t, v: torch.cat([t, torch.full((len(rows), *t.shape[1:]), v, dtype=t.dtype, device=t.device)])  # noqa: E731
+        return {**b, "x": torch.cat([b["x"], x2]), "keep": torch.cat([b["keep"], keep2]),
+                "task": pad(b["task"], -1), "y": pad(b["y"], 0)}, rows
+
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
-        b = prepare(self._next(), self.cfg, self.rt.device, self.patch, train=True)
+        raw = self._next()
+        b = prepare(raw, self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe)
+        n = b["x"].shape[0]
+        if self.gen_w > 0:
+            b, rows = self._with_general_views(raw, b)
         self.opt.zero_grad(set_to_none=True)
         with torch.autocast(**self.amp):
             out = self.net(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=step >= self.freeze_steps)
         loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride)
         total, per_task = self.balancer(loss, has, b["task"])
+        if self.gen_w > 0:
+            g = out["general"].float()
+            views = torch.stack([g[rows], g[n:]])                                      # (2, R, D)
+            gen, inv, reg = lejepa_loss(gather_batch(views), self.sigreg, float(self.gen.get("lamb", 0.02)))
+            total = total + self.gen_w * gen
+            self.gen_sum += torch.stack([inv.detach(), reg.detach()])
+            self.gen_cnt += 1
         total.backward()
         torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
         self.opt.step()
-        tt = self.raw.task_type
-        res = {"loss": total.detach()}
         present = torch.zeros_like(per_task, dtype=torch.bool)
         present[b["task"][has]] = True
-        for key, kind in TYPE_KEYS:
-            m = present & (tt == TYPE_ID[kind])
-            res[key] = torch.where(m.any(), per_task[m].sum() / m.sum().clamp_min(1), torch.zeros((), device=tt.device))
-        res["k"] = (b["task"] >= 0).float().sum(1).mean()
-        return res
+        g = self.group_of[present]
+        n_g = self.g_sum.numel()
+        g_loss = torch.zeros(n_g, device=g.device).index_add(0, g, per_task[present])
+        g_n = torch.zeros(n_g, device=g.device).index_add(0, g, torch.ones_like(g, dtype=torch.float32))
+        on = g_n > 0
+        self.g_sum += torch.where(on, g_loss / g_n.clamp_min(1), torch.zeros_like(g_loss))
+        self.g_cnt += on.float()
+        return {"loss": total.detach(), "k": (b["task"] >= 0).float().sum(1).mean()}
+
+    def log_extras(self) -> dict[str, str]:
+        """Raw per-group losses over the logging window (``-`` for a group not asked in it); resets the window."""
+        mean = (self.g_sum / self.g_cnt.clamp_min(1)).tolist()
+        cnt = self.g_cnt.tolist()
+        self.g_sum.zero_()
+        self.g_cnt.zero_()
+        out = {name: (f"{mean[i]:.4f}" if cnt[i] else "-") for i, name in self.log_groups}
+        if self.gen_w > 0:
+            inv, reg = (self.gen_sum / max(self.gen_cnt, 1)).tolist()
+            out.update(gen_inv=f"{inv:.4f}", gen_sig=f"{reg:.3f}")
+            self.gen_sum.zero_()
+            self.gen_cnt = 0
+        return out
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:

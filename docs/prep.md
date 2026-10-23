@@ -112,6 +112,53 @@ from the files and is taken as stored.
 `POOL_DROP_DATASETS` (`brain/prep/index.py`) keeps whole datasets out of SSL and multitask training (they stay in the
 store): `fomo_hbn_pd` (HBN proton density; many scans are noise / artefact, SynthSeg QC 61% vs 99% for HBN T1w).
 
+Single volumes are dropped by CSVs in `labels/pool_drop/` (columns `volume_id, reason`; every file is read):
+
+- `prep_qc_fomo_small.csv`: 152 WAND T2 partial slabs (thinnest extent < 100 mm; affine registration "succeeds" on
+  them but cannot be right) and 184 infant scans whose registration fell back to rigid / translation (tiny unscaled
+  brains in the grid).
+- `duplicates.csv` (`python -m brain.prep.dedup --new-families ...`): the same scan redistributed under another
+  dataset. Shortlist from the index (identical source grid and contrast, nearest registration fingerprint: scale,
+  rotation, brain fraction, brain / head ratio, final MI), confirmed by the correlation of the registered volumes
+  (>= 0.98). For the 2026-10 small FOMO cohorts: 140 candidates, median correlation 0.45, no duplicates.
+
+### Hemorrhage segmentation cohorts (BHSD, HemSeg-500)
+
+Both are RSNA ICH studies with voxel masks (`jobs/prep_bhsd.sbatch`, `jobs/prep_hemseg.sbatch`). BHSD (190 studies):
+codes 1 EDH, 2 IPH, 3 IVH, 4 SAH, 5 SDH, matching RSNA's labels on 92-97% of studies; kept out of SSL (`bhsd`
+column) but its masks train the multitask model. HemSeg-500 (518 studies): images rebuilt from exactly the DICOM
+members the authors listed, so the masks line up; each study is IPH-only or IVH-only, so each binary mask is the
+whole hemorrhage. Studies in both keep BHSD's masks. Mask zips must be named `<case>.ICH.zip`: the index only finds
+that name (the first build wrote `.ich.zip` and left hemorrhage segmentation without training rows).
+
+### Small FOMO cohorts (added 2026-10-23)
+
+16 FOMO-260K folders for variety (`SMALL_FOLDERS` in `brain/prep/fomo.py`): Infant Development (0-3 y), SLIM, WAND,
+Wayne, Yale HighRes, Adolescent Brain Development, CHBMP, HBN-SSI, Beijing Enhanced, ACPI, age-ility, AHEAD (7T),
+MICA-MICs, CUNMET, Tao Wu, Cleveland CCF. Downloaded with `python -m brain.datasets.download_fomo --folders small`
+(structural sequences only; the session zips, mostly diffusion, are deleted after extraction), prepped with
+`PHASE=A DATASETS_OVERRIDE=fomo` (only newly extracted scans are found). 5,722 volumes prepped, 5,386 in the pool.
+Registration falls back to rigid / translation more often than in the older cohorts (Beijing 22%, HBN-SSI 14%, CHBMP
+9%; AHEAD 100% rigid, sub-mm 7T); the adult fallbacks are centred and upright (`runs/diagnostics/fomo_small_qc.png`)
+and only lose alignment-dependent labels. FOMO's OpenNeuro folder (64k structural scans) stays out: it holds the AOMIC
+and PIXAR evaluation cohorts and would need per-study filtering.
+
+### RSNA Intracranial Aneurysm (downloaded, not yet in the store)
+
+`pool/datasets/rsna_ica/rsna-intracranial-aneurysm-detection.zip` (215 GB; MIRA dataset 7, non-commercial, no
+redistribution): 4,348 labelled series, CTA 1,808 / MRA 1,252 / T2 983 / T1 post-contrast 305; per-series aneurysm
+presence and 13 locations, 2,254 aneurysm points (`train_localizers.csv`, pixel x / y on one SOP), 178 vessel
+segmentations. `sources.rsna_ica` reads series straight from the zip by byte offsets (index cached in
+`work/rsna_ica`); prep needs `BRAIN_DICOM_READER=dcm2niix` (some MR series are one enhanced multi-frame file), with
+the SimpleITK reader as fallback when dcm2niix refuses a series (derived / secondary CTAs, malformed overlay tags).
+Pilot (`jobs/rsna_ica_pilot.sbatch`, 30 series per modality): MRA 30/30 (median template brain Dice 0.93 despite the
+slab), T2 30/30, T1 post 27/30 + 3 reader fallbacks, CTA 12 ok + 4 reader fallbacks + 14 flagged.
+
+Known issue: the flagged CTAs carry wrong rescale tags. Their stored pixels are already in HU (air ~ -1000), but the
+header says intercept -1024 (GE) or slope 10 / intercept -10240 (one Siemens), so both readers shift tissue to
+~ -1000 (air ~ -2000) and centering, skull stripping and registration fail. Fix when the dataset goes in: after
+rescaling, if air sits near -2000 rather than -1000, ignore the rescale tags. Until then they stay out.
+
 ### Source quirks of evaluation cohorts
 
 - AISD (CT) is distributed pre-windowed: stored values are clipped at 80 HU, so bone is flat (other CT cohorts reach

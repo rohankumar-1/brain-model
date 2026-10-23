@@ -12,6 +12,7 @@ from fnmatch import fnmatch
 
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
 
 from brain.downstream import db
 from brain.downstream.tasks import CLASSIFICATION_TASKS, REGRESSION_TASKS, SEGMENTATION_TASKS
@@ -20,11 +21,13 @@ GROUPS = {**{t: "classification" for t in CLASSIFICATION_TASKS}, **{t: "regressi
           **{t: "segmentation" for t in SEGMENTATION_TASKS}}
 GROUP_ORDER = ("classification", "regression", "segmentation", "other")
 RANDOM_PREFIX = "random"
+RED_WHITE_GREEN = LinearSegmentedColormap.from_list("red_white_green", ["#c62828", "#ffffff", "#2e7d32"])
 # Models post-trained with labels (brain.multitask) have seen some suite tasks. "labels": the task's own labels
 # (train-split subjects) were trained on; "task": the same target was trained on other cohorts (age, hemorrhage,
 # tumour), so the frozen features were shaped for it. Neither is a clean transfer number.
 SUPERVISED_PREFIXES = ("mt_",)
-SEEN_LABELS = frozenset({"rsna_ich", "brats2023_gli", "brats2023_men", "brats2024_gli", "brats2023_ped"})
+SEEN_LABELS = frozenset({"rsna_ich", "brats2023_gli", "brats2023_men", "brats2024_gli", "brats2023_ped",
+                         "oasis1_mmse", "oasis2_mmse", "abide_ados", "gli_survival_12m", "gli_lgg", "gli_idh"})
 SEEN_TASK = frozenset({"cq500", "seg_cq500", "instance", "msd", "oasis1_age", "ixi_age", "pixar_age", "piop1_age",
                        "piop2_age", "id1000_age", "ms3seg_age"})
 
@@ -97,10 +100,15 @@ def overview(rep: pd.DataFrame, models: list[str] | None = None, delta: bool = F
     grid.insert(0, "metric", [metric.get(t, "") for _, t in grid.index])
     sty = grid.style.format("{:+.3f}" if delta else "{:.3f}", subset=cols, na_rep="")
     if delta:
-        sty = sty.background_gradient(cmap="RdBu", subset=cols, vmin=-0.1, vmax=0.1)
-    else:
-        sty = sty.background_gradient(cmap="Greens", subset=cols, axis=1)
-    return sty.set_caption(("gain over random-init" if delta else "test score") + " (head picked on val)")
+        sty = sty.background_gradient(cmap=RED_WHITE_GREEN, subset=cols, vmin=-0.1, vmax=0.1)
+        return sty.set_caption("gain over random-init (head picked on val): red -0.1, white 0, green +0.1")
+    # fixed scale per metric family, so colours compare across tasks: AUC from chance (0.5), Dice / R2 from 0
+    for lo, hi, rows in ((0.5, 1.0, grid.metric.str.startswith("auc")), (0.0, 1.0, ~grid.metric.str.startswith("auc"))):
+        if rows.any():
+            sty = sty.background_gradient(cmap=RED_WHITE_GREEN, subset=pd.IndexSlice[grid.index[rows], cols],
+                                          vmin=lo, vmax=hi)
+    return sty.set_caption("test score (head picked on val): AUC red 0.5 / white 0.75 / green 1; "
+                           "Dice and R2 red 0 / white 0.5 / green 1 (values outside are clipped)")
 
 
 def task_table(rep: pd.DataFrame, task: str) -> pd.DataFrame:

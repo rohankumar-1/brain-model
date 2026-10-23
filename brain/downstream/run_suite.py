@@ -267,6 +267,8 @@ def main() -> None:
         if emb.get("slots") is not None:
             globals_["slots"] = np.asarray(emb["slots"], dtype=np.float32)
             globals_["taskout"] = np.asarray(emb["taskout"], dtype=np.float32)
+        if emb.get("general") is not None:
+            globals_["general"] = np.asarray(emb["general"], dtype=np.float32)
         reg = task_s.task_type == "regression"
         for view_name, vec in globals_.items():
             g_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((n_vol, 1), dtype=bool)}

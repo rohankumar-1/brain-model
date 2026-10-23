@@ -376,7 +376,7 @@ def extract_volume_embeddings_3d(
     modalities = modalities or {}
     sample_mod = modalities.get(volume_ids[0], "mri") if volume_ids else "mri"
     embs = coords = mask = None
-    cls_bank = reg_bank = slot_bank = taskout_bank = None
+    cls_bank = reg_bank = slot_bank = taskout_bank = general_bank = None
     for i, vid in enumerate(volume_ids):
         vol = read_volume_xyz(resolve_path(slices_root, image_paths[vid]))
         x = torch.from_numpy(np.ascontiguousarray(vol)).to(device)
@@ -407,11 +407,14 @@ def extract_volume_embeddings_3d(
                 reg_bank = np.zeros((len(volume_ids), r.shape[0]), dtype=np.float32)
             reg_bank[i] = r
         if getattr(enc, "slot_features", None) is not None:  # multitask checkpoints: task slots and outputs
-            sl, to = enc.slot_features(x, mod)
+            sl, to, ge = enc.slot_features(x, mod)
             if slot_bank is None:
                 slot_bank = np.zeros((len(volume_ids), sl.shape[0]), dtype=np.float32)
                 taskout_bank = np.zeros((len(volume_ids), to.shape[0]), dtype=np.float32)
+                general_bank = np.zeros((len(volume_ids), ge.shape[0]), dtype=np.float32) if ge.size else None
             slot_bank[i], taskout_bank[i] = sl, to
+            if general_bank is not None:
+                general_bank[i] = ge
         coords[i] = xyz.detach().cpu().numpy()
         if fg is not None:
             mask[i] = fg.detach().cpu().numpy()
@@ -419,5 +422,5 @@ def extract_volume_embeddings_3d(
             print(f"[embed3d] {i + 1}/{len(volume_ids)} volumes window={window} n_win={len(wins)} "
                   f"tokens={feat.shape[0]} patch={enc.patch_xyz} native={tuple(vol.shape)}")
     enc.cls_bank, enc.reg_bank = cls_bank, reg_bank
-    enc.slot_bank, enc.taskout_bank = slot_bank, taskout_bank
+    enc.slot_bank, enc.taskout_bank, enc.general_bank = slot_bank, taskout_bank, general_bank
     return embs, mask, coords

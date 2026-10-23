@@ -170,11 +170,24 @@ def _multitask_defaults() -> dict[str, Any]:
         "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
                   "slot": {"dim": 256, "layers": 3, "heads": 8, "width": None, "mode": "slots",
                            "cross_task": True, "embedding": "learned"},
-                  "seg": {"widths": [128, 64, 32, 16]}},
+                  "seg": {"widths": [128, 64, 32, 16]},
+                  # task-agnostic general-embedding slot (trained by loss.general); off keeps old checkpoints loadable
+                  "general": {"enabled": False, "proj_dim": 128}},
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5}},
-        "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}},
-        "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0}},
-        "loss": {"balance": "ema", "ema_decay": 0.99, "seg_stride": 2},
+        # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
+        "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None},
+        "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0},
+                # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
+                "appearance": {"bias": {"p": 0.0, "amp": 0.2}, "through_plane": {"p": 0.0, "fwhm_vox": [2.0, 6.0]},
+                               "noise": {"p": 0.0, "kind": "gaussian", "snr": [15.0, 100.0], "sigma": [0.02, 0.1]},
+                               "blur": {"p": 0.0, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.0, "amp": 0.1}},
+                # blank a random inferior slab (truncated coverage) on rows asking no whole-brain target; p 0 = off
+                "fov_cut": {"p": 0.0, "mm": [10, 40]}},
+        # general: LeJEPA (prediction + SIGReg, lamb) on the general slot of two global views; the second view of the
+        # first ``frac`` rows is a small rotation / shift plus a box crop (each axis keeps >= crop_min); weight 0 = off
+        "loss": {"balance": "ema", "ema_decay": 0.99, "seg_stride": 2,
+                 "general": {"weight": 0.0, "frac": 0.5, "lamb": 0.02, "n_proj": 256, "crop_min": 0.7,
+                             "rot_deg": [8, 8, 12], "shift_mm": 8.0}},
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
                   "warmup_steps": 1000, "freeze_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,

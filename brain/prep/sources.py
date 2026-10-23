@@ -562,6 +562,93 @@ def instance(root: Path = DATASETS / "instance2022" / "extracted") -> list[Case]
     return _pair_niftis(root, "instance", "ct", "ICH")
 
 
+def bhsd(root: Path = DATASETS / "bhsd" / "extracted") -> list[Case]:
+    """BHSD (MBH-Seg): 192 RSNA ICH studies reconstructed from DICOM positions by the BHSD authors, with voxel masks
+    (1 EDH, 2 IPH, 3 IVH, 4 SAH, 5 SDH). ``label_192/images/<name>.nii.gz`` pairs with ``label_192/ground truths/
+    <name>.nii.gz``; ``<name>`` is ``ID_<short>_ID_<rsna hash>``, so the case id is the RSNA study's (``RSNA-ID_<hash>``)
+    and the index treats it as that study's subject (same split, flagged ``bhsd``)."""
+    cases = []
+    for img in sorted(Path(root).rglob("images/*.nii.gz")):
+        mask = img.parent.parent / "ground truths" / img.name
+        cid = "RSNA-ID_" + img.name.removesuffix(".nii.gz").rsplit("ID_", 1)[-1]
+        cases.append(Case("bhsd", cid, "ct", img, (("ICH", mask),) if mask.exists() else ()))
+    return cases
+
+
+RSNA_ICA_DATASET = {"CTA": ("rsna_ica_cta", "ct"), "MRA": ("rsna_ica_mra", "mri"), "MRI T2": ("rsna_ica_t2w", "mri"),
+                    "MRI T1post": ("rsna_ica_t1c", "mri")}
+
+
+def rsna_ica(rsna_zip: Path = DATASETS / "rsna_ica" / "rsna-intracranial-aneurysm-detection.zip") -> list[Case]:
+    """RSNA Intracranial Aneurysm Detection (2025; MIRA dataset 7, non-commercial): 4,348 series (CTA, TOF MRA,
+    T2, post-contrast T1) read straight from the pool zip by byte offsets (``series/<SeriesUID>/<SOP>.dcm``; some MR
+    series are one enhanced multi-frame file, so prep runs with ``BRAIN_DICOM_READER=dcm2niix``). The member index
+    and ``train.csv`` are cached under ``work/rsna_ica``."""
+    import io
+    import json
+    import zipfile
+
+    if not rsna_zip.exists():
+        return []
+    work = SCRATCH / "work" / "rsna_ica"
+    work.mkdir(parents=True, exist_ok=True)
+    idx_path, csv_path = work / "series_members.json", work / "train.csv"
+    if not idx_path.exists() or not csv_path.exists():
+        with zipfile.ZipFile(rsna_zip) as zf:
+            index: dict[str, list] = {}
+            for i in zf.infolist():
+                parts = i.filename.split("/")
+                if len(parts) == 3 and parts[0] == "series" and parts[2]:
+                    index.setdefault(parts[1], []).append([i.filename, i.header_offset, i.compress_size,
+                                                           i.compress_type])
+            csv_path.write_bytes(zf.read("train.csv"))
+        idx_path.write_text(json.dumps(index))
+    index = json.loads(idx_path.read_text())
+    meta = pd.read_csv(csv_path)
+    cases = []
+    for uid, mod in zip(meta["SeriesInstanceUID"].astype(str), meta["Modality"].astype(str)):
+        if uid in index and mod in RSNA_ICA_DATASET:
+            ds, modality = RSNA_ICA_DATASET[mod]
+            cases.append(Case(ds, uid, modality, zip_path=str(rsna_zip),
+                              members=tuple(tuple(m) for m in sorted(index[uid]))))
+    return cases
+
+
+def hemseg(root: Path = DATASETS / "hemseg" / "extracted",
+           rsna_zip: Path = DATASETS / "rsna" / "rsna-ihd-dataset.zip") -> list[Case]:
+    """HemSeg-500: 525 RSNA studies with voxel masks of their one bleed (352 IPH-only, 173 IVH-only by RSNA's labels,
+    so each binary mask is the scan's complete hemorrhage). The authors rebuilt each image with SimpleITK's series
+    reader from a listed subset of the study's DICOM slices (``annotion_file_info_500.jsonl``); reading exactly those
+    members from the RSNA archive reproduces their geometry, so the masks line up. Studies also in BHSD are skipped
+    (BHSD's multi-class masks win)."""
+    import json
+
+    from brain.prep import dicom
+    from brain.prep.index import bhsd_case_ids
+
+    root = Path(root)
+    info = root.parent / "annotion_file_info_500.jsonl"
+    if not info.exists():
+        return []
+    work = SCRATCH / "work" / "rsna_ingest"
+    index = dicom.build_offsets(rsna_zip, work / "study_index.json", work / "member_offsets.json")
+    masks = {p.name.removesuffix(".nii.gz"): p for p in root.rglob("label/*.nii.gz")}
+    skip = bhsd_case_ids()
+    cases = []
+    for line in info.read_text().splitlines():
+        rec = json.loads(line)
+        scan, uid = rec["scan_name"], "ID_" + rec["scan_name"]
+        cid = "RSNA-" + uid
+        if scan not in masks or uid not in index or cid in skip:
+            continue
+        want = {f"ID_{s}.dcm" for s in rec["slice_list"].values()}
+        members = tuple(tuple(m) for m in index[uid] if Path(m[0]).name in want)
+        if len(members) != len(want):
+            continue                                 # a listed slice missing from the archive: geometry would differ
+        cases.append(Case("hemseg", cid, "ct", masks=(("ICH", masks[scan]),), zip_path=str(rsna_zip), members=members))
+    return cases
+
+
 def aisd(root: Path = DATASETS / "aisd" / "extracted") -> list[Case]:
     """AISD NCCT with ischemic-infarct masks (labels 1/2/3/5 = lesion; 4 = invisible, ignored).
 
