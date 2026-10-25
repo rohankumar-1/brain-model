@@ -28,6 +28,12 @@ from brain.common.paths import resolve
 from brain.train.defaults import METHODS, default_config, smoke_config
 
 
+def lr_of(step: int, s: dict) -> float:
+    """The LR at ``step`` of a run's saved schedule (schedules saved before ``kind`` existed are cosine)."""
+    return lr_at(step, s["max_steps"], s["lr"], s["warmup_steps"], s["floor"], s.get("kind", "cosine"),
+                 s.get("decay_steps"))
+
+
 HIGHER_IS_BETTER = {"score"}     # the multitask validation skill score (brain.eval.skill); every other metric is a loss
 
 
@@ -151,8 +157,10 @@ def run(argv: list[str] | None = None) -> None:
             best_val, best_step = float(ckpt.get("best_val", best_val)), int(ckpt.get("best_step", best_step))
     # The LR schedule is part of the run: a resumed run keeps the one it started with (saved in every checkpoint),
     # so a changed config or --max-steps cannot silently bend the cosine; --reset-schedule adopts the config's.
-    schedule = {"lr": float(cfg["optim"]["lr"]), "warmup_steps": int(cfg["optim"]["warmup_steps"]),
-                "max_steps": max_steps, "floor": float(cfg["optim"].get("lr_floor", 0.01))}
+    o = cfg["optim"]
+    schedule = {"lr": float(o["lr"]), "warmup_steps": int(o["warmup_steps"]), "max_steps": max_steps,
+                "floor": float(o.get("lr_floor", 0.01)), "kind": str(o.get("schedule") or "cosine"),
+                "decay_steps": o.get("decay_steps")}
     saved = (ckpt or {}).get("schedule")
     if saved and not args.reset_schedule:
         if saved != schedule:
@@ -190,8 +198,7 @@ def run(argv: list[str] | None = None) -> None:
             raise SystemExit(4)
         atomic_torch_save({
             **trainer.state(model_only), "step": step, "config": cfg, "history": history, "provenance": prov,
-            "schedule": schedule, "lr": lr_at(step, schedule["max_steps"], schedule["lr"], schedule["warmup_steps"],
-                                              schedule["floor"]),
+            "schedule": schedule, "lr": lr_of(step, schedule),
             "best_val": best_val, "best_step": best_step, "best_metric": best_metric,
         }, path)
 
@@ -202,7 +209,7 @@ def run(argv: list[str] | None = None) -> None:
     keys: list[str] | None = None
     acc, seen, t0 = None, 0, time.time()
     while step < max_steps:
-        lr = lr_at(step, schedule["max_steps"], schedule["lr"], schedule["warmup_steps"], schedule["floor"])
+        lr = lr_of(step, schedule)
         set_lr(trainer.opt, lr)
         metrics = trainer.step(step, lr)
         if keys is None:
@@ -240,8 +247,8 @@ def run(argv: list[str] | None = None) -> None:
                      "best_step": best_step, "best_metric": best_metric}, indent=2) + "\n")
         if rt.main and persist and step % int(t_cfg["ckpt_every"]) == 0:
             save(last_path)
-            if step % int(t_cfg["keep_every"]) == 0:
-                save(out_dir / f"step_{step:07d}.pt", model_only=True)
+            if step % int(t_cfg["keep_every"]) == 0:      # keep_full: with optimizer state, to branch a cooldown
+                save(out_dir / f"step_{step:07d}.pt", model_only=not t_cfg.get("keep_full", False))
         if step % int(t_cfg.get("stop_poll", 20)) == 0 and stop.poll(rt.device):
             break
 

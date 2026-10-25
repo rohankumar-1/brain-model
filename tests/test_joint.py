@@ -51,3 +51,32 @@ def test_gate_max_mode_keeps_rims_center_mode_is_unchanged():
     assert int(token_keep(v, m, (16, 16, 8), mode="max").sum()) == 4
     r = torch.randn(1, 1, 32, 32, 16)
     assert torch.equal(token_keep(r, m, (16, 16, 8)), token_keep(r, m, (16, 16, 8), mode="center"))
+
+
+def test_schedule_in_steps_does_not_stretch_when_the_run_is_extended():
+    j = {"warmup_steps": 0, "task_ramp_steps": 100, "taper_end_steps": 400, "ssl_floor": 0.5}
+    assert schedule(0, 1000, j)[1] == 0.0 and schedule(100, 1000, j)[1] == 1.0
+    assert all(schedule(s, 1000, j) == schedule(s, 4000, j) for s in (0, 50, 100, 250, 400, 999))
+    assert schedule(400, 4000, j) == (0.5, 1.0)
+
+
+def test_warm_start_loads_a_matching_encoder_and_refuses_a_different_rope(tmp_path):
+    from brain.train.defaults import default_config, smoke_config
+    from brain.train.joint import init_encoder
+    from brain.train.lejepa3d import build_encoder
+
+    cfg = smoke_config(default_config("joint"))
+    torch.manual_seed(0)
+    src_enc = build_encoder(cfg, torch.device("cpu"))
+    path = tmp_path / "src.pt"
+    torch.save({"model": src_enc.state_dict(), "config": cfg}, path)
+    enc = build_encoder(cfg, torch.device("cpu"))
+    init_encoder(enc, cfg, path)
+    assert all(torch.equal(a, b) for a, b in zip(enc.state_dict().values(), src_enc.state_dict().values()))
+    other = {**cfg, "model": {**cfg["model"], "rope_min_period_mm": 32.0}}
+    try:
+        init_encoder(build_encoder(other, torch.device("cpu")), other, path)
+    except SystemExit as e:
+        assert "rope_min_period_mm" in str(e)
+    else:
+        raise AssertionError("a RoPE mismatch must not load")

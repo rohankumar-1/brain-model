@@ -175,7 +175,10 @@ def _joint_defaults() -> dict[str, Any]:
                       # RoPE frequencies from a 32 mm shortest period (None: the original 6.3 mm, ~38% aliased pairs)
                       rope_min_period_mm=None)
     c["views"].setdefault("gate", {}).update(mode="center")        # "max": any voxel of the patch counts
+    # the curriculum in fractions of max_steps, or in steps (warmup_steps / task_ramp_steps / taper_end_steps win when
+    # set: a run that may be extended keeps its curriculum fixed instead of stretching it)
     c["joint"] = {"ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
+                  "warmup_steps": None, "task_ramp_steps": None, "taper_end_steps": None,
                   "task_batch_size": 4, "task_workers": 6, "normalize": True}
     c["train"]["best_metric"] = "score"                             # validation skill; none until tasks ramp in
     c["output"]["out_dir"] = "runs/joint"
@@ -186,6 +189,12 @@ JOINT: dict[str, Any] = _joint_defaults()
 
 _DEFAULTS = {"lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK,
              "joint": JOINT}
+for _c in _DEFAULTS.values():
+    # optim.schedule: cosine | wsd (warmup-stable-decay; decay_steps = length of the final decay, None = 20% of the
+    # run). train.keep_full: keep_every snapshots carry optimizer state too (to branch a WSD cooldown from them).
+    _c["optim"].setdefault("schedule", "cosine")
+    _c["optim"].setdefault("decay_steps", None)
+    _c["train"].setdefault("keep_full", False)
 
 
 def default_config(method: str) -> dict[str, Any]:

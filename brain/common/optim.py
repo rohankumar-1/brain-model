@@ -9,10 +9,20 @@ import torch
 NO_DECAY_SUFFIXES = ("bias", "pos_embed", "cls_token", "register_tokens", "mask_token", "prefix")
 
 
-def lr_at(step: int, total: int, peak: float, warmup: int, floor: float = 0.01) -> float:
-    """Linear warmup then cosine decay to ``floor * peak``."""
+def lr_at(step: int, total: int, peak: float, warmup: int, floor: float = 0.01, kind: str = "cosine",
+          decay_steps: int | None = None) -> float:
+    """Linear warmup, then ``cosine`` decay to ``floor * peak`` over the rest of ``total``, or ``wsd``
+    (warmup-stable-decay): constant at ``peak`` until the last ``decay_steps`` (default 20% of ``total``), then down to
+    ``floor * peak`` along 1 - sqrt (the cooldown of Hagele et al. 2024). Under WSD a run still in its constant phase
+    can be extended by raising ``total``, and any snapshot can be cooled down on its own."""
     if step < warmup:
         return peak * (step + 1) / warmup
+    if kind == "wsd":
+        d = int(decay_steps) if decay_steps else round(0.2 * total)
+        t = min(max(step - (total - d), 0) / max(1, d), 1.0)
+        return peak * (floor + (1 - floor) * (1 - math.sqrt(t)))
+    if kind != "cosine":
+        raise ValueError(f"optim.schedule must be cosine or wsd, not {kind!r}")
     t = (step - warmup) / max(1, total - warmup)
     return peak * (floor + (1 - floor) * 0.5 * (1 + math.cos(math.pi * min(t, 1.0))))
 

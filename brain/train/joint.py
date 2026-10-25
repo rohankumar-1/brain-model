@@ -43,10 +43,16 @@ from brain.train.lejepa3d import build_encoder, forever_loader, loss_kwargs, met
 
 
 def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
-    """(w_ssl, w_task) at ``step``: SSL alone, then the task weight ramps in (cosine) while SSL tapers to the floor."""
+    """(w_ssl, w_task) at ``step``: SSL alone, then the task weight ramps in (cosine) while SSL tapers to the floor.
+    Phases are fractions of ``max_steps`` unless given in steps (``warmup_steps`` etc.)."""
     t = step / max(max_steps, 1)
-    warm, ramp = float(j.get("warmup_frac", 0.25)), float(j.get("task_ramp_frac", 0.15))
-    taper_end, floor = float(j.get("taper_end_frac", 0.6)), float(j.get("ssl_floor", 0.5))
+
+    def at(name: str, frac: float) -> float:
+        return float(j[f"{name}_steps"]) / max(max_steps, 1) if j.get(f"{name}_steps") is not None \
+            else float(j.get(f"{name}_frac", frac))
+
+    warm, ramp, taper_end = at("warmup", 0.25), at("task_ramp", 0.15), at("taper_end", 0.6)
+    floor = float(j.get("ssl_floor", 0.5))
 
     def smooth(x: float) -> float:
         x = min(max(x, 0.0), 1.0)
@@ -55,6 +61,29 @@ def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
     w_task = smooth((t - warm) / max(ramp, 1e-6)) if t >= warm else 0.0
     w_ssl = 1.0 - (1.0 - floor) * smooth((t - warm) / max(taper_end - warm, 1e-6)) if t >= warm else 1.0
     return w_ssl, w_task
+
+
+# encoder settings that are not in the weights (RoPE frequencies are rebuilt from them) or that change what the weights
+# mean; a warm start must match its source on all of them
+ARCH_KEYS = ("size", "rope_base_mm", "rope_min_period_mm", "qk_norm", "n_cls", "n_registers", "proj_dim", "proj_hidden",
+             "dense_dim", "dense_hidden", "proj_norm")
+
+
+def init_encoder(enc: nn.Module, cfg: dict, src_path) -> None:
+    """Load an SSL checkpoint's whole view network (encoder, projector, token head, predictor) into ``enc``, after
+    checking that this run builds the same architecture and token gate as the source."""
+    src = torch.load(src_path, map_location="cpu", weights_only=False)
+    sm, sv = (src.get("config") or {}).get("model") or {}, (src.get("config") or {}).get("views") or {}
+    m, v = cfg["model"], cfg["views"]
+    bad = [f"model.{k}: run {m.get(k)!r} vs source {sm.get(k)!r}" for k in ARCH_KEYS if m.get(k) != sm.get(k)]
+    if list(v["patch_xyz"]) != list(sv.get("patch_xyz", [])):
+        bad.append(f"views.patch_xyz: run {v['patch_xyz']} vs source {sv.get('patch_xyz')}")
+    gate, sgate = dict(v.get("gate") or {}), dict(sv.get("gate") or {})
+    if gate.get("mode", "center") != sgate.get("mode", "center"):
+        bad.append(f"views.gate.mode: run {gate.get('mode', 'center')} vs source {sgate.get('mode', 'center')}")
+    if bad:
+        raise SystemExit("[init] this run's encoder differs from its init_from source:\n  " + "\n  ".join(bad))
+    enc.load_state_dict(src["model"])
 
 
 class JointNet(nn.Module):
@@ -95,8 +124,11 @@ class Trainer(engine.Trainer):
         # the multitask branch gates and windows with the encoder's gate (e.g. mode: max)
         m["gate"] = dict(cfg["views"].get("gate") or {})
 
-        # encoder (from scratch), SSL view network, multitask model on the same encoder
+        # encoder (from scratch, or warm from an SSL checkpoint), SSL view network, multitask model on the same encoder
         enc = build_encoder(cfg, dev)
+        if m.get("init_from") and ckpt is None and not synthetic:
+            init_encoder(enc, cfg, resolve(m["init_from"]))
+            rt.log(f"[init] encoder, projector and predictor from {m['init_from']}")
         pcfg = lc.get("predict") or {}
         dense_on = self.lk["dense_weight"] > 0
         predict_on = dense_on and self.lk["predict_weight"] > 0

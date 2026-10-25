@@ -111,3 +111,14 @@ def test_is_new_best_maximises_the_validation_score_without_a_loss_fallback():
     assert is_new_best({"score": 0.4}, "score", 0.5) is None
     assert is_new_best({"score": 0.1}, "score", float("-inf")) == 0.1
     assert is_new_best({"loss": 0.1}, "score", 0.5) is None          # a loss never stands in for the score
+
+
+def test_wsd_holds_the_peak_then_decays_to_the_floor_so_a_run_can_be_extended():
+    peak = 1.0
+    assert lr_at(0, 100, peak, 10, kind="wsd") == peak / 10
+    assert lr_at(10, 100, peak, 10, kind="wsd") == peak == lr_at(79, 100, peak, 10, kind="wsd")   # last 20% decays
+    assert lr_at(90, 100, peak, 10, kind="wsd") < lr_at(81, 100, peak, 10, kind="wsd") < peak
+    assert abs(lr_at(100, 100, peak, 10, floor=0.01, kind="wsd") - 0.01) < 1e-12
+    # extending a run that is still constant changes nothing up to the old decay start
+    assert all(lr_at(s, 100, peak, 10, kind="wsd") == lr_at(s, 200, peak, 10, kind="wsd") for s in range(80))
+    assert lr_at(95, 100, peak, 10, kind="wsd", decay_steps=10) < peak == lr_at(89, 100, peak, 10, kind="wsd", decay_steps=10)
