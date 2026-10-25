@@ -2,10 +2,10 @@
 # SSL pretraining, any method, one L40S. Resumes from <out_dir>/last.pt and requeues on SIGTERM.
 #
 #   sbatch --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/tiny.yaml jobs/train.sbatch
-#   sbatch --export=ALL,METHOD=dino2d jobs/train.sbatch                    # CONFIG defaults to configs/<METHOD>/<tiny|small>.yaml
-#   sbatch --export=ALL,METHOD=lejepa2d,EXTRA_ARGS="--set optim.lr=3e-4" jobs/train.sbatch
+#   sbatch --export=ALL,METHOD=lejepa3d jobs/train.sbatch                  # CONFIG defaults to configs/<METHOD>/tiny.yaml
+#   sbatch --export=ALL,METHOD=lejepa3d,EXTRA_ARGS="--set optim.lr=3e-4" jobs/train.sbatch
 #   jobs/train_pi.sbatch (2 GPUs) and jobs/train_pi4.sbatch (4 GPUs) take the same variables.
-# METHOD: lejepa2d | dino2d | lejepa3d. NO_RESUME=1 starts fresh. EXPECT_GPUS aborts if the allocation differs.
+# METHOD: lejepa3d | mae3d | multitask | joint. NO_RESUME=1 starts fresh. EXPECT_GPUS aborts if the allocation differs.
 
 #SBATCH -p mit_normal_gpu
 #SBATCH --job-name=train
@@ -24,7 +24,7 @@ set -uo pipefail
 source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 
 METHOD="${METHOD:-lejepa3d}"
-case "$METHOD" in dino2d) DEFAULT_CFG=small ;; *) DEFAULT_CFG=tiny ;; esac
+DEFAULT_CFG=tiny
 CONFIG="${CONFIG:-configs/${METHOD}/${DEFAULT_CFG}.yaml}"
 NGPU="${SLURM_GPUS_ON_NODE:-1}"
 if [ -n "${EXPECT_GPUS:-}" ] && [ "$NGPU" -ne "$EXPECT_GPUS" ]; then

@@ -11,52 +11,10 @@ from typing import Any
 from brain.common.grid import GRID_XYZ
 
 METHODS = {
-    "lejepa2d": "brain.train.lejepa2d",
-    "dino2d": "brain.train.dino2d",
     "lejepa3d": "brain.train.lejepa3d",
     "mae3d": "brain.train.mae3d",
     "multitask": "brain.train.multitask",
     "joint": "brain.train.joint",
-}
-
-_TRAIN_2D = {
-    "max_steps": 60000, "log_every": 100, "eval_every": 2000, "eval_batches": 8,
-    "ckpt_every": 1000, "keep_every": 10000, "stop_poll": 20, "best_metric": "loss",
-}
-_DATA_2D = {
-    "slices_root": "data/processed/slices_zarr", "slices_per_read": 2, "balance_alpha": 0.5,
-    "priority_beta": 0.0, "priority_clip": 3.0,
-}
-_VIEWS_2D = {"window": {"mode": "random", "mix": "v4", "inv_weight": 0.0, "seq_weight": 0.0}}
-
-LEJEPA2D: dict[str, Any] = {
-    "seed": 42,
-    "data": _DATA_2D,
-    "model": {"size": "tiny", "img_size": 256, "patch_size": 16, "proj_dim": 128, "proj_hidden": 2048,
-              "registers": 4, "qk_norm": True},
-    "views": _VIEWS_2D,
-    "optim": {"lr": 5.0e-4, "weight_decay": 0.05, "warmup_steps": 2000, "clip_grad": 1.0, "batch_size": 384,
-              "compile": True, "num_workers": 7, "prefetch_factor": 2,
-              "lamb": 0.02, "n_global": 2, "n_local": 6, "global_area": [0.4, 1.0],
-              "local_area": [0.05, 0.4], "local_size": 96, "max_rot": 10.0},
-    "train": dict(_TRAIN_2D),
-    "output": {"out_dir": "runs/lejepa2d", "resume_from": None},
-}
-
-DINO2D: dict[str, Any] = {
-    "seed": 42,
-    "data": _DATA_2D,
-    "model": {"size": "small", "img_size": 256, "patch_size": 16, "proj_dim": 128, "proj_hidden": 2048,
-              "registers": 4, "qk_norm": True, "proto_dim": 65536, "head_hidden": 2048, "head_bottleneck": 256},
-    "loss": {"student_temp": 0.1, "teacher_temp": 0.04, "ema": 0.994, "ibot_weight": 1.0, "koleo_weight": 0.1,
-             "mask_prob": 0.5, "mask_ratio": [0.1, 0.5], "center_momentum": 0.9},
-    "views": {"window": {"mode": "random", "mix": "v4"}},
-    "optim": {"lr": 1.0e-4, "weight_decay": 0.04, "warmup_steps": 2000, "clip_grad": 3.0, "layer_decay": 0.9,
-              "batch_size": 64, "compile": False, "num_workers": 7, "prefetch_factor": 2,
-              "n_global": 2, "n_local": 8, "global_area": [0.32, 1.0], "local_area": [0.05, 0.32],
-              "local_size": 112, "max_rot": 10.0},
-    "train": {**_TRAIN_2D, "max_steps": 40000, "log_every": 50},
-    "output": {"out_dir": "runs/dino2d", "resume_from": None},
 }
 
 LEJEPA3D: dict[str, Any] = {
@@ -225,7 +183,7 @@ def _joint_defaults() -> dict[str, Any]:
 
 JOINT: dict[str, Any] = _joint_defaults()
 
-_DEFAULTS = {"lejepa2d": LEJEPA2D, "dino2d": DINO2D, "lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK,
+_DEFAULTS = {"lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK,
              "joint": JOINT}
 
 

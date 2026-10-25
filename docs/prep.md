@@ -73,8 +73,8 @@ PART=brats SHARD_N=4 REG_BACKEND=torch MASK_BATCH=4 EXTRA_ARGS="--require-attr r
 
 Manifest rows carry `written_at`; when a case appears in several manifests the index keeps the newest row (rows from
 before timestamps prefer the one with a stored transform). After all prep: `jobs/index_v6.sbatch` (CPU, minutes:
-`--no-slices` skips the 2D slice table, which only the 2D trainers read), `jobs/store_cleanup_v6.sbatch` (drops
-non-format-6 zips, old manifests, index backups and retired folders) and `jobs/verify_v6.sbatch`, which checks every
+`--no-slices` skips the 2D slice table; the 2D trainers that read it were removed on 2026-10-24), `jobs/archive/store_cleanup_v6.sbatch` (drops
+non-format-6 zips, old manifests, index backups and retired folders) and `jobs/archive/verify_v6.sbatch`, which checks every
 indexed volume (format 6, stored transform, brain array, label masks) and writes `excluded.csv` (cases whose latest
 manifest row is flagged or errored). Raw archives are packed last (`jobs/archive/rawpack_pool.sbatch`), because phase B reads
 raw data from pool.
@@ -124,7 +124,7 @@ Single volumes are dropped by CSVs in `labels/pool_drop/` (columns `volume_id, r
 
 ### Hemorrhage segmentation cohorts (BHSD, HemSeg-500)
 
-Both are RSNA ICH studies with voxel masks (`jobs/prep_bhsd.sbatch`, `jobs/prep_hemseg.sbatch`). BHSD (190 studies):
+Both are RSNA ICH studies with voxel masks (`jobs/archive/prep_bhsd.sbatch`, `jobs/archive/prep_hemseg.sbatch`). BHSD (190 studies):
 codes 1 EDH, 2 IPH, 3 IVH, 4 SAH, 5 SDH, matching RSNA's labels on 92-97% of studies; kept out of SSL (`bhsd`
 column) but its masks train the multitask model. HemSeg-500 (518 studies): images rebuilt from exactly the DICOM
 members the authors listed, so the masks line up; each study is IPH-only or IVH-only, so each binary mask is the

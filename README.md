@@ -5,10 +5,9 @@ Modality-agnostic embeddings for brain CT and MRI. One package, `brain/`, holds 
 | Method | Command | What it is |
 |---|---|---|
 | `lejepa3d` | `python -m brain.train lejepa3d` | **Project model.** 3D LeJEPA on native-grid crops with a dense token objective, RoPE in mm, optional masked-block prediction. `docs/lejepa3d.md` |
-| `lejepa2d` | `python -m brain.train lejepa2d` | 2D LeJEPA ViT on slices (crop matching + SIGReg); the slice-level reference. |
-| `dino2d` | `python -m brain.train dino2d` | **BrainDINO comparison**: DINOv2 + iBOT + KoLeo, the MRI-only foundation-model recipe, on the same slice store. |
 | `mae3d` | `python -m brain.train mae3d` | 3D MAE, Primus-style ViT on 8 x 8 x 4 mm tokens (split voxel target, lesion-aware masking). |
 | `multitask` | `python -m brain.train multitask` | Task-conditioned multitask post-training of an SSL encoder on whole volumes. `docs/multitask.md` |
+| `joint` | `python -m brain.train joint` | Joint SSL + multitask training of one encoder from scratch, with an SSL -> task curriculum. `brain/train/joint.py` |
 
 ## Layout
 
@@ -18,9 +17,9 @@ brain/
                checkpoint (atomic save, resume), windowing (asinh windows), paths
   prep/        read -> center -> register -> resample -> native units -> brain mask; index; QC; pilot;
                SynthSeg-robust 2.0 (PyTorch port) + runner for anatomy labels
-  data/        volume + slab datasets, crops (2D/3D), appearance augmentation, token gate
-  models/      vit2d, vit3d, viewnet3d, braindino (DINO head), projector, patch_embed, rope3d
-  objectives/  sigreg (+ batch gather), lejepa3d, dense, dino
+  data/        volume datasets, crops (3D; 2D for the UNETR readout), appearance augmentation, token gate
+  models/      vit3d, viewnet3d, mae3d, projector, patch_embed, rope3d, conv3d; vit2d (2D evaluation only)
+  objectives/  sigreg (+ batch gather), lejepa3d, dense
   train/       engine (CLI, loop, resume, checkpoints), defaults, one Trainer per method
   multitask/   task registry, label builder (incl. registration / SynthSeg QC), data, model, losses, few-shot
   downstream/  frozen-encoder tasks, heads, probes, segmentation, results views
@@ -80,7 +79,7 @@ Each volume is read, centered, **affinely registered to a skull-on T1 template**
 python -m brain.train lejepa3d --synthetic --max-steps 8                      # CPU smoke run, no data
 python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml
 sbatch --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/small.yaml jobs/train_pi.sbatch   # 2 GPUs
-sbatch --export=ALL,METHOD=dino2d jobs/train_pi.sbatch
+sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/small.yaml jobs/train_pi4.sbatch
 python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml --set optim.lr=3e-4 --set aug.curve.p=0
 ```
 

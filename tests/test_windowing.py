@@ -5,7 +5,6 @@ from __future__ import annotations
 import torch
 
 from brain.common.windowing import WINDOW_MIXES, asinh_window, floors, foreground_mask, sample_windows
-from brain.data.slabs import brats_contrast, swap_brats_contrast
 from brain.data.crops2d import same_crop_seq_pair, same_crop_window_pair, warp_floor
 from brain.objectives.sigreg import pairwise_cosine, prediction_loss
 
@@ -88,13 +87,6 @@ def test_window_pair_loss_is_zero_when_views_match():
     z[1] = z[0]
     assert prediction_loss(z).item() < 1e-6
     assert pairwise_cosine(z).item() > 0.999
-
-
-def test_brats_path_rewrite_skips_non_brats():
-    src = "/store/brats2023_gli/BraTS-GLI-00000-000-t1n.zip"
-    assert brats_contrast(src) == "t1n"
-    assert swap_brats_contrast(src, "t2f").endswith("BraTS-GLI-00000-000-t2f.zip")
-    assert brats_contrast("/store/rsna_ich/1.2.3.zip") is None
 
 
 def test_same_crop_seq_pair_shares_geometry():

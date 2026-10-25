@@ -102,5 +102,5 @@ def test_build_config_layers_defaults_file_and_overrides():
     assert cfg["aug"]["bias"]["p"] > 0                     # untouched defaults survive
     smoke = build_config(parse_args(["lejepa3d", "--synthetic"]))
     assert smoke["data"]["volume_size_xyz"] == [32, 32, 16]
-    for method in ("lejepa2d", "dino2d"):
+    for method in ("mae3d", "multitask", "joint"):
         assert build_config(parse_args([method]))["optim"]["batch_size"] > 0

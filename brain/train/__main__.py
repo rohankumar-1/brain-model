@@ -1,4 +1,4 @@
-"""``python -m brain.train <lejepa2d|dino2d|lejepa3d> [--config cfg.yaml]``."""
+"""``python -m brain.train <lejepa3d|mae3d|multitask|joint> [--config cfg.yaml]``."""
 
 from brain.train.engine import run
 

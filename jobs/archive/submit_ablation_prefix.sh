@@ -21,7 +21,7 @@ for arm in $ARMS; do
     else
       dep=(); [[ -n "${AFTER:-}" ]] && dep=(--dependency="afterok:${AFTER}")
       train_id=$(sbatch --parsable --kill-on-invalid-dep=no "${dep[@]}" -t 2-00:00:00 --job-name="abl-${arm}-s${seed}" \
-        --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/ablate_prefix/${arm}.yaml,EXTRA_ARGS="--set seed=${seed} --set output.out_dir=${out}" \
+        --export=ALL,METHOD=lejepa3d,CONFIG=configs/archive/lejepa3d/ablate_prefix/${arm}.yaml,EXTRA_ARGS="--set seed=${seed} --set output.out_dir=${out}" \
         jobs/train_pi.sbatch)
     fi
     launch=$(sbatch --parsable --kill-on-invalid-dep=no -p mit_normal -c 1 --mem=2G -t 00:10:00 --dependency="afterok:${train_id}" \
