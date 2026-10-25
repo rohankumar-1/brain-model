@@ -16,6 +16,7 @@ METHODS = {
     "lejepa3d": "brain.train.lejepa3d",
     "mae3d": "brain.train.mae3d",
     "multitask": "brain.train.multitask",
+    "joint": "brain.train.joint",
 }
 
 _TRAIN_2D = {
@@ -166,7 +167,7 @@ def _multitask_defaults() -> dict[str, Any]:
                  "labels_dir": "data/processed/slices_zarr/labels/multitask", "registry": None,
                  "volume_size_xyz": list(GRID_XYZ), "default_spacing_mm": [1.0, 1.0, 1.0],
                  "num_workers": 10, "balance_alpha": 0.5, "balance_groups": None,
-                 "val_per_task": 24, "val_max_seg": 4},
+                 "val_per_task": 64, "val_max_seg": 4},
         "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
                   "slot": {"dim": 256, "layers": 3, "heads": 8, "width": None, "mode": "slots",
                            "cross_task": True, "embedding": "learned"},
@@ -175,7 +176,8 @@ def _multitask_defaults() -> dict[str, Any]:
                   "general": {"enabled": False, "proj_dim": 128}},
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5}},
         # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
-        "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None},
+        "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None,
+                  "ids": None},
         "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0},
                 # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
                 "appearance": {"bias": {"p": 0.0, "amp": 0.2}, "through_plane": {"p": 0.0, "fwhm_vox": [2.0, 6.0]},
@@ -198,7 +200,33 @@ def _multitask_defaults() -> dict[str, Any]:
 
 MULTITASK: dict[str, Any] = _multitask_defaults()
 
-_DEFAULTS = {"lejepa2d": LEJEPA2D, "dino2d": DINO2D, "lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK}
+def _merge(a: dict, b: dict) -> dict:
+    """Deep merge, ``b`` over ``a``."""
+    out = deepcopy(a)
+    for k, v in b.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else deepcopy(v)
+    return out
+
+
+def _joint_defaults() -> dict[str, Any]:
+    """Joint SSL + multitask training from scratch (brain.train.joint): the 3D LeJEPA config plus the multitask
+    sections (their keys do not collide: LeJEPA ``aug`` / ``loss`` / ``model`` keys and the multitask ones are disjoint),
+    the encoder fixes as options and the curriculum under ``joint``."""
+    c = _merge(MULTITASK, LEJEPA3D)
+    c["model"].update(init_from=None, n_cls=1,
+                      # RoPE frequencies from a 32 mm shortest period (None: the original 6.3 mm, ~38% aliased pairs)
+                      rope_min_period_mm=None)
+    c["views"].setdefault("gate", {}).update(mode="center")        # "max": any voxel of the patch counts
+    c["joint"] = {"ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
+                  "task_batch_size": 4, "task_workers": 6, "normalize": True}
+    c["output"]["out_dir"] = "runs/joint"
+    return c
+
+
+JOINT: dict[str, Any] = _joint_defaults()
+
+_DEFAULTS = {"lejepa2d": LEJEPA2D, "dino2d": DINO2D, "lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK,
+             "joint": JOINT}
 
 
 def default_config(method: str) -> dict[str, Any]:

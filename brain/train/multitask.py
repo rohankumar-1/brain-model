@@ -15,8 +15,8 @@ import torch
 
 from brain.common.optim import NO_DECAY_SUFFIXES
 from brain.common.paths import resolve
-from brain.multitask.data import (MultitaskDataset, SyntheticMultitask, collate, load_labels, make_loader, prepare,
-                                  ssl_view)
+from brain.multitask.data import (MultitaskDataset, SyntheticMultitask, collate, load_labels, make_loader,
+                                  pick_val_volumes, prepare, ssl_view)
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
 from brain.multitask.model import MultitaskModel
@@ -89,9 +89,9 @@ class Trainer(engine.Trainer):
         self.stride = int(cfg["loss"].get("seg_stride", 2))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
         self.reg = load_registry(d.get("registry"))
-        # trained tasks, optionally restricted to some groups (``tasks.groups``: e.g. the no-human-label control)
-        only = tk.get("groups")
-        self.train_ids = [t.id for t in self.reg.trained if not only or t.group in set(only)]
+        # ``tasks.groups`` / ``tasks.ids`` restrict training (the no-label control; single-task models)
+        only, ids = tk.get("groups"), tk.get("ids")
+        self.train_ids = [t.id for t in self.reg.trained if (not only or t.group in set(only)) and (not ids or t.id in set(ids))]
         if not self.train_ids:
             raise SystemExit(f"tasks.groups {only} selects no trained task (groups: {self.reg.groups})")
         enc = build_encoder(cfg, dev, args.synthetic)
@@ -149,11 +149,8 @@ class Trainer(engine.Trainer):
                                       balance_groups=d.get("balance_groups"), distributed=rt.world > 1)
             self.val_loader = None
             if rt.main:
-                val = labels[(labels["split"] == "val") & (labels["use"] == "train")
-                             & labels["task"].isin(self.train_ids)]
-                # a fixed set: up to val_per_task volumes per task (deterministic), each asked all its tasks
-                pick = (val.sort_values("volume_id").groupby("task").head(int(d.get("val_per_task", 24)))
-                        ["volume_id"].unique().tolist())
+                # fixed, cohort-stratified validation scans (pick_val_volumes), each asked all its tasks
+                pick = pick_val_volumes(labels, volumes, self.reg, self.train_ids, int(d.get("val_per_task", 64)))
                 vds = MultitaskDataset(store, labels, volumes, self.reg, self.stats, split="val", train=False,
                                        tasks=self.train_ids, k_max=64, max_seg=int(d.get("val_max_seg", 4)),
                                        volume_ids=pick)

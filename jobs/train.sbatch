@@ -31,6 +31,9 @@ if [ -n "${EXPECT_GPUS:-}" ] && [ "$NGPU" -ne "$EXPECT_GPUS" ]; then
   echo "[abort] allocated ${NGPU} GPUs, expected ${EXPECT_GPUS}"
   exit 3
 fi
+# Variable-shape batches (whole volumes, extra views, segmentation slots) fragment the CUDA cache; without this a
+# batch that fits can still OOM with GBs "reserved but unallocated" (multitask run 3, first attempt).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export REQUEUE_FLAG="logs/.requeue_${SLURM_JOB_ID}"
 export STOP_FILE="logs/.stop_${SLURM_JOB_ID}"
 rm -f "$REQUEUE_FLAG" "$STOP_FILE"

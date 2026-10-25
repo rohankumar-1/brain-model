@@ -46,6 +46,7 @@ def token_gate(cropped_xyz: torch.Tensor, modality: str, patch_xyz: tuple[int, i
     keep = token_keep(
         cropped_xyz.view(1, 1, *cropped_xyz.shape), mod, patch_xyz,
         ct_hu=tuple(gate.get("ct_hu", DEFAULT_GATE["ct_hu"])), mri_lo=float(gate.get("mri_lo", DEFAULT_GATE["mri_lo"])),
+        mode=str(gate.get("mode", "center")),
     )
     return keep[0].reshape(-1)
 
@@ -319,6 +320,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         dense_hidden=int(m.get("dense_hidden", 512)),
         n_cls=int(m.get("n_cls", 0)), n_registers=int(m.get("n_registers", 0)),
         mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"),
+        rope_min_period_mm=m.get("rope_min_period_mm"),
     ).to(device)
     if pretrained:
         net.load_state_dict(state)

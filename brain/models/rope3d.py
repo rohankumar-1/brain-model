@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -22,20 +24,26 @@ def apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch
 
 
 class RoPE3D(nn.Module):
-    """Rotary PE on (x, y, z) mm. Head-dim pairs are split across the three axes."""
+    """Rotary PE on (x, y, z) mm. Head-dim pairs are split across the three axes.
 
-    def __init__(self, head_dim: int, base_mm: float = 100.0):
+    Frequencies per axis are ``f_max * base_mm ** -k`` for k in [0, 1). The original ``f_max`` is 1 rad/mm (shortest
+    period 6.3 mm): with 16 mm tokens ~38% of the pairs then rotate faster than the token grid can resolve and carry
+    aliased noise. ``min_period_mm`` sets ``f_max = 2 pi / min_period_mm`` instead (e.g. 32 mm, twice the token
+    spacing); None keeps the original frequencies (checkpoints trained with them)."""
+
+    def __init__(self, head_dim: int, base_mm: float = 100.0, min_period_mm: float | None = None):
         super().__init__()
         if head_dim % 2:
             raise ValueError(f"head_dim must be even, got {head_dim}")
         self.head_dim = int(head_dim)
         self.base_mm = float(base_mm)
         self.n_pairs = _pairs_per_axis(self.head_dim)
+        f_max = 1.0 if min_period_mm is None else 2.0 * math.pi / float(min_period_mm)
         for name, n in zip("xyz", self.n_pairs):
             if n == 0:
                 continue
             k = torch.arange(n, dtype=torch.float32) / max(n, 1)
-            self.register_buffer(f"freq_{name}", 1.0 / (self.base_mm ** k), persistent=False)
+            self.register_buffer(f"freq_{name}", f_max / (self.base_mm ** k), persistent=False)
 
     def cos_sin(self, coords_mm: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``coords_mm`` is (B, N, 3). Returns cos, sin each (B, 1, N, head_dim)."""

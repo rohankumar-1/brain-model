@@ -226,6 +226,7 @@ class BrainEncoder(nn.Module):
         mlp: str = "gelu",
         layer_scale: float | None = None,
         drop_path: float = 0.0,
+        rope_min_period_mm: float | None = None,
     ):
         super().__init__()
         if size not in VIT_SIZES:
@@ -236,7 +237,7 @@ class BrainEncoder(nn.Module):
         self.patch_xyz = tuple(int(v) for v in patch_xyz)
         self.checkpoint_blocks = bool(checkpoint_blocks)
         head_dim = dim // heads
-        self.rope = RoPE3D(head_dim, base_mm=rope_base_mm)
+        self.rope = RoPE3D(head_dim, base_mm=rope_base_mm, min_period_mm=rope_min_period_mm)
         self.patch_embed = PatchEmbed3D(in_chans, dim, self.patch_xyz)
         self.scale_embed = ScaleEmbed(dim)
         # stochastic depth rises linearly with depth, as in DeiT / Primus

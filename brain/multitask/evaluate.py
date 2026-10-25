@@ -25,7 +25,9 @@ def dice(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp: dict) -> dict[str, float]:
+def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp: dict, return_preds: bool = False):
+    """Per-task metrics over ``loader`` (the model's own heads). ``return_preds`` also returns the (target, output)
+    rows per task index, in loader order (paired comparisons across checkpoints)."""
     was = model.training
     model.eval()
     preds: dict[int, list] = defaultdict(list)
@@ -74,4 +76,4 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             res[f"{task.id}_dice"] = float(p.mean())
     per_task = [np.mean(v) for v in losses.values() if v]
     res["loss"] = float(np.mean(per_task)) if per_task else float("nan")
-    return res
+    return (res, dict(preds)) if return_preds else res

@@ -1,0 +1,60 @@
+# Single-task (or single-family) model: the multitask recipe restricted to one task, fully fine-tuned from v3 SSL.
+# A per-task ceiling for the multitask model on the same splits, and a teacher for weak labels later.
+#   sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/single_task.yaml,\
+#     EXTRA_ARGS="--set tasks.ids=[age] --out-dir runs/single/age" jobs/train_pi.sbatch
+#   (a task family: --set tasks.groups=[hemorrhage])
+seed: 42
+
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask
+  num_workers: 10
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+
+model:
+  init_from: runs/v3/cls_s42/best.pt      # step 18000
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, width: null, mode: slots, cross_task: true, embedding: learned}
+  seg: {widths: [128, 64, 32, 16]}
+
+tasks: {k_max: 8, p_all: 0.2, rare_beta: 0.5, max_seg: 2}
+
+aug:
+  flip_lr: 0.5
+  affine: {p: 0.8, rot_deg: [8, 8, 12], shift_mm: 8.0}
+  appearance:
+    bias: {p: 0.3, amp: 0.2}                      # MRI only; mild, as intensity asymmetry is a target
+    through_plane: {p: 0.3, fwhm_vox: [2.0, 6.0]}
+    noise: {p: 0.5, kind: rician, snr: [15, 100], sigma: [0.02, 0.1]}   # Rician on MRI, Gaussian on CT
+    blur: {p: 0.2, sigma_vox: [0.5, 1.0]}
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut: {p: 0.2, mm: [10, 40]}
+
+loss: {balance: ema, ema_decay: 0.99, seg_stride: 2}
+
+optim:
+  lr: 3.0e-4
+  enc_lr_mult: 1.0         # full fine-tuning (multitask runs: 0.1)
+  layer_decay: 0.75
+  weight_decay: 0.05
+  warmup_steps: 1000
+  freeze_steps: 500
+  clip_grad: 1.0
+  batch_size: 8            # whole volumes per GPU (fits with expandable_segments: the 43 GiB test peak was fragmentation)
+
+train:
+  max_steps: 10000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 5000
+  best_metric: loss
+
+output:
+  out_dir: runs/single/unnamed

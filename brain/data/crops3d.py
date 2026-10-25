@@ -292,7 +292,8 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
     origin_mm = batch["origin_mm"].detach().float().cpu()
     v = cfg["views"]
     gate = v.get("gate") or {}
-    gate = dict(ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))), mri_lo=float(gate.get("mri_lo", -5.5)))
+    gate = dict(ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))), mri_lo=float(gate.get("mri_lo", -5.5)),
+                mode=str(gate.get("mode", "center")))
     patch = tuple(int(p) for p in v["patch_xyz"])
     b, _, nz, ny, nx = volume.shape
     xyz = volume.permute(0, 1, 4, 3, 2)

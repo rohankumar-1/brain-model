@@ -25,7 +25,7 @@ RED_WHITE_GREEN = LinearSegmentedColormap.from_list("red_white_green", ["#c62828
 # Models post-trained with labels (brain.multitask) have seen some suite tasks. "labels": the task's own labels
 # (train-split subjects) were trained on; "task": the same target was trained on other cohorts (age, hemorrhage,
 # tumour), so the frozen features were shaped for it. Neither is a clean transfer number.
-SUPERVISED_PREFIXES = ("mt_",)
+SUPERVISED_PREFIXES = ("mt_", "v4general", "v5enclr", "v6nogenunc")   # multitask runs (brain.multitask); later runs: add their name
 SEEN_LABELS = frozenset({"rsna_ich", "brats2023_gli", "brats2023_men", "brats2024_gli", "brats2023_ped",
                          "oasis1_mmse", "oasis2_mmse", "abide_ados", "gli_survival_12m", "gli_lgg", "gli_idh"})
 SEEN_TASK = frozenset({"cq500", "seg_cq500", "instance", "msd", "oasis1_age", "ixi_age", "pixar_age", "piop1_age",

@@ -244,7 +244,8 @@ def augment_theta(b: int, shape_zyx, aug: dict, device) -> torch.Tensor | None:
 def foreground_tokens(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None) -> torch.Tensor:
     """Foreground token mask (B, N) of native-unit volumes ``raw`` (B, 1, Z, Y, X)."""
     gate = gate or {}
-    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
+    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, mode=str(gate.get("mode", "center")),
+                      ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))),
                       mri_lo=float(gate.get("mri_lo", -5.5))).reshape(raw.shape[0], -1)   # gate works on (B,1,X,Y,Z)
 
 
@@ -347,6 +348,33 @@ def ssl_view(batch: dict, rows: torch.Tensor, cfg: dict, device, patch_xyz) -> t
     raw = torch.where(inside, raw, bg)
     keep = foreground_tokens(raw, mod, patch_xyz, (cfg.get("model") or {}).get("gate"))
     return canonical_window(raw, mod), keep
+
+
+def pick_val_volumes(labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry, task_ids: list[str],
+                     n: int) -> list[str]:
+    """The fixed training-time validation set: up to ``n`` split-``val`` scans per task, each later asked all its tasks.
+
+    Scans are ordered by a stable hash of their id (ids start with the dataset name, so sorting by id took a single
+    cohort per task) and taken round-robin across dataset families; binary tasks get up to n/2 positives so both
+    classes are present (epidural hemorrhage: 2% positives). Tasks sharing scans pick the same ones first, which keeps
+    the union small (64 per task -> ~800 scans for the 65 trained tasks)."""
+    import hashlib
+
+    types = {t.id: t.type for t in reg.tasks}
+    val = labels[(labels["split"] == "val") & (labels["use"] == "train") & labels["task"].isin(task_ids)]
+    val = val.merge(volumes[["volume_id", "dataset_family"]], on="volume_id", how="left")
+    val = val.assign(h=val["volume_id"].map(lambda s: int(hashlib.md5(str(s).encode()).hexdigest()[:8], 16)))
+    picks = []
+    for t, g in val.groupby("task"):
+        g = g.sort_values("h")
+        if types.get(t) == "binary":
+            pos, neg = g[g["value"] == 1], g[g["value"] == 0]
+            k = min(len(pos), n // 2)
+            g = pd.concat([pos.head(k), neg.head(n - k)])
+        else:
+            g = g.assign(r=g.groupby("dataset_family").cumcount()).sort_values(["r", "h"]).head(n)
+        picks.append(g["volume_id"])
+    return pd.concat(picks).unique().tolist() if picks else []
 
 
 def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:

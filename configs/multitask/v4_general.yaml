@@ -10,7 +10,7 @@
 #   - appearance augmentation (bias field, through-plane blur, Rician / Gaussian noise, blur, drift; canonical window)
 #     and field-of-view cuts against cohort shortcuts;
 #   - a gentler encoder (0.1 x the head LR, was 0.25): run 1 lost unseen-lesion segmentation (ATLAS 0.32 -> 0.25).
-#   sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/v4_general.yaml jobs/train_pi.sbatch
+#   sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/v4_general.yaml jobs/train_pi4.sbatch
 seed: 42
 
 data:
@@ -59,14 +59,14 @@ optim:
   warmup_steps: 1000
   freeze_steps: 1000       # heads and slots only, then the encoder joins
   clip_grad: 1.0
-  batch_size: 8            # whole volumes per GPU (fits with expandable_segments: the 43 GiB test peak was fragmentation)
+  batch_size: 4            # per GPU, on 4 GPUs (train_pi4): global 16 as run 2's 2 x 8; 2 x 8 OOMed with the general views
 
 train:
   max_steps: 20000
   log_every: 50
   eval_every: 1000
   ckpt_every: 500
-  keep_every: 5000
+  keep_every: 1000         # dense snapshots for the task-embedding dynamics (brain.multitask.explain dynamics)
   best_metric: loss
 
 output:

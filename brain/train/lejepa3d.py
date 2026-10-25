@@ -37,6 +37,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         proj_hidden=m.get("proj_hidden"),
         qk_norm=bool(m.get("qk_norm", False)),
         rope_base_mm=float(m.get("rope_base_mm", 100.0)),
+        rope_min_period_mm=m.get("rope_min_period_mm"),
         checkpoint_blocks=bool(m.get("checkpoint", True)),
         proj_norm=str(m.get("proj_norm", "batch")),
         dense_dim=int(m.get("dense_dim", 0)) if dense else 0,
