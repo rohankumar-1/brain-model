@@ -104,3 +104,10 @@ def test_build_config_layers_defaults_file_and_overrides():
     assert smoke["data"]["volume_size_xyz"] == [32, 32, 16]
     for method in ("mae3d", "multitask", "joint"):
         assert build_config(parse_args([method]))["optim"]["batch_size"] > 0
+
+
+def test_is_new_best_maximises_the_validation_score_without_a_loss_fallback():
+    assert is_new_best({"score": 0.6}, "score", 0.5) == 0.6
+    assert is_new_best({"score": 0.4}, "score", 0.5) is None
+    assert is_new_best({"score": 0.1}, "score", float("-inf")) == 0.1
+    assert is_new_best({"loss": 0.1}, "score", 0.5) is None          # a loss never stands in for the score

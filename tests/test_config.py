@@ -51,7 +51,8 @@ def test_every_shipped_config_only_uses_known_keys():
             elif isinstance(v, dict) and isinstance(base[k], dict):
                 walk(base[k], v, path + [k])
 
-    files = sorted(f for f in (ROOT / "configs").glob("*/*.yaml") if f.name != "registry.yaml")   # task registry
+    files = sorted(f for f in (ROOT / "configs").glob("*/*.yaml")                    # not the task registry or the
+                   if f.name != "registry.yaml" and f.parent.name != "eval")         # eval report's task lists
     assert files
     for f in files:
         walk(d.default_config(f.parent.name), yaml.safe_load(f.read_text()), [f.name])

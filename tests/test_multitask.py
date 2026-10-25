@@ -247,3 +247,18 @@ def test_appearance_augmentation_keeps_the_foreground_gate():
     aug = prepare(raw, _cfg(flip_lr=0.0, affine={"p": 0.0}, appearance=app), CPU, (8, 8, 4), train=True)
     assert torch.equal(aug["keep"], plain["keep"]) and torch.isfinite(aug["x"]).all()
     assert not torch.allclose(aug["x"], plain["x"])
+
+
+def test_tasks_asked_alone_do_not_see_each_other_and_match_a_single_task_query():
+    cfg, model = _model()
+    b = _prepared(cfg)
+    task = b["task"]
+    with torch.no_grad():
+        alone = model(b["x"], b["keep"], task, NO_SEG, alone=True)
+        first = model(b["x"], b["keep"], task[:, :1], NO_SEG)                       # each volume's first task only
+        other = task.clone()
+        other[:, 1:] = -1                                                           # drop every other task
+        dropped = model(b["x"], b["keep"], other, NO_SEG, alone=True)
+    for head in ("binary", "regression"):
+        assert torch.allclose(alone[head][:, 0], first[head][:, 0], atol=1e-5)
+        assert torch.allclose(alone[head][:, 0], dropped[head][:, 0], atol=1e-5)

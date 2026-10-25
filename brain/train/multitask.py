@@ -88,9 +88,8 @@ class Trainer(engine.Trainer):
         self.stride = int(cfg["loss"].get("seg_stride", 2))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
         self.reg = load_registry(d.get("registry"))
-        # ``tasks.groups`` / ``tasks.ids`` restrict training (the no-label control; single-task models)
-        only, ids = tk.get("groups"), tk.get("ids")
-        self.train_ids = [t.id for t in self.reg.trained if (not only or t.group in set(only)) and (not ids or t.id in set(ids))]
+        # ``tasks.groups`` / ``tasks.ids`` restrict training (no-label control; single-task models), ``tasks.exclude`` drops tasks
+        self.train_ids = self.reg.train_ids(tk)
         if not self.train_ids:
             raise SystemExit(f"tasks.groups {only} selects no trained task (groups: {self.reg.groups})")
         enc = build_encoder(cfg, dev, args.synthetic)

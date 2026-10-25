@@ -42,7 +42,8 @@ def load_model(ckpt_path: Path, device: torch.device):
     reg = load_registry(cfg["data"].get("registry")).subset(list(ck["tasks"]))      # the checkpoint's task order
     enc = load_brain3d(ck, torch.device("cpu"), pretrained=False).model
     model = MultitaskModel(enc, reg, cfg["model"]).to(device)
-    model.load_state_dict(ck["multitask"])
+    # joint checkpoints also hold the SSL predictor, which the multitask model has no use for
+    model.load_state_dict({k: v for k, v in ck["multitask"].items() if not k.startswith("backbone.predictor.")})
     return model.eval().requires_grad_(False), reg, cfg
 
 

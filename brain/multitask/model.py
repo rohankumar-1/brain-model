@@ -236,6 +236,16 @@ class MultitaskModel(nn.Module):
             q = layer(q, slot_pad, kv, pad)
         return self.bottleneck(self.out_norm(q))
 
+    def slots_alone(self, enc: dict, task: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
+        """``slots`` with every task asked on its own (no slot attends to another), as at deployment; the scan is
+        encoded once and its keys/values shared by the per-task queries."""
+        if self.mode == "shared":
+            return self.slots(enc, task, keep)
+        b, k = task.shape
+        kv, pad = self._kv(enc, keep)
+        one = {"_kv": (kv.repeat_interleave(k, 0), pad.repeat_interleave(k, 0))}
+        return self.slots(one, task.reshape(b * k, 1), keep).reshape(b, k, -1)
+
     def heads(self, z: torch.Tensor, task: torch.Tensor) -> dict:
         t = task.clamp_min(0)
         logits = torch.einsum("bkd,bkcd->bkc", self.cls_query(z), self.cls_emb[t]) / math.sqrt(self.cls_emb.shape[-1])
@@ -244,10 +254,10 @@ class MultitaskModel(nn.Module):
                 "multiclass": logits.masked_fill(~valid, float("-inf")), "survival": self.survival(z)}
 
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
-                encoder_grad: bool = True) -> dict:
+                encoder_grad: bool = True, alone: bool = False) -> dict:
         with torch.set_grad_enabled(encoder_grad and torch.is_grad_enabled()):
             enc = self.encode(x, keep)
-        z = self.slots(enc, task, keep)
+        z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         out = self.heads(z, task)
         if self.has_general:
             out["general"] = self.general_proj(self.general(enc, keep))

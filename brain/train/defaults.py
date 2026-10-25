@@ -135,7 +135,7 @@ def _multitask_defaults() -> dict[str, Any]:
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5}},
         # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
         "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None,
-                  "ids": None},
+                  "ids": None, "exclude": None},
         "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0},
                 # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
                 "appearance": {"bias": {"p": 0.0, "amp": 0.2}, "through_plane": {"p": 0.0, "fwhm_vox": [2.0, 6.0]},
@@ -151,7 +151,7 @@ def _multitask_defaults() -> dict[str, Any]:
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
                   "warmup_steps": 1000, "freeze_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
-                  "keep_every": 5000, "stop_poll": 20, "best_metric": "loss"},
+                  "keep_every": 5000, "stop_poll": 20, "best_metric": "score"},   # validation skill (brain.eval.skill)
         "output": {"out_dir": "runs/multitask", "resume_from": None},
     }
 
@@ -177,6 +177,7 @@ def _joint_defaults() -> dict[str, Any]:
     c["views"].setdefault("gate", {}).update(mode="center")        # "max": any voxel of the patch counts
     c["joint"] = {"ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
                   "task_batch_size": 4, "task_workers": 6, "normalize": True}
+    c["train"]["best_metric"] = "score"                             # validation skill; none until tasks ramp in
     c["output"]["out_dir"] = "runs/joint"
     return c
 

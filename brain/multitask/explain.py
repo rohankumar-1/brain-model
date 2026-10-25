@@ -225,9 +225,37 @@ def tokens(a) -> None:
 
 
 # ------------------------------------------------------------------------------------------------ dynamics
-def dynamics(a) -> None:
+TASK_EMB_STEPS = "task_emb_steps.npz"
+
+
+def task_emb_steps(run: Path) -> tuple[list[int], list[np.ndarray], list[str], str | None]:
+    """The task embeddings at each ``step_*.pt`` snapshot of a run, or from ``task_emb_steps.npz`` (written by
+    ``save_task_emb_steps``) once the snapshots are deleted: (steps, embeddings, task ids, registry path)."""
     import re
 
+    if (run / TASK_EMB_STEPS).exists():
+        z = np.load(run / TASK_EMB_STEPS)
+        return z["steps"].tolist(), list(z["emb"]), z["tasks"].tolist(), str(z["registry"]) or None
+    steps = sorted(run.glob("step_*.pt"), key=lambda q: int(re.findall(r"\d+", q.stem)[0]))
+    if len(steps) < 2:
+        raise SystemExit(f"need >= 2 step_*.pt snapshots or {TASK_EMB_STEPS} in {run}")
+    embs, ids, cfg = [], None, None
+    for q in steps:
+        ck = torch.load(q, map_location="cpu", weights_only=False, mmap=True)
+        ids = ids or list(ck["tasks"])
+        cfg = cfg or ck["config"]
+        embs.append(ck["multitask"]["task_emb.weight"].float().numpy())
+    return [int(re.findall(r"\d+", q.stem)[0]) for q in steps], embs, ids, cfg["data"].get("registry")
+
+
+def save_task_emb_steps(run: Path) -> Path:
+    steps, embs, ids, registry = task_emb_steps(run)
+    np.savez(run / TASK_EMB_STEPS, steps=np.array(steps), emb=np.stack(embs), tasks=np.array(ids),
+             registry=np.array(registry or ""))
+    return run / TASK_EMB_STEPS
+
+
+def dynamics(a) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -236,17 +264,8 @@ def dynamics(a) -> None:
 
     from brain.multitask.registry import load_registry
 
-    run = Path(a.run)
-    steps = sorted(run.glob("step_*.pt"), key=lambda q: int(re.findall(r"\d+", q.stem)[0]))
-    if len(steps) < 2:
-        raise SystemExit(f"need >= 2 step_*.pt snapshots in {run}")
-    embs, ids, cfg = [], None, None
-    for q in steps:
-        ck = torch.load(q, map_location="cpu", weights_only=False, mmap=True)
-        ids = ids or list(ck["tasks"])
-        cfg = cfg or ck["config"]
-        embs.append(ck["multitask"]["task_emb.weight"].float().numpy())
-    reg = load_registry(cfg["data"].get("registry")).subset(ids)
+    step_n, embs, ids, registry = task_emb_steps(Path(a.run))
+    reg = load_registry(registry).subset(ids)
     keep = [i for i, t in enumerate(reg.tasks) if t.trained]
     names = [reg.tasks[i].id for i in keep]
     groups = [reg.tasks[i].group for i in keep]
@@ -258,7 +277,6 @@ def dynamics(a) -> None:
         aligned.append(e @ u @ vt)
     _, sv, vt = np.linalg.svd(final, full_matrices=False)
     xy = [al @ vt[:2].T for al in aligned]
-    step_n = [int(re.findall(r"\d+", q.stem)[0]) for q in steps]
     same = np.array([[groups[i] == groups[j] and i != j for j in range(len(keep))] for i in range(len(keep))])
     diff = np.array([[groups[i] != groups[j] for j in range(len(keep))] for i in range(len(keep))])
     ratio = []

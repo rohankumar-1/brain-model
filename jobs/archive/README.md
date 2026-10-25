@@ -17,3 +17,4 @@ were run). They still work from here: each sources `jobs/_env.sh` through `$BRAI
 | `transcode_quick.sbatch`, `transcode_merge.sbatch`, `transcode_list.txt` | transcoded pool raw archives to JPEG-LS / JPEG XL |
 | `prep_bhsd.sbatch`, `prep_hemseg.sbatch` | prepped the BHSD and HemSeg-500 hemorrhage cohorts (2026-10-22) |
 | `download_rsna_ica.sbatch` | downloaded the RSNA Intracranial Aneurysm archive to pool (presigned link, expired) |
+| `archive_fomo_small.sbatch` | packed the 16 small FOMO cohorts' extracts to pool (JPEG-LS) and dropped the verified scratch copies (2026-10-25) |

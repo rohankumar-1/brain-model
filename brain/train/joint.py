@@ -104,8 +104,7 @@ class Trainer(engine.Trainer):
                        predict_fine=predict_on and float(pcfg.get("fine_weight", 0.0)) > 0,
                        cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
         self.reg = load_registry(d.get("registry"))
-        only, ids = tk.get("groups"), tk.get("ids")
-        self.train_ids = [x.id for x in self.reg.trained if (not only or x.group in set(only)) and (not ids or x.id in set(ids))]
+        self.train_ids = self.reg.train_ids(tk)
         mt = MultitaskModel(enc, self.reg, m)
         self.raw = JointNet(core, mt).to(dev)
         if rt.world > 1:

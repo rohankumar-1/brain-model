@@ -82,6 +82,14 @@ class Registry:
     def trained(self) -> list[Task]:
         return [t for t in self.tasks if t.trained]
 
+    def train_ids(self, tk: dict | None) -> list[str]:
+        """The trained tasks a run's ``tasks`` config section selects: ``groups`` / ``ids`` (None = all), minus
+        ``exclude``."""
+        tk = tk or {}
+        only, ids, drop = set(tk.get("groups") or []), set(tk.get("ids") or []), set(tk.get("exclude") or [])
+        return [t.id for t in self.trained if (not only or t.group in only) and (not ids or t.id in ids)
+                and t.id not in drop]
+
     def texts(self) -> list[str]:
         """Every string the text encoder must embed: descriptions and class names."""
         out = []

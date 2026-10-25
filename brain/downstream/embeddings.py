@@ -162,6 +162,14 @@ def extract_volume_embeddings(
     return embs, mask, z_index
 
 
+def _readable(path: Path) -> bool:
+    try:
+        with np.load(path, allow_pickle=False) as d:
+            return {"volume_ids", "representation", "mus", "mask"} <= set(d.files)
+    except Exception:
+        return False
+
+
 def load_or_build_embeddings(
     *,
     ckpt: Path,
@@ -191,6 +199,9 @@ def load_or_build_embeddings(
     ver = CACHE_VERSION_3D if is3d else CACHE_VERSION
     path = Path(cache_dir) / f"{ckpt.parent.name}_{ckpt.stem}" / task / f"embeddings_{ver}_{win}{tag}.npz"
     ids = [str(v) for v in volume_ids]
+    if path.exists() and not force and not _readable(path):
+        print(f"[cache] unreadable (truncated write?), rebuilding: {path}")
+        force = True
     if path.exists() and not force:
         data = np.load(path, allow_pickle=False)
         same_ids = [str(x) for x in data["volume_ids"]] == ids
@@ -249,7 +260,9 @@ def load_or_build_embeddings(
     if general is not None:
         payload["general"] = general.astype(np.float32)
     # Uncompressed for the 32^3 grid: compressing ~20 GB of embeddings is slower than the encode.
-    (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(path, **payload)
+    tmp = path.with_name(path.stem + ".tmp.npz")             # write then rename: a full disk leaves no truncated cache
+    (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(tmp, **payload)
+    os.replace(tmp, path)
     return {
         "volume_ids": ids, "mus": mus, "mask": mask,
         "z": np.asarray(z, dtype=np.float32 if spatial else np.int16),

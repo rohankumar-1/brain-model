@@ -28,13 +28,18 @@ from brain.common.paths import resolve
 from brain.train.defaults import METHODS, default_config, smoke_config
 
 
+HIGHER_IS_BETTER = {"score"}     # the multitask validation skill score (brain.eval.skill); every other metric is a loss
+
+
 def is_new_best(vals: dict, metric: str, best_val: float) -> float | None:
-    """Lower ``vals[metric]`` (fallback ``loss``) beats ``best_val``. NaN/Inf never win."""
-    v = vals.get(metric, vals.get("loss"))
+    """``vals[metric]`` beats ``best_val``: higher for ``score``, lower otherwise (a loss metric falls back to
+    ``loss``). NaN/Inf never win."""
+    higher = metric in HIGHER_IS_BETTER
+    v = vals.get(metric) if higher else vals.get(metric, vals.get("loss"))
     if v is None:
         return None
     v = float(v)
-    return v if math.isfinite(v) and v < best_val else None
+    return v if math.isfinite(v) and (v > best_val if higher else v < best_val) else None
 
 
 class Trainer:
@@ -131,7 +136,7 @@ def run(argv: list[str] | None = None) -> None:
     best_metric = str(t_cfg.get("best_metric", "loss"))
 
     step, history, ckpt, resume_src = 0, [], None, None
-    best_val, best_step = float("inf"), 0
+    best_val, best_step = float("-inf") if best_metric in HIGHER_IS_BETTER else float("inf"), 0
     synthetic_persist = args.synthetic and os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"
     if not (args.no_resume or (args.synthetic and not synthetic_persist)):
         resume_from = out_cfg.get("resume_from")
