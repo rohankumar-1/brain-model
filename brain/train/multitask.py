@@ -15,8 +15,7 @@ import torch
 
 from brain.common.optim import NO_DECAY_SUFFIXES
 from brain.common.paths import resolve
-from brain.multitask.data import (MultitaskDataset, SyntheticMultitask, collate, load_labels, make_loader,
-                                  pick_val_volumes, prepare, ssl_view)
+from brain.multitask.data import prepare, ssl_view, task_loaders
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
 from brain.multitask.model import MultitaskModel
@@ -125,38 +124,10 @@ class Trainer(engine.Trainer):
         self.sigreg = SIGReg(n_proj=int(self.gen.get("n_proj", 256))).to(dev)
         self.gen_sum, self.gen_cnt = torch.zeros(2, device=dev), 0
         seed = int(cfg["seed"]) + rt.rank
-        if args.synthetic:
-            shape = tuple(reversed(cfg["data"]["volume_size_xyz"]))
-            ds = SyntheticMultitask(self.reg, shape, n=32, seed=seed)
-            self.stats = {}
-            self.loader = torch.utils.data.DataLoader(ds, batch_size=self.batch, shuffle=True, collate_fn=collate,
-                                                      drop_last=True)
-            self.val_loader = torch.utils.data.DataLoader(SyntheticMultitask(self.reg, shape, n=4, seed=999),
-                                                          batch_size=2, collate_fn=collate)
-        else:
-            import pandas as pd
-
-            store = resolve(d["store_root"])
-            labels, self.stats = load_labels(resolve(d["labels_dir"]))
-            volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
-            kw = dict(k_max=int(tk["k_max"]), p_all=float(tk["p_all"]), rare_beta=float(tk["rare_beta"]),
-                      max_seg=int(tk["max_seg"]), group_weights=tk.get("group_weights"))
-            ds = MultitaskDataset(store, labels, volumes, self.reg, self.stats, split="train", train=True,
-                                  tasks=self.train_ids, **kw)
-            workers = int(d.get("num_workers", 10))
-            self.loader = make_loader(ds, batch_size=self.batch, shuffle=True, seed=seed + int(step), workers=workers,
-                                      balance_alpha=float(d.get("balance_alpha", 1.0)),
-                                      balance_groups=d.get("balance_groups"), distributed=rt.world > 1)
-            self.val_loader = None
-            if rt.main:
-                # fixed, cohort-stratified validation scans (pick_val_volumes), each asked all its tasks
-                pick = pick_val_volumes(labels, volumes, self.reg, self.train_ids, int(d.get("val_per_task", 64)))
-                vds = MultitaskDataset(store, labels, volumes, self.reg, self.stats, split="val", train=False,
-                                       tasks=self.train_ids, k_max=64, max_seg=int(d.get("val_max_seg", 4)),
-                                       volume_ids=pick)
-                self.val_loader = make_loader(vds, batch_size=2, shuffle=False, seed=0, workers=min(4, workers),
-                                              drop_last=False)
-            self._banner_extra = f"train_volumes={len(ds)}"
+        self.loader, self.val_loader, self.stats, n_train = task_loaders(
+            cfg, self.reg, self.train_ids, batch=self.batch, workers=int(d.get("num_workers", 10)), seed=seed + int(step),
+            main=rt.main, distributed=rt.world > 1, synthetic=args.synthetic)
+        self._banner_extra = f"train_volumes={n_train}"
         self.iter = iter(self.loader)
         self.epoch = 0
         self.opt = torch.optim.AdamW(

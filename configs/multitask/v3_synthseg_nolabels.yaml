@@ -14,7 +14,7 @@ data:
   balance_alpha: 0.5
   balance_groups:
     brats: [brats_gli, brats_men, brats_ped, brats_goat]
-  val_per_task: 16
+  val_per_task: 64          # cohort-stratified picker (brain.multitask.data.pick_val_volumes); runs before 2026-10-24 used 16 by id
   val_max_seg: 4
 
 model:

@@ -25,15 +25,26 @@ RED_WHITE_GREEN = LinearSegmentedColormap.from_list("red_white_green", ["#c62828
 # Models post-trained with labels (brain.multitask) have seen some suite tasks. "labels": the task's own labels
 # (train-split subjects) were trained on; "task": the same target was trained on other cohorts (age, hemorrhage,
 # tumour), so the frozen features were shaped for it. Neither is a clean transfer number.
-SUPERVISED_PREFIXES = ("mt_", "v4general", "v5enclr", "v6nogenunc")   # multitask runs (brain.multitask); later runs: add their name
+# A model is label-trained when it was trained by the multitask or joint trainer (``models.method`` in the records
+# DB) or its checkpoint sits under runs/{multitask,single,joint}/; the joint SSL-only control never asks a task.
+SUPERVISED_METHODS = frozenset({"multitask", "joint"})
+SUPERVISED_DIRS = ("/multitask/", "/single/", "/joint/")
 SEEN_LABELS = frozenset({"rsna_ich", "brats2023_gli", "brats2023_men", "brats2024_gli", "brats2023_ped",
                          "oasis1_mmse", "oasis2_mmse", "abide_ados", "gli_survival_12m", "gli_lgg", "gli_idh"})
 SEEN_TASK = frozenset({"cq500", "seg_cq500", "instance", "msd", "oasis1_age", "ixi_age", "pixar_age", "piop1_age",
                        "piop2_age", "id1000_age", "ms3seg_age"})
 
 
-def seen(model: str, task: str) -> str:
-    if not str(model).startswith(SUPERVISED_PREFIXES):
+def supervised_models(con) -> set[str]:
+    """model_ids of label-trained models, from the records DB."""
+    m = pd.read_sql("select model_id, ckpt, method from models", con)
+    ck = m["ckpt"].fillna("").astype(str)
+    hit = m["method"].isin(SUPERVISED_METHODS) | ck.apply(lambda c: any(d in c for d in SUPERVISED_DIRS))
+    return set(m.loc[hit & ~ck.str.contains("ssl_only"), "model_id"])
+
+
+def seen(supervised: bool, task: str) -> str:
+    if not supervised:
         return ""
     return "labels" if task in SEEN_LABELS else "task" if task in SEEN_TASK else ""
 
@@ -73,7 +84,8 @@ def load(ingest: bool = True) -> pd.DataFrame:
     rep["group"] = rep.task.map(GROUPS).fillna("other")
     floor = rep[rep.is_random].groupby("task").test.max()
     rep["delta"] = rep.test - rep.task.map(floor)
-    rep["seen"] = [seen(m, t) for m, t in zip(rep.model, rep.task)]
+    sup = supervised_models(con)
+    rep["seen"] = [seen(m in sup, t) for m, t in zip(rep.model_id, rep.task)]
     return rep.sort_values(["group", "task", "test"], ascending=[True, True, False]).reset_index(drop=True)
 
 

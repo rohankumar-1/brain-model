@@ -377,6 +377,38 @@ def pick_val_volumes(labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry,
     return pd.concat(picks).unique().tolist() if picks else []
 
 
+def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, workers: int, seed: int, main: bool,
+                 distributed: bool, synthetic: bool = False):
+    """Training loader, fixed validation loader (main rank only; ``pick_val_volumes``), label statistics and the number
+    of training scans, for the multitask and joint trainers. ``synthetic`` gives phantom volumes (CPU smoke runs)."""
+    from torch.utils.data import DataLoader
+
+    from brain.common.paths import resolve
+
+    d, tk = cfg["data"], cfg["tasks"]
+    if synthetic:
+        shape = tuple(reversed(d["volume_size_xyz"]))
+        ds = SyntheticMultitask(reg, shape, n=32, seed=seed)
+        val = DataLoader(SyntheticMultitask(reg, shape, n=4, seed=999), batch_size=2, collate_fn=collate)
+        return DataLoader(ds, batch_size=batch, shuffle=True, collate_fn=collate, drop_last=True), val, {}, len(ds)
+    store = resolve(d["store_root"])
+    labels, stats = load_labels(resolve(d["labels_dir"]))
+    volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
+    ds = MultitaskDataset(store, labels, volumes, reg, stats, split="train", train=True, tasks=train_ids,
+                          k_max=int(tk["k_max"]), p_all=float(tk["p_all"]), rare_beta=float(tk["rare_beta"]),
+                          max_seg=int(tk["max_seg"]), group_weights=tk.get("group_weights"))
+    loader = make_loader(ds, batch_size=batch, shuffle=True, seed=seed, workers=workers,
+                         balance_alpha=float(d.get("balance_alpha", 1.0)), balance_groups=d.get("balance_groups"),
+                         distributed=distributed)
+    val = None
+    if main:
+        pick = pick_val_volumes(labels, volumes, reg, train_ids, int(d.get("val_per_task", 64)))
+        vds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", train=False, tasks=train_ids, k_max=64,
+                               max_seg=int(d.get("val_max_seg", 4)), volume_ids=pick)
+        val = make_loader(vds, batch_size=2, shuffle=False, seed=0, workers=min(4, workers), drop_last=False)
+    return loader, val, stats, len(ds)
+
+
 def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:
     d = Path(labels_dir)
     return pd.read_parquet(d / "labels.parquet"), json.loads((d / "stats.json").read_text())
