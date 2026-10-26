@@ -78,6 +78,23 @@ def cq500(*dirs: Path) -> list[Case]:
     return cases
 
 
+def cq500_dicom(root: Path = DATASETS / "cq500_dicom") -> list[Case]:
+    """CQ500 from the original DICOMs (``brain.datasets.download_cq500``: one plain soft-tissue series per study zip),
+    read by member offsets like RSNA. Replaces the third-party pre-converted NIfTIs as dataset ``cq500`` (same case
+    ids, so the same volume ids); those were mirrored for some studies and mixed kernels / contrast series. Prep these
+    with ``BRAIN_DICOM_READER=dcm2niix`` (CQ500 has gantry tilt)."""
+    import zipfile
+
+    cases = []
+    for z in sorted(Path(root).glob("CQ500-CT-*.zip"), key=lambda p: int(p.stem.rsplit("-", 1)[1])):
+        with zipfile.ZipFile(z) as zf:
+            members = tuple((i.filename, i.header_offset, i.compress_size, i.compress_type) for i in zf.infolist()
+                            if not i.filename.endswith("/"))
+        if members:
+            cases.append(Case("cq500", z.stem, "ct", zip_path=str(z), members=members))
+    return cases
+
+
 def oasis(root: Path = DATASETS / "oasis" / "extracted") -> list[Case]:
     """OASIS-1 and OASIS-2 raw MPRAGE (first scan of the session). OASIS-1 used to take the distributed
     Talairach-registered gain-field-corrected image (``*_t88_gfc``, cropped 176 x 208 x 176): every one of those

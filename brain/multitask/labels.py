@@ -112,8 +112,18 @@ def _mask_ok(v: pd.DataFrame) -> pd.Series:
 
 
 def _participants() -> pd.DataFrame:
+    """FOMO participants.tsv, with ages it lacks filled from the original releases (``participants_extra.tsv``,
+    ``brain.datasets.fomo_ages``) where available."""
     p = pd.read_csv(label_file("fomo260k", "participants.tsv"), sep="\t", low_memory=False)
-    return p.astype({"dataset": str, "participant_id": str, "session_id": str})
+    p = p.astype({"dataset": str, "participant_id": str, "session_id": str})
+    extra_path = label_file("fomo260k", "participants.tsv").with_name("participants_extra.tsv")
+    if extra_path.exists():
+        e = pd.read_csv(extra_path, sep="\t").astype({"dataset": str, "participant_id": str, "session_id": str})
+        key = ["dataset", "participant_id", "session_id"]
+        fill = p[key].merge(e[key + ["age"]], on=key, how="left")["age"].to_numpy()
+        missing = pd.to_numeric(p["age"], errors="coerce").isna().to_numpy()
+        p.loc[missing, "age"] = fill[missing]
+    return p
 
 
 def src_fomo_participants(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
