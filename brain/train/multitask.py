@@ -229,7 +229,7 @@ class Trainer(engine.Trainer):
 
     def state(self, model_only: bool) -> dict:
         s = {"model": self.raw.backbone.state_dict(), "multitask": self.raw.state_dict(),
-             "balancer": self.balancer.state_dict(), "tasks": [t.id for t in self.reg.tasks]}
+             "balancer": self.balancer.state_dict(), "label_stats": self.stats, "tasks": [t.id for t in self.reg.tasks]}
         if not model_only:
             s["optimizer"] = self.opt.state_dict()
         return s

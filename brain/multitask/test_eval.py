@@ -26,7 +26,7 @@ import torch
 from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
 
 from brain.common.paths import resolve
-from brain.multitask.data import load_labels, prepare
+from brain.multitask.data import checkpoint_stats, load_labels, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.fewshot import _loader, linear_probe, load_model
 
@@ -47,15 +47,17 @@ def score(kind: str, y: np.ndarray, p: np.ndarray) -> float:
     return float(np.mean(p))                                          # segmentation rows hold per-scan Dice
 
 
-def bootstrap(kind, y, p, p_ref=None, reps: int = 1000, seed: int = 0) -> tuple[float, float]:
-    """95% interval of the score, or of score(p) - score(p_ref) on the same resampled scans."""
+def bootstrap(kind, y, p, p_ref=None, reps: int = 1000, seed: int = 0, y_ref=None) -> tuple[float, float]:
+    """95% interval of the score, or of score(p) - score(p_ref) on the same resampled scans (``y_ref``: the
+    reference's targets when its standardisation differs)."""
     rng = np.random.default_rng(seed)
     n, vals = len(y), []
+    y_ref = y if y_ref is None else y_ref
     for _ in range(reps):
         i = rng.integers(0, n, n)
         v = score(kind, y[i], p[i])
         if p_ref is not None:
-            v -= score(kind, y[i], p_ref[i])
+            v -= score(kind, y_ref[i], p_ref[i])
         if np.isfinite(v):
             vals.append(v)
     return (float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))) if vals else (np.nan, np.nan)
@@ -98,30 +100,39 @@ def main() -> None:
     if n_with == 0:
         raise SystemExit("[test_eval] no test scans selected: check the label table (labels_dir) and its split column")
 
-    rows, preds = [], {}
+    rows, preds, pred_rows = [], {}, []
     for i, ck in enumerate([] if a.probe_only else a.ckpts):
         model, reg, cfg = (ref_model, ref_reg, ref_cfg) if i == 0 else load_model(Path(ck), dev)
         name = Path(ck).parent.name + "/" + Path(ck).stem
         patch = tuple(model.backbone.patch_xyz)
+        m_stats = checkpoint_stats(model.label_stats, resolve(ref_cfg["data"]["labels_dir"]), stats)
         for t in tasks:
             if t not in reg.index or not test_ids[t]:
                 continue
-            loader, _ = _loader(store, labels, volumes, reg, stats, t, "test", ids=test_ids[t], use="train",
+            loader, _ = _loader(store, labels, volumes, reg, m_stats, t, "test", ids=test_ids[t], use="train",
                                 workers=a.workers)
-            _, pr = run_eval(model, loader, cfg, reg, stats, dev, patch, amp, return_preds=True)
+            _, pr = run_eval(model, loader, cfg, reg, m_stats, dev, patch, amp, return_preds=True)
             r = pr.get(reg.index[t], [])
             if not r:
                 continue
-            y, p = np.array([x[0] for x in r], float), np.array([x[1] for x in r], float)
             kind = reg[t].type
-            preds[(name, t)] = (y, p)
+            # standardised targets differ between models whose stats differ: pair on the raw label value instead
+            y, p, vids = np.array([x[0] for x in r], float), np.array([x[1] for x in r], float), [x[2] for x in r]
+            pred_rows += [{"model": name, "task": t, "kind": kind, "volume_id": v, "y": yy, "p": pp}
+                          for v, yy, pp in zip(vids, y, p)]
+            by_vid = dict(zip(vids, zip(y, p)))
+            preds[(name, t)] = by_vid
             lo, hi = bootstrap(kind, y, p)
             rec = {"model": name, "kind": "heads", "task": t, "group": reg[t].group, "metric": METRIC[kind],
                    "n": len(y), "score": score(kind, y, p), "ci_lo": lo, "ci_hi": hi}
             ref = preds.get((Path(a.ckpts[0]).parent.name + "/" + Path(a.ckpts[0]).stem, t))
-            if i > 0 and ref is not None and len(ref[0]) == len(y) and np.allclose(ref[0], y, equal_nan=True):
-                rec["delta_vs_ref"] = rec["score"] - score(kind, *ref)
-                rec["delta_lo"], rec["delta_hi"] = bootstrap(kind, y, ref[1], p_ref=p)
+            common = [v for v in vids if ref is not None and v in ref]
+            if i > 0 and common:                       # paired by volume id on the scans both models answered
+                yr = np.array([ref[v][0] for v in common])
+                pr_ref, pr_me = np.array([ref[v][1] for v in common]), np.array([by_vid[v][1] for v in common])
+                ym = np.array([by_vid[v][0] for v in common])
+                rec["delta_vs_ref"] = score(kind, ym, pr_me) - score(kind, yr, pr_ref)
+                rec["delta_lo"], rec["delta_hi"] = bootstrap(kind, yr, pr_ref, p_ref=pr_me, y_ref=ym)
                 rec["delta_lo"], rec["delta_hi"] = -rec["delta_hi"], -rec["delta_lo"]     # ref - this -> this - ref
             rows.append(rec)
             print(f"[heads] {name} {t}: {rec['metric']} {rec['score']:.3f} [{lo:.3f}, {hi:.3f}] n={len(y)}", flush=True)
@@ -176,6 +187,8 @@ def main() -> None:
     df = pd.DataFrame(rows)
     tag = "probe_" + "_".join(Path(c).parent.name for c in a.probe_ckpts) if a.probe_only else "heads"
     df.to_csv(out / f"test_eval_{tag}.csv", index=False)
+    if pred_rows:                                          # per-scan predictions: brain.eval.report bootstraps these
+        pd.DataFrame(pred_rows).to_parquet(out / "test_eval_preds.parquet", index=False)
     wide = df.pivot_table(index=["group", "task", "metric"], columns=["kind", "model"], values="score")
     print(wide.round(3).to_string(), flush=True)
     print("wrote", out / f"test_eval_{tag}.csv", flush=True)

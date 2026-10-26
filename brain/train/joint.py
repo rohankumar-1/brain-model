@@ -260,7 +260,7 @@ class Trainer(engine.Trainer):
 
     def state(self, model_only: bool) -> dict:
         s = {"model": self.encoder.state_dict(), "multitask": self.raw.mt.state_dict(), "joint": self.raw.state_dict(),
-             "balancer": self.balancer.state_dict(), "tasks": [x.id for x in self.reg.tasks],
+             "balancer": self.balancer.state_dict(), "label_stats": self.stats, "tasks": [x.id for x in self.reg.tasks],
              "joint_norm": {k: (float(v) if v is not None else None) for k, v in self.register_ema.items()}}
         if not model_only:
             s["optimizer"] = self.opt.state_dict()

@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from brain.prep import store
 from brain.downstream.embed3d import FrozenEncoder3D, read_volume_xyz
-from brain.downstream.embeddings import load_frozen_encoder, resolve_path
+from brain.downstream.embeddings import _fp, cache_fresh, load_frozen_encoder, resolve_path
 from brain.downstream.metrics import bootstrap_ci
 from brain.downstream.results import eval_banner, finalize_run, format_rows, new_run_dir, write_json
 from brain.downstream.seg_data import sequence_paths
@@ -246,6 +246,13 @@ def _decode_loss(out, y, regions):
 
 # ----------------------------------------------------------------------------- cache
 
+def _meta_ok(meta: Path, want: dict, data: Path, ckpt: Path) -> bool:
+    """The cache's recorded settings match and it was built from the checkpoint's current weights."""
+    got = json.loads(meta.read_text())
+    fp = got.pop("ckpt_fingerprint", None)
+    return got == want and cache_fresh(data, ckpt, fp)
+
+
 def _wait_meta(path: Path, meta: Path, label: str, tries: int = 720) -> None:
     if path.exists() and not meta.exists():
         print(f"[seg3d-cache] waiting for {label} (another job is writing it)", flush=True)
@@ -318,8 +325,8 @@ def build_cache(task: TaskBundle, enc: FrozenEncoder3D, ckpt: Path, slices_root:
     _wait_meta(fpath, meta, fpath.name)
     if pe:
         _wait_meta(ppath, pmeta, ppath.name)
-    have_tok = fpath.exists() and meta.exists() and json.loads(meta.read_text()) == want
-    have_pe = (not pe) or (ppath.exists() and pmeta.exists() and json.loads(pmeta.read_text()) == pe_want)
+    have_tok = fpath.exists() and meta.exists() and _meta_ok(meta, want, fpath, ckpt)
+    have_pe = (not pe) or (ppath.exists() and pmeta.exists() and _meta_ok(pmeta, pe_want, ppath, ckpt))
     if have_masks and have_tok and have_pe:
         return Cache(ids, np.load(fpath, mmap_mode="r"), np.load(mpath, mmap_mode="r"),
                      np.load(apath, mmap_mode="r") if n_aug > 1 else None, row,
@@ -384,12 +391,12 @@ def build_cache(task: TaskBundle, enc: FrozenEncoder3D, ckpt: Path, slices_root:
                 print(f"[seg3d-cache] {task.name} {kind}: {i + 1}/{len(ids)} volumes", flush=True)
     if feats is not None:
         feats.flush()
-        meta.write_text(json.dumps(want))
+        meta.write_text(json.dumps({**want, "ckpt_fingerprint": _fp(ckpt)}))
     if aug is not None:
         aug.flush()
     if pe_feats is not None:
         pe_feats.flush()
-        pmeta.write_text(json.dumps(pe_want))
+        pmeta.write_text(json.dumps({**pe_want, "ckpt_fingerprint": _fp(ckpt)}))
     if pe_aug is not None:
         pe_aug.flush()
     if masks is not None:
@@ -427,7 +434,12 @@ def score_volumes(dec: nn.Module, cache: Cache, vols: np.ndarray, regions: dict,
             for tag, sl in (("", EVAL_SLICES.to(device)), ("full_", slice(None))):
                 for name, r in ids.items():
                     g, p = torch.isin(gt[sl], r), torch.isin(pred[j, sl], r)
-                    row[f"{tag}{name}"] = float(2 * (g & p).sum() / (g.sum() + p.sum())) if g.any() else np.nan
+                    if not tag:
+                        row[f"has_{name}"] = bool(g.any())
+                    # an absent region scores 1 when nothing is predicted and 0 otherwise (before 2026-10-25: NaN,
+                    # which never penalised a decoder that paints absent regions; as metrics.region_dice does)
+                    row[f"{tag}{name}"] = (float(2 * (g & p).sum() / (g.sum() + p.sum())) if g.any()
+                                           else (0.0 if p.any() else 1.0))
             rows.append(row)
     df = pd.DataFrame(rows)
     df["dice_macro"] = df[list(regions)].mean(axis=1)
@@ -436,7 +448,7 @@ def score_volumes(dec: nn.Module, cache: Cache, vols: np.ndarray, regions: dict,
     full = {n: float(df[f"full_{n}"].mean()) for n in regions}
     out = {"task_type": "segmentation", "dice_per_class": per, "dice_macro": float(np.nanmean(list(per.values()))),
            "dice_full_per_class": full, "dice_full_macro": float(np.nanmean(list(full.values()))),
-           "n_volumes": len(df), "n_positive": {n: int(df[n].notna().sum()) for n in regions}}
+           "n_volumes": len(df), "n_positive": {n: int(df[f"has_{n}"].sum()) for n in regions}}
     out.update({f"dice_{n}": v for n, v in per.items()})
     return out, df
 

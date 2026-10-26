@@ -1,8 +1,8 @@
 """Readable views of the experiment database (``brain.downstream.db``) for notebooks: one table per task, an overview
 grid, gain over the random-init floor, and per-head drill-downs. Used by ``notebooks/results.ipynb``.
 
-Every number is the head picked on validation by ``db.report`` (``picked_on == "test!"`` flags a task whose heads had
-no validation score). ``delta`` is test minus the random-init baseline's test score on the same task.
+Every number is the head picked on validation by ``db.report`` (``picked_on == "none"`` flags a task whose heads had
+no validation score: its number is not a fair pick; cross-validate it). ``delta`` is test minus the random-init baseline's test score on the same task.
 """
 
 from __future__ import annotations

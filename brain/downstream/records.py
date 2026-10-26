@@ -174,7 +174,8 @@ def model_info(ckpt: Path | str | None, name: str | None = None, variant: str | 
 
 
 def pretrain_overlap(volume_ids, volumes) -> float | None:
-    """Fraction of the task's volumes the encoder could have seen in SSL (``pretrain`` and ``ssl_keep``)."""
+    """Fraction of the task's volumes the encoder could have seen in SSL (``pretrain``, ``ssl_keep`` and the train
+    split: SSL reads only ``split == train``)."""
     if volumes is None or "pretrain" not in getattr(volumes, "columns", ()):
         return None
     df = volumes.set_index("volume_id") if "volume_id" in volumes.columns else volumes
@@ -184,6 +185,8 @@ def pretrain_overlap(volume_ids, volumes) -> float | None:
     seen = rows["pretrain"].astype(bool)
     if "ssl_keep" in rows.columns:
         seen &= rows["ssl_keep"].astype(bool)
+    if "split" in rows.columns:
+        seen &= rows["split"].astype(str).eq("train")
     return float(seen.mean())
 
 

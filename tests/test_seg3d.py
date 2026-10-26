@@ -161,9 +161,9 @@ def test_dice_is_scored_on_the_reference_slices_and_on_the_whole_volume():
     assert abs(m["dice_macro"] - 1) < 1e-6 and abs(m["dice_full_macro"] - 1) < 1e-6 and m["n_volumes"] == 3
     bad, _ = S.score_volumes(_Oracle(cache, flip=True), cache, np.array([0]), REGIONS, torch.device("cpu"))
     assert bad["dice_macro"] < 0.1
-    cache.masks[1] = 0  # a volume without the region does not count
+    cache.masks[1] = 0  # a volume without the region: an empty prediction scores 1, a painted one 0
     m, df = S.score_volumes(_Oracle(cache), cache, np.array([0, 1]), REGIONS, torch.device("cpu"))
-    assert np.isnan(df["LES"].iloc[1]) and m["n_positive"] == {"LES": 1}
+    assert df["LES"].iloc[1] == 1.0 and m["n_positive"] == {"LES": 1}
 
 
 def test_token_aug_flips_and_rolls_with_the_mask():

@@ -158,13 +158,15 @@ def report(con: sqlite3.Connection, *, task: str | None = None, all_heads: bool 
         cols = ["model_id", "task", "head", "view", "metric", "val", "test", "ci_lo", "ci_hi", "n_test",
                 "pretrain_overlap", "finished_utc"]
         return t[cols].sort_values(["task", "model_id", "head"]).reset_index(drop=True)
-    # one head per (model, task): best on val when every candidate has a val score, else flagged and best on test
+    # one head per (model, task): best on val among the heads that have a val score. Never on test: before
+    # 2026-10-25 a task whose val split had no positives fell back to the best test score ("test!"), an optimistic
+    # pick (CQ500 EDH: 2 test positives); such a task now gets picked_on "none" and should be cross-validated.
     rows = []
     for (mid, tk), g in t.groupby(["model_id", "task"]):
-        if g.val.notna().all():
-            pick, by = g.loc[g.val.idxmax()], "val"
+        if g.val.notna().any():
+            pick, by = g.loc[g.val.idxmax()], "val" if g.val.notna().all() else "val (some heads lack it)"
         else:
-            pick, by = g.loc[g.test.idxmax()] if g.test.notna().any() else g.iloc[0], "test!"
+            pick, by = g.iloc[0], "none"
         rows.append({"model_id": mid, "task": tk, "metric": pick.metric, "test": pick.test, "ci_lo": pick.ci_lo,
                      "ci_hi": pick.ci_hi, "head": pick["head"], "picked_on": by, "overlap": pick.pretrain_overlap})
     return pd.DataFrame(rows)

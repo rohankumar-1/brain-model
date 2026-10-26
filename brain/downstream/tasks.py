@@ -387,20 +387,26 @@ def build_rsna_volume_labels(
 
 
 RSNA_MAX_TRAIN = 4000   # frozen heads need far fewer than 18k training studies; the full token cache does not fit
+RSNA_MAX_EVAL = 1000    # per validation / test split (the rest of RSNA val + test is ~5.4k studies)
 
 
 def load_rsna_task(volumes: pd.DataFrame, labels: pd.DataFrame | None = None, name: str = "rsna_ich",
-                   max_train: int | None = None) -> TaskBundle:
+                   max_train: int | None = None, max_eval: int | None = None) -> TaskBundle:
     """RSNA study-level subtypes. The train split is subsampled to ``max_train`` studies (env ``BRAIN_RSNA_MAX_TRAIN``;
-    0 = all), stratified on ``any``, with a fixed seed; validation and test are kept whole."""
+    0 = all) and validation and test each to ``max_eval`` (env ``BRAIN_RSNA_MAX_EVAL``), stratified on ``any``, with a
+    fixed seed. Whole-split token embeddings (~5.4k val + test studies at 5120 tokens) ran out of host memory; 1000
+    evaluation studies still give AUC intervals of about +-0.02."""
     labels = labels if labels is not None else build_rsna_volume_labels()
     rsna = volumes[volumes["dataset"] == "rsna_ich"].copy()
     merged = rsna.merge(labels, on="volume_id", how="inner")
-    cap = int(os.environ.get("BRAIN_RSNA_MAX_TRAIN", RSNA_MAX_TRAIN) if max_train is None else max_train)
-    train = merged["split"] == "train"
-    if cap and train.sum() > cap:
-        keep = merged[train].groupby("any").sample(frac=cap / train.sum(), random_state=0).index
-        merged = merged[~train | merged.index.isin(keep)].reset_index(drop=True)
+    caps = {"train": int(os.environ.get("BRAIN_RSNA_MAX_TRAIN", RSNA_MAX_TRAIN) if max_train is None else max_train)}
+    caps["val"] = caps["test"] = int(os.environ.get("BRAIN_RSNA_MAX_EVAL", RSNA_MAX_EVAL) if max_eval is None
+                                     else max_eval)
+    for split, cap in caps.items():
+        part = merged["split"] == split
+        if cap and part.sum() > cap:
+            keep = merged[part].groupby("any").sample(frac=cap / part.sum(), random_state=0).index
+            merged = merged[~part | merged.index.isin(keep)].reset_index(drop=True)
     y = merged[RSNA_LABELS].to_numpy(dtype=np.int64)
     return _bundle_from_frame(name, "multilabel", merged, y, RSNA_LABELS, modality="ct")
 

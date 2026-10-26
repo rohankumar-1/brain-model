@@ -8,9 +8,12 @@ subjects is the validation set (head choice / early stopping), so nothing about 
 Scores are computed on the pooled out-of-fold predictions of each repeat; the reported value is the mean over repeats,
 with a bootstrap interval over the pooled predictions of the first repeat and the per-repeat values alongside.
 
-Policy (``--cv auto``): small tasks (< ``max_subjects`` subjects) whose volumes were never in the SSL pool. For tasks
-from pretraining families only the fixed test split was kept out of pretraining, so cross-validating over all subjects
-would test on images the encoder saw (unlabelled); ``--cv on`` still allows it and the record keeps the overlap.
+Policy (``--cv auto``): small tasks (< ``max_subjects`` subjects) whose volumes were never in the SSL pool, and every
+task whose rarest class has fewer than ``MIN_MINORITY`` volumes. For tasks from pretraining families only the fixed
+test split was kept out of pretraining, so cross-validating over all subjects tests on images the encoder saw
+(unlabelled); a rare-class task gets CV anyway, since its fixed split leaves a few test positives and often none in
+validation (before 2026-10-25 CQ500 EDH had 2 test and 0 validation positives, so its head was picked on test). The
+record keeps the overlap.
 """
 
 from __future__ import annotations
@@ -22,6 +25,19 @@ from sklearn.model_selection import StratifiedGroupKFold
 from brain.downstream.tasks import TaskBundle
 
 VAL_FRAC = 0.15
+MIN_MINORITY = 100            # rarest-class volumes below which a classification task is cross-validated
+
+
+def minority(task: TaskBundle) -> int | None:
+    """Volumes in the task's rarest class (multilabel: the rarest label's positives); None for regression."""
+    if task.task_type == "regression":
+        return None
+    y = np.asarray(task.y)
+    if y.ndim > 1:
+        y = y.reshape(len(y), -1) > 0
+        return int(min(y.sum(0).min(), (~y).sum(0).min()))
+    counts = np.bincount(y.astype(int))
+    return int(counts[counts > 0].min()) if counts.size else 0
 
 
 def subjects(task: TaskBundle, volumes: pd.DataFrame | None) -> np.ndarray:
@@ -49,7 +65,8 @@ def make_folds(task: TaskBundle, volumes: pd.DataFrame | None, k: int = 5, repea
     groups, labels = subjects(task, volumes), strata(task, k)
     vids = [str(v) for v in task.volume_ids]
     n_sub = len(set(groups))
-    k = max(2, min(k, n_sub, int(np.bincount(labels).max()) if labels.size else k))
+    counts = np.bincount(labels) if labels.size else np.zeros(0, int)
+    k = max(2, min(k, n_sub, int(counts[counts > 0].min()) if counts.size else k))   # every fold gets each class
     out = []
     for r in range(repeats):
         skf = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed + r)
@@ -69,6 +86,9 @@ def use_cv(mode: str, task: TaskBundle, volumes: pd.DataFrame | None, overlap: f
         return True
     if mode == "off" or task.task_type == "segmentation":
         return False
+    rare = minority(task)
+    if rare is not None and rare < MIN_MINORITY:
+        return True
     return len(set(subjects(task, volumes))) < max_subjects and not (overlap or 0.0) > 0.0
 
 

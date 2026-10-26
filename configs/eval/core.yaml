@@ -8,12 +8,17 @@
 #   atlas_lesion_side, oasis1_age (saturated). They still run in the full suite and land in the per-task CSV.
 # segmentation transfer is costly (decoder training, large caches): only with --with-seg, at milestones.
 transfer:
-  ct: [cq500, cq500_edh, cq500_bleed_side, cq500_other_fracture, aisd_remote_infarct]
+  ct: [rsna_ich, cq500, cq500_edh, cq500_bleed_side, cq500_other_fracture, aisd_remote_infarct]
   stroke: [isles24_lvo_side, isles24_mrs, isles24_mrs_discharge, atlas_lesion_volume, atlas_days_post_stroke]
   neuro_psych: [oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd]
   age: [ixi_age, pixar_age, ms3seg_age]
   lesion_tumor: [msd, ms3seg_lesion_load, valdo_epvs]
-  # rsna_ich joins `ct` once its eval no longer runs out of memory
+
+# a downstream task whose labels a model trained on (same cohort, registry task listed here) is in-domain for it, not
+# transfer: left out of comparisons involving that model
+seen:
+  oasis1_mmse: [mmse]
+  oasis2_mmse: [mmse]
 transfer_seg:
   segmentation: [brats2023_gli, brats2023_men, wmh, atlas]
 

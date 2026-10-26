@@ -10,7 +10,10 @@ a linear probe (logistic / ridge) on the frozen encoder's pooled embedding (clas
 Transfer: trained tasks with ``use: eval`` cohorts (e.g. age on OASIS / IXI / MS3SEG, whole tumour on MSD) are asked
 directly, with no fitting, on those cohorts' test rows.
 
-Results go to ``<ckpt dir>/fewshot_<ckpt stem>.json`` and a printed table.
+Results go to ``<ckpt dir>/fewshot_<ckpt stem>.json`` and a printed table; ``preds`` there holds every seed's test
+predictions by volume id, so ``brain.eval.report`` can pair two models seed by seed and bootstrap over test subjects.
+The k scans are a stratified draw (by class, or by value quantile for regression) seeded identically for every model:
+the same seed gives the same scans whenever the label table is the same.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import pandas as pd
 import torch
 
 from brain.common.paths import resolve
-from brain.multitask.data import MultitaskDataset, load_labels, make_loader, prepare
+from brain.multitask.data import MultitaskDataset, checkpoint_stats, load_labels, make_loader, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import slot_losses
 from brain.multitask.model import MultitaskModel
@@ -44,6 +47,7 @@ def load_model(ckpt_path: Path, device: torch.device):
     model = MultitaskModel(enc, reg, cfg["model"]).to(device)
     # joint checkpoints also hold the SSL predictor, which the multitask model has no use for
     model.load_state_dict({k: v for k, v in ck["multitask"].items() if not k.startswith("backbone.predictor.")})
+    model.label_stats = ck.get("label_stats")            # the training normalisation (data.checkpoint_stats)
     return model.eval().requires_grad_(False), reg, cfg
 
 
@@ -95,6 +99,26 @@ def pooled_features(model, cfg, loader, device, amp):
     return torch.cat(feats).numpy(), torch.cat(ys).numpy()
 
 
+def draw(pool: pd.DataFrame, k: int, seed: int, kind: str) -> list[str]:
+    """``k`` volume ids from ``pool`` (label rows: volume_id, value), stratified by class (by value quintile for
+    regression; none for segmentation), so a small draw cannot miss a rare class. Falls back to a plain draw."""
+    from sklearn.model_selection import train_test_split
+
+    pool = pool.drop_duplicates("volume_id")
+    if k >= len(pool):
+        return pool["volume_id"].tolist()
+    strata = None
+    if kind in ("binary", "multiclass"):
+        strata = pool["value"].astype(int).to_numpy()
+    elif kind == "regression":
+        strata = pd.qcut(pool["value"].astype(float), q=min(5, max(1, k // 4)), labels=False, duplicates="drop").to_numpy()
+    try:
+        picked, _ = train_test_split(pool, train_size=k, stratify=strata, random_state=seed)
+    except ValueError:                           # a stratum too small to split
+        picked = pool.sample(k, random_state=seed)
+    return picked["volume_id"].tolist()
+
+
 def linear_probe(kind: str, xtr, ytr, xte, yte) -> float | None:
     from sklearn.linear_model import LogisticRegression, RidgeCV
     from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
@@ -116,7 +140,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ckpt", type=Path, required=True)
     ap.add_argument("--shots", type=int, nargs="+", default=[16, 64, 256])
-    ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--tasks", nargs="*", default=None, help="held-out task ids (default: all)")
@@ -129,8 +153,9 @@ def main() -> None:
     d = cfg["data"]
     store = resolve(d["store_root"])
     labels, stats = load_labels(resolve(d["labels_dir"]))
+    stats = checkpoint_stats(model.label_stats, resolve(d["labels_dir"]), stats)
     volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
-    out: dict = {"ckpt": str(a.ckpt), "fewshot": [], "transfer": []}
+    out: dict = {"ckpt": str(a.ckpt), "fewshot": [], "transfer": [], "preds": []}
 
     if not a.no_transfer:
         for t in reg.trained:
@@ -161,10 +186,15 @@ def main() -> None:
             if k > len(pool):
                 continue
             for seed in range(a.seeds):
-                ids = pool.sample(k, random_state=seed)["volume_id"].tolist()
+                ids = draw(pool, k, seed, task.type)
                 tr_loader, _ = _loader(store, labels, volumes, reg, stats, task.id, "train", ids, workers=a.workers)
                 saved = fit_embedding(model, reg, cfg, tr_loader, t, dev, amp, a.steps, a.lr)
-                res = run_eval(model, te_loader, cfg, reg, stats, dev, model.backbone.patch_xyz, amp)
+                res, pr = run_eval(model, te_loader, cfg, reg, stats, dev, model.backbone.patch_xyz, amp,
+                                   return_preds=True)
+                rows = pr.get(t, [])
+                out["preds"].append({"task": task.id, "k": k, "seed": seed, "metric": METRIC[task.type],
+                                     "volume_id": [r[2] for r in rows], "y": [r[0] for r in rows],
+                                     "p": [r[1] for r in rows]})
                 model.task_emb.weight.data[t] = saved["task"]
                 model.cls_emb.data[t] = saved["cls"]
                 value = res.get(f"{task.id}_{METRIC[task.type]}")

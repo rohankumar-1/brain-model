@@ -30,8 +30,8 @@ def dice(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp: dict, return_preds: bool = False,
              alone: bool = True):
-    """Per-task metrics over ``loader`` (the model's own heads). ``return_preds`` also returns the (target, output)
-    rows per task index, in loader order (paired comparisons across checkpoints). ``alone=False`` asks a volume's
+    """Per-task metrics over ``loader`` (the model's own heads). ``return_preds`` also returns the (target, output,
+    volume_id) rows per task index, in loader order (paired comparisons across checkpoints pair by volume_id). ``alone=False`` asks a volume's
     tasks together in one query (slots attend to each other), as before 2026-10-25."""
     was = model.training
     model.eval()
@@ -49,16 +49,17 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
         for i, j in (task >= 0).nonzero().tolist():
             t = int(task[i, j])
             kind = reg[t].type
+            vid = str(raw["volume_id"][i])
             if kind == "binary":
-                preds[t].append((float(y[i, j]), float(out["binary"][i, j])))
+                preds[t].append((float(y[i, j]), float(out["binary"][i, j]), vid))
             elif kind == "regression":
-                preds[t].append((float(y[i, j]), float(out["regression"][i, j])))
+                preds[t].append((float(y[i, j]), float(out["regression"][i, j]), vid))
             elif kind == "multiclass":
-                preds[t].append((float(y[i, j]), int(out["multiclass"][i, j].float().argmax())))
+                preds[t].append((float(y[i, j]), int(out["multiclass"][i, j].float().argmax()), vid))
         if out.get("seg") is not None:
             d = dice(out["seg"].float(), seg_target(b["seg"]))
             for (i, j), v in zip(b["seg_pair"].tolist(), d.tolist()):
-                preds[int(task[i, j])].append((1.0, v))
+                preds[int(task[i, j])].append((1.0, v, str(raw["volume_id"][i])))
     model.train(was)
     res: dict[str, float] = {}
     skills = []

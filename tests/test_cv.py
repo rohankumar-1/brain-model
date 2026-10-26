@@ -36,9 +36,13 @@ def test_folds_group_subjects_and_test_every_volume_once_per_repeat():
             assert sorted(tested) == sorted(task.volume_ids)          # each volume tested exactly once per repeat
 
 
-def test_auto_mode_only_for_small_tasks_unseen_in_pretraining():
+def test_auto_mode_for_rare_classes_and_small_tasks_unseen_in_pretraining():
+    import dataclasses
+
     task, vol = _task(n_subj=40)
     assert cv.use_cv("auto", task, vol, overlap=0.0, max_subjects=200)
-    assert not cv.use_cv("auto", task, vol, overlap=1.0, max_subjects=200)    # images were in the SSL pool
-    assert not cv.use_cv("auto", task, vol, overlap=0.0, max_subjects=20)     # large enough for a fixed split
+    assert cv.use_cv("auto", task, vol, overlap=1.0, max_subjects=200)        # rare class: CV whatever the pool
+    reg = dataclasses.replace(task, task_type="regression", y=np.arange(len(task.y), dtype=float))
+    assert not cv.use_cv("auto", reg, vol, overlap=1.0, max_subjects=200)     # images were in the SSL pool
+    assert not cv.use_cv("auto", reg, vol, overlap=0.0, max_subjects=20)      # large enough for a fixed split
     assert cv.use_cv("on", task, vol, overlap=1.0, max_subjects=20)

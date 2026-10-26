@@ -14,10 +14,10 @@ Every model against one reference run, on three questions (`brain/eval/report.py
 | Headline | Question | Source |
 |---|---|---|
 | **In-domain** | Does it do the tasks it trained on? | its own heads on the test splits, paired with the reference on the same scans |
-| **Transfer** | Is the frozen encoder a good foundation? | 21 core downstream tasks in 5 groups (noisy tasks excluded) |
-| **Adaptation** | Can it learn a new task from 64 labels? | few-shot on held-out tasks |
+| **Transfer** | Is the frozen encoder a good foundation? | core downstream tasks in 5 groups, one validation-fixed encoder readout per task (never the model's own task outputs) |
+| **Adaptation** | Can it learn a new task from 64 labels? | few-shot on held-out tasks, paired seed by seed |
 
-All metrics are **skill**: 0 = chance, 1 = perfect (AUROC → `(auc − 0.5) / 0.5`, R² clipped at 0, Dice as is). A headline is the mean over groups of the mean over tasks, on tasks both models have; intervals combine per-task intervals assuming independence (approximate).
+All metrics are **skill**: 0 = chance, 1 = perfect (AUROC → `(auc − 0.5) / 0.5`, R² clipped at 0, Dice as is). A headline is the mean over groups of the mean over tasks, on tasks and scans both models have. Intervals: a paired bootstrap over subjects (one Poisson weight per person, shared across that person's scans and tasks), recomputing the headline each time.
 
 Edit `MODELS` / `REF` below and re-run from the top. One run's report alone: `runs/eval/<run>/report.md` (`jobs/submit_report.sh RUN REF`)."""),
 ("code", """import sys
@@ -27,7 +27,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.colors import LinearSegmentedColormap, to_hex
 
 # make the repo importable whatever the kernel's working directory or environment
 REPO = next((p for p in [Path.cwd(), *Path.cwd().parents] if (p / "brain" / "__init__.py").exists()),
@@ -35,7 +35,7 @@ REPO = next((p for p in [Path.cwd(), *Path.cwd().parents] if (p / "brain" / "__i
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from brain.eval.report import compare, headlines, val_history
+from brain.eval.report import compare, val_history
 
 warnings.filterwarnings("ignore")
 R = Path("/orcd/scratch/orcd/011/roku/brain-model/runs")
@@ -51,7 +51,7 @@ MODELS = {                                    # display name -> checkpoint; orde
 }
 REF = "run6 no-small"
 VAL_DIRS = {"run2 synthseg": R / "multitask/v3synthseg_s42"}   # training dirs of snapshot copies (their metrics.json)
-HEADS_CSV = Path("/home/roku/brain-model/runs/eval/heads_all/test_eval_heads.csv")   # test_eval over all MODELS, ref first
+HEADS_PREDS = Path("/home/roku/brain-model/runs/eval/heads_all/test_eval_preds.parquet")   # test_eval over all MODELS
 PARTS = {"in_domain": "In-domain", "transfer": "Transfer", "adaptation": "Adaptation"}
 
 # fixed categorical order (validated reference palette); text stays in ink colours, never the series colour
@@ -64,12 +64,15 @@ plt.rcParams.update({"figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "ax
                      "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2, "text.color": INK,
                      "axes.spines.top": False, "axes.spines.right": False, "font.size": 9})
 
-rows = compare(MODELS, REF, HEADS_CSV)
-H = headlines(rows)
-print(f"{len(rows)} task rows; reference = {REF}")"""),
+TASKS, H, NOTES = compare(MODELS, REF, HEADS_PREDS, reps=500)
+# absolute skill per model and task (the reference's from its side of each pairing)
+ABS = pd.concat([TASKS[["model", "part", "group", "task", "run"]],
+                 TASKS.drop_duplicates(["part", "task"]).assign(model=REF)[["model", "part", "group", "task", "ref"]]
+                 .rename(columns={"ref": "run"})], ignore_index=True)
+print(f"{len(TASKS)} paired task rows; reference = {REF}")"""),
 ("md", """## 1. Headlines
 
-`score` is the model's skill on the tasks it shares with the reference; `Δ` is model − reference with its approximate 95% interval. Blue = better than the reference, orange = worse; **bold** = interval excludes 0."""),
+`score` is the model's skill on the tasks it shares with the reference; `Δ` is model − reference with its 95% interval. Blue = better than the reference, orange = worse; **bold** = interval excludes 0."""),
 ("code", """def cell(r):
     if not np.isfinite(r.delta):
         return ""
@@ -113,7 +116,7 @@ plt.show()"""),
 
 Each model's mean skill per group, on the tasks it has (absolute, not paired). Groups are registry task groups (in-domain), the core-set groups (transfer) and held-out task families (adaptation)."""),
 ("code", """def heat(part, ax):
-    d = rows[rows.part == part].dropna(subset=["run"])
+    d = ABS[ABS.part == part].dropna(subset=["run"])
     if d.empty:                                # keep the axis: it carries the shared model labels
         ax.set_ylim(len(MODELS) - 0.5, -0.5)
         ax.set_xticks([])
@@ -163,27 +166,32 @@ ax.legend(fontsize=8, frameon=False, loc="lower right", ncol=2)
 fig.tight_layout(); plt.show()"""),
 ("md", """## 4. Per-task detail
 
-Δ skill vs the reference per task (blue better, orange worse). Use this to see which tasks drive a group's change; single tasks are noisy, so read them in groups."""),
+Δ skill vs the reference per task (blue better, orange worse; * = its paired interval excludes 0). Use this to see which tasks drive a group's change; single tasks are noisy, so read them in groups."""),
 ("code", """def task_table(part):
-    d = rows[(rows.part == part) & (rows.model != REF)].dropna(subset=["run", "ref"])
+    d = TASKS[TASKS.part == part].dropna(subset=["run", "ref"])
     if d.empty:
-        return pd.DataFrame()
-    t = (d.assign(delta=d.run - d.ref).pivot_table(index=["group", "task"], columns="model", values="delta")
-         .reindex(columns=[m for m in MODELS if m != REF and m in set(d.model)]))
+        return pd.DataFrame(), pd.DataFrame()
+    cols = [m for m in MODELS if m != REF and m in set(d.model)]
+    t = d.pivot_table(index=["group", "task"], columns="model", values="delta").reindex(columns=cols)
+    sig = (d.assign(s=(d.lo > 0) | (d.hi < 0)).pivot_table(index=["group", "task"], columns="model", values="s")
+           .reindex(index=t.index, columns=cols).fillna(0).astype(bool))
     t.insert(0, f"{REF} skill", d.drop_duplicates("task").set_index(["group", "task"]).ref.reindex(t.index))
-    return t
+    return t, sig
 
 for p in PARTS:
-    t = task_table(p)
+    t, sig = task_table(p)
     if t.empty:
         continue
     cols = [c for c in t.columns if c != f"{REF} skill"]
-    display(t.style.format("{:+.3f}", subset=cols, na_rep="").format("{:.3f}", subset=[f"{REF} skill"])
-            .background_gradient(cmap=DIV, subset=cols, vmin=-0.2, vmax=0.2)
+    shown = t.copy().astype(object)
+    for c in cols:
+        shown[c] = [("" if pd.isna(v) else f"{v:+.3f}" + ("*" if s else "")) for v, s in zip(t[c], sig[c])]
+    shown[f"{REF} skill"] = t[f"{REF} skill"].map("{:.3f}".format)
+    shade = lambda v: "" if pd.isna(v) else f"background-color: {to_hex(DIV((min(max(v, -0.2), 0.2) + 0.2) / 0.4))}"  # noqa: E731
+    display(shown.style.apply(lambda col: [shade(v) if col.name in cols else "" for v in t[col.name]], axis=0)
             .set_caption(f"{PARTS[p]}: Δ skill per task vs {REF}"))"""),
-("code", """# missing results: what still needs to run before a comparison is complete
-miss = rows[rows.run.isna() | rows.ref.isna()]
-miss.groupby(["model", "part"]).task.apply(lambda s: ", ".join(s)).to_frame("missing") if len(miss) else "nothing missing\""""),
+("code", """# tasks left out of the transfer comparison, and why (missing results, protocol mismatch, labels seen in training)
+NOTES.groupby(["model", "why"]).task.apply(lambda s: ", ".join(s)).to_frame("tasks") if len(NOTES) else "nothing left out\""""),
 ]
 
 

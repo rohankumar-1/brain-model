@@ -22,6 +22,7 @@ FOCAL_SLICES = 64  # ICH / tumor / lesion tasks: finer axial grid
 VOLUME_DEPTH = DEPTH
 CACHE_VERSION = "v4"  # v3 was cls+mean; v4 is cls+mean+amax and stores z_index
 CACHE_VERSION_3D = "v5_3d_tok"  # native-grid tokens + xyz; v4_3d was packed axial planes
+BIG_CACHE_BYTES = 8e9  # token arrays above this: stored as a memory-mapped .npy sidecar, read back as float16
 
 
 def uniform_slice_indices(depth: int, n: int) -> np.ndarray:
@@ -162,10 +163,31 @@ def extract_volume_embeddings(
     return embs, mask, z_index
 
 
+def _fp(ckpt: Path) -> str:
+    from brain.downstream.records import fingerprint
+
+    return fingerprint(Path(ckpt))
+
+
+def cache_fresh(cache_path: Path, ckpt: Path, recorded: str | None) -> bool:
+    """Whether a cache was built from the checkpoint's current weights: its recorded fingerprint matches, or (caches
+    from before fingerprints were recorded, 2026-10-25) it was written after the checkpoint file last changed. Caches
+    are keyed by checkpoint path, and ``best.pt`` / ``last.pt`` are overwritten during training."""
+    from brain.downstream.records import fingerprint
+
+    if recorded:
+        return str(recorded) == fingerprint(Path(ckpt))
+    return Path(cache_path).stat().st_mtime >= Path(ckpt).stat().st_mtime
+
+
 def _readable(path: Path) -> bool:
     try:
         with np.load(path, allow_pickle=False) as d:
-            return {"volume_ids", "representation", "mus", "mask"} <= set(d.files)
+            files = set(d.files)
+        if "mus" not in files:                              # big caches keep their tokens in a memory-mapped sidecar
+            np.load(path.with_suffix(".mus.npy"), mmap_mode="r")
+            files.add("mus")
+        return {"volume_ids", "representation", "mus", "mask"} <= files
     except Exception:
         return False
 
@@ -212,12 +234,18 @@ def load_or_build_embeddings(
             from brain.multitask.slots import is_multitask
 
             has_regs = has_regs and not is_multitask(ckpt)
-        if same_ids and has_regs and (spatial or int(data["max_slices"]) == max_slices):
+        fresh = cache_fresh(path, ckpt, str(data["ckpt_fingerprint"]) if "ckpt_fingerprint" in data.files else None)
+        if not fresh:
+            print(f"[cache] stale (the checkpoint changed after it was built), rebuilding: {path}", flush=True)
+        if same_ids and has_regs and fresh and (spatial or int(data["max_slices"]) == max_slices):
             z = data["z"] if "z" in data.files else slot_z(len(ids), max_slices)
             z = np.asarray(z, dtype=np.float32 if getattr(z, "ndim", 2) == 3 else np.int16)
-            n_tok = int(data["mus"].shape[1])
-            mus = data["mus"]
-            mus = mus if (n_tok > 8192 or mus.dtype == np.float32) else mus.astype(np.float32)
+            mus = np.load(path.with_suffix(".mus.npy"), mmap_mode="r") if "mus" not in data.files else data["mus"]
+            n_tok = int(mus.shape[1])
+            # small caches as float32; big ones stay float16 (a float32 copy of RSNA's tokens alone was ~220 GB):
+            # the heads cast per chunk
+            big = n_tok > 8192 or mus.nbytes > BIG_CACHE_BYTES
+            mus = mus if (big or mus.dtype == np.float32) else mus.astype(np.float32)
             return {
                 "volume_ids": ids, "mus": mus, "mask": data["mask"],
                 "z": z, "latent_dim": int(data["latent_dim"]),
@@ -246,6 +274,7 @@ def load_or_build_embeddings(
         volume_ids=np.asarray(ids), mus=mus.astype(np.float16, copy=False), mask=mask, z=z_save,
         latent_dim=np.int32(mus.shape[-1]), max_slices=np.int32(mus.shape[1] if spatial else max_slices),
         representation=np.asarray(enc.representation), window=np.asarray(win),
+        ckpt_fingerprint=np.asarray(_fp(ckpt)),
     )
     cls = getattr(enc, "cls_bank", None)                     # CLS models: (N, D * n_windows)
     if cls is not None:
@@ -261,7 +290,13 @@ def load_or_build_embeddings(
         payload["general"] = general.astype(np.float32)
     # Uncompressed for the 32^3 grid: compressing ~20 GB of embeddings is slower than the encode.
     tmp = path.with_name(path.stem + ".tmp.npz")             # write then rename: a full disk leaves no truncated cache
-    (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(tmp, **payload)
+    if payload["mus"].nbytes > BIG_CACHE_BYTES:             # tokens to an uncompressed .npy, read back memory-mapped
+        side = path.with_suffix(".mus.npy")
+        np.save(side.with_name(side.stem + ".tmp.npy"), payload.pop("mus"))
+        os.replace(side.with_name(side.stem + ".tmp.npy"), side)
+        np.savez(tmp, **payload)
+    else:
+        (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(tmp, **payload)
     os.replace(tmp, path)
     return {
         "volume_ids": ids, "mus": mus, "mask": mask,
