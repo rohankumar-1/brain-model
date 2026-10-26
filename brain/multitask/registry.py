@@ -52,6 +52,7 @@ class Task:
     analog: str | None = None
     survival_bins: list[float] = field(default_factory=list)
     group: str = ""
+    needs_skull: bool = False        # the target is about the skull / head outline: never asked of a skull-stripped scan
 
     @property
     def trained(self) -> bool:
@@ -123,7 +124,8 @@ def load_registry(path: str | Path | None = None) -> Registry:
         task = Task(id=str(t["id"]), type=str(t["type"]), descriptions=[str(d) for d in desc],
                     sources=list(t.get("sources") or []), classes=[str(c) for c in t.get("classes") or []],
                     role=str(t.get("role", "train")), analog=t.get("analog"),
-                    survival_bins=[float(b) for b in t.get("survival_bins") or []])
+                    survival_bins=[float(b) for b in t.get("survival_bins") or []],
+                    needs_skull=bool(t.get("needs_skull", False)))
         task.group = str(t.get("group") or default_group(task.id, task.role))
         if task.type not in TYPES:
             raise ValueError(f"task {task.id}: unknown type {task.type}")

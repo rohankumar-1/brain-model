@@ -28,7 +28,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from brain.common.windowing import asinh_window, canonical_c_w, floors
 from brain.data.augment import appearance
 from brain.data.gate import token_keep
-from brain.data.volumes import FamilySampler, _worker_threads
+from brain.data.volumes import FamilySampler, _worker_threads, meta_id
 from brain.multitask.labels import live_targets
 from brain.multitask.registry import Registry
 
@@ -46,8 +46,13 @@ class MultitaskDataset(Dataset):
                  stats: dict, *, split: str | list[str], tasks: list[str] | None = None, train: bool = True,
                  k_max: int = 8, p_all: float = 0.2, rare_beta: float = 0.5, max_seg: int = 2,
                  use: str | None = "train", volume_ids: list[str] | None = None,
-                 group_weights: dict[str, float] | None = None):
+                 group_weights: dict[str, float] | None = None, meta_drop: float = 0.0, skull_strip: float = 0.0):
+        """``meta_drop``: chance (training) that a scan's metadata id is replaced by unknown. ``skull_strip``: chance
+        (training) that an MRI scan with a QC-passed SynthStrip mask is skull-stripped, unless a drawn task
+        ``needs_skull``: tumour / stroke cohorts arrive stripped, so stripping is otherwise a cohort fingerprint."""
         self.store_root = Path(store_root)
+        self.meta_drop, self.skull_strip = float(meta_drop), float(skull_strip)
+        self.skull_tasks = {i for i, t in enumerate(reg.tasks) if t.needs_skull}
         self.reg, self.train = reg, bool(train)
         self.k_max, self.p_all, self.max_seg = int(k_max), float(p_all), int(max_seg)
         task_ids = tasks or [t.id for t in reg.trained]
@@ -85,6 +90,12 @@ class MultitaskDataset(Dataset):
                               self.df["thick_axis"].fillna(-1).astype(int)))
         self.paths = self.df["image_path"].astype(str).tolist()
         self.mods = self.df["modality"].astype(str).str.lower().tolist()
+        get = lambda c, fill="": meta[c] if c in meta else pd.Series(fill, index=meta.index)  # noqa: E731
+        self.meta_ids = [meta_id(c, m, ds) for c, m, ds in zip(get("contrast", None), self.mods, get("dataset"))]
+        mask_ok = get("brain_ok").astype(str).str.lower().isin(["true", "1", "1.0"]) \
+            & get("brain_method").astype(str).eq("synthstrip")
+        stripped = get("stripped_input").astype(str).str.lower().isin(["true", "1", "1.0"])
+        self.strippable = (mask_ok & ~stripped & ~pd.Series(self.mods, index=meta.index).str.startswith("ct")).tolist()
 
     def __len__(self) -> int:
         return len(self.items)
@@ -126,7 +137,9 @@ class MultitaskDataset(Dataset):
         vid, avail = self.items[int(idx)]
         rng = np.random.default_rng(int(torch.randint(0, 2**31 - 1, (1,))) if self.train else idx)
         drawn = self._draw(avail, rng)
-        need_brain = any(r == "@brain" or r.startswith("@live:") for _, _, r in drawn)
+        strip = (self.train and self.skull_strip > 0 and self.strippable[idx] and rng.random() < self.skull_strip
+                 and not any(t in self.skull_tasks for t, _, _ in drawn))
+        need_brain = strip or any(r == "@brain" or r.startswith("@live:") for _, _, r in drawn)
         rel = Path(self.paths[idx])
         arrays = store.read_many(rel if rel.is_absolute() else self.store_root / rel,
                                  ("image", "brain") if need_brain else ("image",))
@@ -160,6 +173,9 @@ class MultitaskDataset(Dataset):
             tasks.append(t)
             ys.append(y)
             seg_slot.append(slot)
+        if strip:                       # after the live targets (measured inside the brain mask, so unchanged)
+            img = np.where(np.asarray(arrays["brain"]) > 0, img, img.min())
+        meta_ = 0 if self.train and self.meta_drop > 0 and rng.random() < self.meta_drop else self.meta_ids[idx]
         return {
             "image": torch.from_numpy(np.ascontiguousarray(img)),           # (Z, Y, X) raw, stored dtype
             "modality": 0 if mod.startswith("ct") else 1,
@@ -169,6 +185,7 @@ class MultitaskDataset(Dataset):
             "seg": torch.stack(seg_masks) if seg_masks else torch.zeros(0, *img.shape, dtype=torch.uint8),
             "volume_id": vid,
             "thick": torch.tensor(self.thick[idx], dtype=torch.float32),     # (mm, grid axis or -1)
+            "meta": meta_,
         }
 
 
@@ -197,6 +214,7 @@ def collate(batch: list[dict]) -> dict:
         "seg_pair": torch.tensor(pairs, dtype=torch.long).reshape(-1, 2),
         "volume_id": [b["volume_id"] for b in batch],
         "thick": torch.stack([b.get("thick", torch.tensor([1.0, -1.0])) for b in batch]),
+        "meta": torch.tensor([int(b.get("meta", 0)) for b in batch], dtype=torch.long),
     }
 
 
@@ -339,7 +357,8 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     else:
         x = canonical_window(raw, mod)
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
-            "seg": seg, "seg_pair": batch["seg_pair"].to(device)}
+            "seg": seg, "seg_pair": batch["seg_pair"].to(device),
+            "meta": batch["meta"].to(device) if "meta" in batch else None}
 
 
 def ssl_view(batch: dict, rows: torch.Tensor, cfg: dict, device, patch_xyz) -> tuple[torch.Tensor, torch.Tensor]:
@@ -416,7 +435,9 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
     volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
     ds = MultitaskDataset(store, labels, volumes, reg, stats, split="train", train=True, tasks=train_ids,
                           k_max=int(tk["k_max"]), p_all=float(tk["p_all"]), rare_beta=float(tk["rare_beta"]),
-                          max_seg=int(tk["max_seg"]), group_weights=tk.get("group_weights"))
+                          max_seg=int(tk["max_seg"]), group_weights=tk.get("group_weights"),
+                          meta_drop=float((cfg["model"].get("meta") or {}).get("drop", 0.0)),
+                          skull_strip=float(((cfg.get("aug") or {}).get("skull_strip") or {}).get("p", 0.0)))
     loader = make_loader(ds, batch_size=batch, shuffle=True, seed=seed, workers=workers,
                          balance_alpha=float(d.get("balance_alpha", 1.0)), balance_groups=d.get("balance_groups"),
                          distributed=distributed)

@@ -142,7 +142,10 @@ def _multitask_defaults() -> dict[str, Any]:
                                "noise": {"p": 0.0, "kind": "gaussian", "snr": [15.0, 100.0], "sigma": [0.02, 0.1]},
                                "blur": {"p": 0.0, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.0, "amp": 0.1}},
                 # blank a random inferior slab (truncated coverage) on rows asking no whole-brain target; p 0 = off
-                "fov_cut": {"p": 0.0, "mm": [10, 40]}},
+                "fov_cut": {"p": 0.0, "mm": [10, 40]},
+                # skull-strip skull-on MRI with its SynthStrip mask (never rows asking a needs_skull task): the tumour
+                # and stroke cohorts arrive stripped, so "no skull" would otherwise mean "lesion cohort"
+                "skull_strip": {"p": 0.3}},
         # general: LeJEPA (prediction + SIGReg, lamb) on the general slot of two global views; the second view of the
         # first ``frac`` rows is a small rotation / shift plus a box crop (each axis keeps >= crop_min); weight 0 = off
         "loss": {"balance": "ema", "ema_decay": 0.99, "seg_stride": 2,
@@ -205,6 +208,9 @@ for _name, _c in _DEFAULTS.items():
     if "gather_ddp" in _c["loss"]:
         # None: gathered SSL terms get their full gradient; an int reproduces the old (1/W) weighting of that GPU count
         _c["loss"].setdefault("gather_world_ref", None)
+    # scan metadata (modality / contrast, brain.data.volumes.META) as an encoder input, replaced by "unknown" with
+    # probability drop; checkpoints without the key have none
+    _c["model"].setdefault("meta", {"enabled": True, "drop": 0.2})
     if _name in ("multitask", "joint"):
         # uncertainty balancing: log-variances soft-clamped to +-uncertainty_clamp (task weights within e^+-clamp)
         _c["loss"].setdefault("uncertainty_clamp", 1.0)

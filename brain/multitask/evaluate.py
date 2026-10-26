@@ -41,7 +41,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     for raw in loader:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
-            out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=alone)
+            out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=alone, meta=b.get("meta"))
         loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"])
         task, y = b["task"], b["y"]
         for i, j in has.nonzero().tolist():

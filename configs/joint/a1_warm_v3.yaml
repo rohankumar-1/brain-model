@@ -40,6 +40,7 @@ model:
   n_registers: 0
   rope_min_period_mm: null
   rope_fp32: false          # v3's numerics (bf16 RoPE angles, bf16 residual stream): A1 matches v3 / run 6
+  meta: {enabled: false, drop: 0.0}   # no metadata input / skull-strip augmentation: method-only vs run 6
   fp32_residual: false
   taps: [3, 7]
   slot: {dim: 256, layers: 3, heads: 8, width: null, mode: slots, cross_task: true, embedding: learned}
@@ -110,6 +111,7 @@ aug:
       p: 0.2
       sigma_vox: [0.5, 1.0]
     drift: {p: 0.2, amp: 0.1}
+  skull_strip: {p: 0.0}
   fov_cut:
     p: 0.2
     mm: [10, 40]

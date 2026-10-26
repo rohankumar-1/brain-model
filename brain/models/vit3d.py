@@ -229,6 +229,7 @@ class BrainEncoder(nn.Module):
         rope_min_period_mm: float | None = None,
         rope_fp32: bool = False,
         fp32_residual: bool = False,
+        n_meta: int = 0,
     ):
         super().__init__()
         if size not in VIT_SIZES:
@@ -270,6 +271,19 @@ class BrainEncoder(nn.Module):
         self.apply(self._init_weights)
         if self.prefix is not None:
             nn.init.trunc_normal_(self.prefix, std=0.02)
+        self.meta_emb: nn.Embedding | None = None
+        self.n_meta = 0
+        if n_meta:
+            self.enable_meta(n_meta)
+
+    def enable_meta(self, n_meta: int) -> None:
+        """Scan metadata (``brain.data.volumes.META``: modality / contrast, 0 = unknown) as a learned embedding added
+        to every patch token. Zero-initialised, so adding it to a trained encoder changes nothing until it learns."""
+        self.n_meta = int(n_meta)
+        self.meta_emb = nn.Embedding(self.n_meta, self.embed_dim)
+        nn.init.zeros_(self.meta_emb.weight)
+        p = next(self.parameters())
+        self.meta_emb.to(device=p.device)
 
     @property
     def n_prefix(self) -> int:
@@ -287,7 +301,7 @@ class BrainEncoder(nn.Module):
             return checkpoint(block, x, coords, attn_mask, n_prefix, use_reentrant=False)
         return block(x, coords, attn_mask, n_prefix)
 
-    def _embed(self, view, coords_mm, patch_size_mm, patch_xyz, zyx):
+    def _embed(self, view, coords_mm, patch_size_mm, patch_xyz, zyx, meta: torch.Tensor | None = None):
         tokens, grid = self.patch_embed(view, patch_xyz, zyx=zyx)
         b, n, _ = tokens.shape
         if coords_mm.shape[:2] != (b, n) or coords_mm.size(-1) != 3:
@@ -295,7 +309,10 @@ class BrainEncoder(nn.Module):
         scale = self.scale_embed(patch_size_mm)
         if self.fp32_residual:
             tokens, scale = tokens.float(), scale.float()
-        return tokens + (scale.unsqueeze(1) if patch_size_mm.ndim == 2 else scale), grid
+        tokens = tokens + (scale.unsqueeze(1) if patch_size_mm.ndim == 2 else scale)
+        if self.meta_emb is not None and meta is not None:
+            tokens = tokens + self.meta_emb(meta.to(tokens.device).long()).unsqueeze(1).to(tokens.dtype)
+        return tokens, grid
 
     def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor,
              taps: Sequence[int] = ()) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor]]:
@@ -327,12 +344,14 @@ class BrainEncoder(nn.Module):
         patch_xyz: Sequence[int] | None = None,
         keep: torch.Tensor | None = None,
         taps: Sequence[int] = (),
+        meta: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Dense token features for evaluation. ``view`` is (B, C, X, Y, Z). Dropped tokens are zero.
 
-        ``taps`` are block indices whose (pre-norm) outputs are also returned, as ``out["taps"]``.
+        ``taps`` are block indices whose (pre-norm) outputs are also returned, as ``out["taps"]``. ``meta`` (B,) are
+        ``META`` ids (ignored by an encoder without ``n_meta``).
         """
-        tokens, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=False)
+        tokens, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=False, meta=meta)
         b, n, _ = tokens.shape
         if keep is None:
             keep = torch.ones(b, n, dtype=torch.bool, device=tokens.device)
@@ -360,6 +379,7 @@ class BrainEncoder(nn.Module):
         plan: tuple[torch.Tensor, list[int], list[int]],
         patch_xyz: Sequence[int] | None = None,
         tokens: bool = False,
+        meta: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Pooled embedding of each row, and optionally its dense tokens, in input order.
 
@@ -368,7 +388,7 @@ class BrainEncoder(nn.Module):
         count and cut into buckets, so a row is padded to its bucket's longest row, not the batch's. Rows
         never interact, so this changes cost, not values. ``longest`` comes from the CPU: no GPU sync.
         """
-        emb, _ = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True)
+        emb, _ = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True, meta=meta)
         order, sizes, longest = plan
         order = order.to(emb.device, non_blocking=True)
         pooled, dense, start = [], [], 0

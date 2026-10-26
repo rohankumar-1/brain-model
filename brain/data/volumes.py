@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from brain.data.index import enrich
 
 
-ROW_KEYS = ("modality", "thick_mm", "thick_axis", "volume_full", "brain_full", "contrast_id", "tissue_q")
+ROW_KEYS = ("modality", "thick_mm", "thick_axis", "volume_full", "brain_full", "contrast_id", "tissue_q", "meta_id")
 HIST_LEVELS = 32                     # whole-volume tissue quantiles shipped for histogram matching  # per volume (B, ...); views (V, B, ...)
 
 
@@ -21,6 +21,29 @@ HIST_LEVELS = 32                     # whole-volume tissue quantiles shipped for
 # flair/pd, IXI t1/t2. Single-sequence cohorts without a label (ABIDE, OASIS, AOMIC, Pixar, ID1000) are T1-weighted.
 CONTRAST_GROUPS = {"t1": 1, "t1w": 1, "t1n": 1, "t1_pre": 1, "t1c": 2, "t1_gd": 2, "bravo": 2,
                    "t2": 3, "t2w": 3, "flair": 4, "t2f": 4, "pd": 5, "dwi": 6, "adc": 7, "t2s": 8}
+
+
+# Metadata the encoder can be told (``model.meta``): the scan's modality / contrast, id 0 = unknown (also what metadata
+# dropout substitutes). Unlabelled MRI is T1 except where the dataset name says otherwise (BrainMetShare series).
+META = ("unknown", "ct", "cta", "t1", "t1c", "t2", "flair", "pd", "dwi", "adc", "t2s")
+META_ALIASES = {"t1": "t1", "t1w": "t1", "t1n": "t1", "t1_pre": "t1", "t1c": "t1c", "t1_gd": "t1c", "bravo": "t1c",
+                "t2": "t2", "t2w": "t2", "flair": "flair", "t2f": "flair", "pd": "pd", "dwi": "dwi", "adc": "adc",
+                "t2s": "t2s", "ct": "ct", "ncct": "ct", "cta": "cta"}
+DATASET_CONTRAST = {"brainmetshare_bravo": "t1c", "brainmetshare_t1_gd": "t1c", "brainmetshare_t1_pre": "t1",
+                    "brainmetshare_flair": "flair", "isles24_cta": "cta", "isles24_ncct": "ct"}
+
+
+def n_meta(model_cfg: dict) -> int:
+    """Size of the encoder's metadata table: ``len(META)`` when ``model.meta.enabled``, else 0 (no metadata)."""
+    return len(META) if bool((model_cfg.get("meta") or {}).get("enabled", False)) else 0
+
+
+def meta_id(contrast, modality, dataset: str = "") -> int:
+    """The ``META`` index of a scan from its index row (contrast label, modality, dataset); 0 when unknown."""
+    is_ct = modality == 0 or str(modality).lower().startswith("ct")
+    c = str(contrast).strip().lower() if contrast is not None and str(contrast) not in ("nan", "None", "") else ""
+    c = c or DATASET_CONTRAST.get(str(dataset), "") or ("ct" if is_ct else "t1")
+    return META.index(META_ALIASES[c]) if c in META_ALIASES else 0
 
 
 def contrast_group(contrast, modality: int) -> int:
@@ -154,6 +177,7 @@ class VolumeDataset(Dataset):
         if per_view and "brain" in arrays:                  # cropped with the views; dropped per view in raw_views
             extra["brain"] = torch.from_numpy(np.ascontiguousarray(arrays["brain"])).bool().unsqueeze(0).unsqueeze(0)
         extra["contrast_id"] = torch.tensor([contrast_group(row.get("contrast"), modality)])
+        extra["meta_id"] = torch.tensor([meta_id(row.get("contrast"), modality, row.get("dataset", ""))])
         if ((self.crop_cfg or {}).get("loss") or {}).get("predict", {}).get("lesion"):
             # lesion-aware MAE masking: per-token lesion flags are derived from this in the worker (not shipped)
             les, path = None, self._lesion_path(row)

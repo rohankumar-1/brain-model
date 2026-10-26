@@ -61,9 +61,10 @@ class ViewNet(nn.Module):
             n = v[f"{g}_view"].shape[0]
             rows = lambda t: t.contiguous().reshape(n * b, *t.shape[2:])  # noqa: E731  (V, B, ...) -> (V*B, ...)
             keep = rows(v[f"{g}_fg"])
+            meta = v["meta"].repeat(n) if "meta" in v else None              # (V*B,): row = view * B + volume
             pooled[g], tokens = self.enc.encode_rows(
                 rows(v[f"{g}_view"]), rows(v[f"{g}_coords"]), rows(v[f"{g}_patch_mm"]), keep,
-                v["plans"][g], v["patch"][g], tokens=self.dense,
+                v["plans"][g], v["patch"][g], tokens=self.dense, meta=meta,
             )
             if self.dense:
                 head = self.enc.token_head(tokens)
@@ -72,7 +73,7 @@ class ViewNet(nn.Module):
                     predicted = self._predict(
                         v, rows, head, keep, view_key="global_view", coords_key="global_coords",
                         patch_mm_key="global_patch_mm", ctx_key="ctx_keep", tgt_key="tgt_mask",
-                        ctx_plan="ctx", full_plan="global", patch=v["patch"]["global"])
+                        ctx_plan="ctx", full_plan="global", patch=v["patch"]["global"], meta=meta)
                 if g == "fine":
                     fine_native["emb"] += list(head.view(n, b, *head.shape[1:]).unbind(0))
                     fine_native["valid"] += list(keep.view(n, b, -1).unbind(0))
@@ -80,7 +81,7 @@ class ViewNet(nn.Module):
                         predicted_fine = self._predict(
                             v, rows, head, keep, view_key="fine_view", coords_key="fine_coords",
                             patch_mm_key="fine_patch_mm", ctx_key="fine_ctx_keep", tgt_key="fine_tgt_mask",
-                            ctx_plan="fine_ctx", full_plan="fine", patch=v["patch"]["fine"])
+                            ctx_plan="fine_ctx", full_plan="fine", patch=v["patch"]["fine"], meta=meta)
                 entries["emb"] += list(emb.view(n, b, *emb.shape[1:]).unbind(0))
                 entries["valid"] += list(valid.view(n, b, -1).unbind(0))
         proj = self.enc.projector(torch.cat([pooled[g] for g in self.pooled_groups])).view(-1, b, self.enc.proj_dim)
@@ -93,11 +94,11 @@ class ViewNet(nn.Module):
 
     def _predict(self, v: dict, rows, head: torch.Tensor, keep: torch.Tensor, *,
                  view_key: str, coords_key: str, patch_mm_key: str, ctx_key: str, tgt_key: str,
-                 ctx_plan: str, full_plan: str, patch) -> dict:
+                 ctx_plan: str, full_plan: str, patch, meta: torch.Tensor | None = None) -> dict:
         view, coords = rows(v[view_key]), rows(v[coords_key])
         ctx = rows(v[ctx_key])
         _, ctx_tokens = self.enc.encode_rows(
-            view, coords, rows(v[patch_mm_key]), ctx, v["plans"][ctx_plan], patch, tokens=True,
+            view, coords, rows(v[patch_mm_key]), ctx, v["plans"][ctx_plan], patch, tokens=True, meta=meta,
         )
         latent, pixel = self.enc.predictor(ctx_tokens, ctx, keep, coords, v["plans"][full_plan])
         return {

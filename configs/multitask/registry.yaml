@@ -149,6 +149,7 @@ tasks:
 
   - id: brain_mask
     type: segmentation
+    needs_skull: true      # not asked of skull-stripped scans (stripped at source or by augmentation)
     descriptions:
       - "Segment the brain (skull stripping)."
       - "Outline all brain tissue, excluding skull, scalp and air."
@@ -191,6 +192,7 @@ tasks:
 
   - id: ct_skull_density
     type: regression
+    needs_skull: true      # not asked of skull-stripped scans (stripped at source or by augmentation)
     descriptions:
       - "Estimate the density of the skull bone in Hounsfield units."
       - "How dense is the calvarium (opportunistic bone density)?"
@@ -448,6 +450,7 @@ tasks:
   - id: cq500_fracture
     role: held_out
     type: binary
+    needs_skull: true
     descriptions: ["Is there a fracture of the skull vault?"]
     sources: [{source: cq500, finding: CalvarialFracture}]
   - id: cq500_midline_shift

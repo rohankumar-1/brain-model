@@ -17,6 +17,7 @@ from brain.data.batch3d import prepare
 from brain.data.crops3d import raw_views
 from brain.data.volumes import collate_volumes, crop_microbatch, make_loader, make_synthetic_volume
 from brain.models.viewnet3d import ViewNet, batch_meta
+from brain.data.volumes import n_meta
 from brain.models.vit3d import BrainEncoder
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
@@ -39,6 +40,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         rope_base_mm=float(m.get("rope_base_mm", 100.0)),
         rope_min_period_mm=m.get("rope_min_period_mm"),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
+        n_meta=n_meta(m),
         checkpoint_blocks=bool(m.get("checkpoint", True)),
         proj_norm=str(m.get("proj_norm", "batch")),
         dense_dim=int(m.get("dense_dim", 0)) if dense else 0,

@@ -15,6 +15,7 @@ import torch
 
 from brain.common.optim import NO_DECAY_SUFFIXES, NO_DECAY_TABLES, POST_BLOCKS
 from brain.common.paths import resolve
+from brain.data.volumes import n_meta
 from brain.multitask.data import prepare, protected_tasks, ssl_view, task_loaders
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
@@ -38,7 +39,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     if synthetic or not m.get("init_from"):
         enc = BrainEncoder(size=m.get("size", "test"), patch_xyz=tuple(cfg["views"]["patch_xyz"]),
                            qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
-                           rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)))
+                           rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
+                           n_meta=n_meta(m))
     else:
         src = torch.load(resolve(m["init_from"]), map_location="cpu", weights_only=False)
         enc = load_brain3d(src, torch.device("cpu")).model
@@ -51,6 +53,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         m["size"] = enc.size
         # the encoder keeps the numerics it was trained with (the defaults' True would not describe it)
         m["rope_fp32"], m["fp32_residual"] = bool(enc.rope.fp32), bool(enc.fp32_residual)
+        if n_meta(m) and enc.meta_emb is None:                # metadata on an encoder trained without it
+            enc.enable_meta(n_meta(m))
     enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
     return enc.to(device).train().requires_grad_(True)
 
@@ -170,7 +174,8 @@ class Trainer(engine.Trainer):
         x2, keep2 = ssl_view(raw, rows, self.cfg, self.rt.device, self.patch)
         pad = lambda t, v: torch.cat([t, torch.full((len(rows), *t.shape[1:]), v, dtype=t.dtype, device=t.device)])  # noqa: E731
         return {**b, "x": torch.cat([b["x"], x2]), "keep": torch.cat([b["keep"], keep2]),
-                "task": pad(b["task"], -1), "y": pad(b["y"], 0)}, rows
+                "task": pad(b["task"], -1), "y": pad(b["y"], 0),
+                "meta": torch.cat([b["meta"], b["meta"][rows]]) if b.get("meta") is not None else None}, rows
 
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
         raw = self._next()
@@ -181,7 +186,8 @@ class Trainer(engine.Trainer):
             b, rows = self._with_general_views(raw, b)
         self.opt.zero_grad(set_to_none=True)
         with torch.autocast(**self.amp):
-            out = self.net(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=step >= self.freeze_steps)
+            out = self.net(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=step >= self.freeze_steps,
+                           meta=b["meta"])
         loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride)
         total, per_task = self.balancer(loss, has, b["task"])
         if self.gen_w > 0:

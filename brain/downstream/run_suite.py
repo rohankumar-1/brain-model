@@ -364,6 +364,21 @@ def main() -> None:
               "pretrain_overlap": overlap,
               "embed_cache": str(emb["cache_path"]), **split_sizes, "cv": cv_info}
     print(f"[ok] summary → {finalize_run(run_dir, config, all_metrics)}")
+    drop_big_cache(Path(emb["cache_path"]))
+
+
+def drop_big_cache(path: Path) -> None:
+    """Delete a task's token cache once its heads are done when the tokens are memory-mapped (> BIG_CACHE_BYTES; RSNA
+    is ~40 GB per model): seven models' worth filled the scratch quota on 2026-10-25. BRAIN_KEEP_BIG_CACHE=1 keeps it."""
+    import os
+
+    side = path.with_suffix(".mus.npy")
+    if not side.exists() or os.environ.get("BRAIN_KEEP_BIG_CACHE") == "1":
+        return
+    gb = side.stat().st_size / 2**30
+    side.unlink()
+    path.unlink(missing_ok=True)
+    print(f"[cache] dropped the {gb:.0f} GB token cache {side} (BRAIN_KEEP_BIG_CACHE=1 keeps it)", flush=True)
 
 
 if __name__ == "__main__":

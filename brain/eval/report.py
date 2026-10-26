@@ -279,7 +279,8 @@ def transfer_pairs(run_ck: Path, ref_ck: Path, groups: dict[str, list[str]], see
     return out, notes
 
 
-def adaptation_pairs(run_ck: Path, ref_ck: Path, k: int) -> list[dict]:
+def adaptation_pairs(run_ck: Path, ref_ck: Path, k: int, seen: dict[str, list[str]] | None = None,
+                     trained_by_either: set[str] | None = None) -> list[dict]:
     def load(ck: Path) -> dict:
         f = ck.parent / f"fewshot_{ck.stem}.json"
         if not f.exists():
@@ -290,6 +291,8 @@ def adaptation_pairs(run_ck: Path, ref_ck: Path, k: int) -> list[dict]:
     a, b = load(run_ck), load(ref_ck)
     out = []
     for task in sorted({t for t, _ in a} & {t for t, _ in b}):
+        if set((seen or {}).get(task, [])) & (trained_by_either or set()):
+            continue                                      # e.g. dementia (OASIS-1 CDR) for runs that trained MMSE there
         seeds = sorted({s for t, s in a if t == task} & {s for t, s in b if t == task})
         if not seeds:
             continue
@@ -350,7 +353,8 @@ def compare_pair(run_ck: Path, ref_ck: Path, heads_preds: Path = HEADS_PREDS, co
     tr_rows, notes = transfer_pairs(run_ck, ref_ck, groups, c.get("seen") or {}, run_tr, ref_tr)
     parts = {"in_domain": heads_pairs(preds, heads_name(run_ck), heads_name(ref_ck), run_tr & ref_tr),
              "transfer": tr_rows,
-             "adaptation": adaptation_pairs(run_ck, ref_ck, int(c["adaptation"]["k"]))}
+             "adaptation": adaptation_pairs(run_ck, ref_ck, int(c["adaptation"]["k"]), c.get("seen") or {},
+                                            run_tr | ref_tr)}
     tasks, heads = [], []
     for p, rows in parts.items():
         per, h = summarise(rows, reps=reps)

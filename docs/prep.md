@@ -118,9 +118,30 @@ Single volumes are dropped by CSVs in `labels/pool_drop/` (columns `volume_id, r
   them but cannot be right) and 184 infant scans whose registration fell back to rigid / translation (tiny unscaled
   brains in the grid).
 - `duplicates.csv` (`python -m brain.prep.dedup --new-families ...`): the same scan redistributed under another
-  dataset. Shortlist from the index (identical source grid and contrast, nearest registration fingerprint: scale,
-  rotation, brain fraction, brain / head ratio, final MI), confirmed by the correlation of the registered volumes
-  (>= 0.98). For the 2026-10 small FOMO cohorts: 140 candidates, median correlation 0.45, no duplicates.
+  dataset. Shortlist from the index (identical source grid, nearest image fingerprint: brain fraction, brain / head
+  ratio), confirmed by the correlation of the registered volumes (>= 0.98); new duplicates are appended. For the
+  2026-10 small FOMO cohorts: 140 candidates, median correlation 0.45, no duplicates. Until 2026-10-25 the shortlist
+  also used the registration result and the contrast string, so copies registered by the other backend, or labelled
+  with another contrast (MSD "" vs BraTS "t1n"), were never compared, and each run overwrote the file.
+- `prep_qc_reader.csv`: scans stored mirrored by the old nibabel fallback reader (see below) that are in the pool.
+
+What the drops mean (2026-10-25): `pool_drop` and `ssl_qc_drop` keep a volume out of SSL. Training labels come from
+`brain.multitask.labels.label_pool`: duplicates and `mirrored_reader` scans stay out of every task, but the other
+SSL-only exclusions (RSNA DICOM-assembly QC failures, partial slabs, unscaled fallback registrations) keep their
+study-level labels and image-space masks and lose only registration-sensitive and live (image-measured) targets.
+Before, they were out of every task too: the hemorrhage tasks lost 2,200 RSNA studies and infants lost their age
+labels. Registration QC (`registration_qc`) also fails rigid / translation fallbacks for the registration-sensitive
+targets now (their template-space volumes are native millilitres).
+
+### Fixed 2026-10-25: nibabel fallback reader orientation
+
+`geometry.read` falls back to nibabel when SimpleITK cannot read a NIfTI (non-orthonormal direction cosines). The
+fallback built the image from RAS-ordered data but kept ITK's identity (LPS) direction and the RAS origin, so these
+images were stored rotated 180 degrees about the superior axis; registration (rotations up to 35 degrees) could not
+undo it and fell back to translation. A scan of all 1,673 translation fallbacks (brain-mask Dice with a reference,
+as stored vs flipped; `runs/diagnostics/mirrored_scan.py`) found 45 mirrored: 44 BrainMetShare (held out, used by no
+task; re-prep before use) and one HBN T2w in the pool (`prep_qc_reader.csv`). The reader now takes direction, spacing
+and origin from the full affine. The 1,058 Yale-metastasis translation fallbacks are not mirrored.
 
 ### Hemorrhage segmentation cohorts (BHSD, HemSeg-500)
 

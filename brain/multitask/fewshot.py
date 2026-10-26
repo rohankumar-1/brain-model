@@ -74,7 +74,7 @@ def fit_embedding(model, reg, cfg, loader, t: int, device, amp, steps: int = 200
         for i in range(steps):
             b = prepare(batches[i % len(batches)], cfg, device, model.backbone.patch_xyz, train=False)
             with torch.autocast(**amp):
-                out = model(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=False)
+                out = model(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=False, meta=b.get("meta"))
             loss, has = slot_losses(out, b["task"], b["y"], model.task_type, b["seg"], b["seg_pair"])
             opt.zero_grad()
             loss[has].mean().backward()
@@ -93,7 +93,7 @@ def pooled_features(model, cfg, loader, device, amp):
     for raw in loader:
         b = prepare(raw, cfg, device, model.backbone.patch_xyz, train=False)
         with torch.autocast(**amp):
-            enc = model.encode(b["x"], b["keep"])
+            enc = model.encode(b["x"], b["keep"], b.get("meta"))
         feats.append(enc["pooled"].float().cpu())
         ys.append(b["y"][:, 0].cpu())
     return torch.cat(feats).numpy(), torch.cat(ys).numpy()

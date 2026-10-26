@@ -350,6 +350,7 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
     thick, axis = batch.get("thick_mm"), batch.get("thick_axis")
     out: dict = {"modality": modality,
                  "contrast_id": batch.get("contrast_id", torch.full((b,), -1, dtype=torch.long)),
+                 "meta_id": batch.get("meta_id", torch.zeros(b, dtype=torch.long)),
                  "tissue_q": batch.get("tissue_q", torch.full((b, 32), float("nan"))),
                  "thick_mm": thick.detach().float().cpu() if thick is not None else torch.ones(b),
                  "thick_axis": axis.detach().long().cpu() if axis is not None else torch.full((b,), -1, dtype=torch.long),

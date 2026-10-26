@@ -18,6 +18,7 @@ from brain.common.optim import param_groups
 from brain.common.paths import resolve
 from brain.data.batch3d import prepare
 from brain.models.mae3d import MAE3D, MAEDecoder
+from brain.data.volumes import n_meta
 from brain.models.vit3d import BrainEncoder
 from brain.train import engine
 from brain.train.lejepa3d import _record, forever_loader, synthetic_loader
@@ -32,6 +33,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         n_cls=int(m.get("n_cls", 0)), n_registers=int(m.get("n_registers", 0)),
         mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"), drop_path=float(m.get("drop_path", 0.0)),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
+        n_meta=n_meta(m),
     ).to(device)
 
 

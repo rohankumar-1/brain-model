@@ -78,8 +78,14 @@ def read(path: Path) -> sitk.Image:
         nii = nib.as_closest_canonical(nib.load(str(path)))
         data = np.squeeze(np.asanyarray(nii.dataobj, dtype=np.float32))
         img = sitk.GetImageFromArray(np.transpose(data, (2, 1, 0)))
-        img.SetSpacing([float(z) for z in nii.header.get_zooms()[:3]])
-        img.SetOrigin([float(v) for v in nii.affine[:3, 3]])
+        # nibabel's affine is RAS, ITK's geometry LPS: flip x and y, and take direction and spacing from the affine.
+        # Before 2026-10-25 the direction was left at ITK's identity (LPS) under RAS-ordered data with a RAS origin,
+        # which stored these images rotated 180 degrees about the superior axis (mirrored in x and y).
+        a = np.diag([-1.0, -1.0, 1.0]) @ np.asarray(nii.affine, dtype=float)[:3, :4]
+        spacing = np.linalg.norm(a[:, :3], axis=0)
+        img.SetSpacing([float(s) for s in spacing])
+        img.SetDirection([float(v) for v in (a[:, :3] / spacing).flatten()])
+        img.SetOrigin([float(v) for v in a[:, 3]])
     return standardize(img)
 
 

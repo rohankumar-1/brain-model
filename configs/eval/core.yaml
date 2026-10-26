@@ -19,6 +19,7 @@ transfer:
 seen:
   oasis1_mmse: [mmse]
   oasis2_mmse: [mmse]
+  dementia: [mmse]          # held-out few-shot task built from OASIS-1 CDR: not held out for runs that trained MMSE
 transfer_seg:
   segmentation: [brats2023_gli, brats2023_men, wmh, atlas]
 

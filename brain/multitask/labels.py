@@ -128,8 +128,14 @@ def src_fomo_participants(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     p = p.dropna(subset=[field])
     by_ses = p.drop_duplicates(["dataset", "participant_id", "session_id"]).set_index(
         ["dataset", "participant_id", "session_id"])[field]
-    by_sub = p.drop_duplicates(["dataset", "participant_id"]).set_index(["dataset", "participant_id"])[field]
+    # a scan whose session is not listed takes the subject's value only when every listed session agrees: before
+    # 2026-10-25 it took the first row's, which for age in longitudinal / infant cohorts is another session's age
+    g = p.groupby(["dataset", "participant_id"])[field]
+    by_sub = g.first()[g.nunique() == 1]
     val = [by_ses.get((a, b, c), by_sub.get((a, b))) for a, b, c in zip(rows["pt"], rows["sub"], rows["ses"])]
+    n_ses = sum(1 for a, b, c in zip(rows["pt"], rows["sub"], rows["ses"]) if (a, b, c) in by_ses.index)
+    print(f"[labels] {task.id} ({field}): {n_ses} scans matched by session, {sum(x is not None for x in val) - n_ses} "
+          f"by a subject-constant value, {sum(x is None for x in val)} unmatched", flush=True)
     rows["raw"] = val
     rows = rows.dropna(subset=["raw"])
     # free-text groups: ``drop`` exact values; ``map`` exact values, else ``prefix`` (first matching prefix), else
@@ -383,6 +389,41 @@ def registration_sensitive(task_id: str) -> bool:
     return task_id in REG_SENSITIVE or task_id.startswith(REG_SENSITIVE_PREFIXES)
 
 
+HARD_DROP_REASONS = ("duplicate", "mirrored_reader")      # pool_drop reasons that also keep a volume out of labels
+
+
+def label_pool(volumes: pd.DataFrame) -> tuple[pd.DataFrame, set[str]]:
+    """The volumes training labels come from, and the subset kept out of SSL only (``ssl_only_drop``).
+
+    Pretraining-pool volumes, plus BHSD (its RSNA studies were kept out of SSL only), plus the volumes SSL excluded for
+    image-quality reasons that do not touch study-level labels: DICOM-assembly QC failures (``ssl_qc_drop``: RSNA
+    studies with stripes / missing posterior fossa) and the per-volume prep-QC drops (partial slabs, unscaled
+    fallback registrations). Before 2026-10-25 those were silently out of every task too (the hemorrhage tasks lost
+    2,200 RSNA studies). Held-out families, dataset-level drops and cross-dataset duplicates stay out of everything.
+    ``ssl_only_drop`` volumes lose their registration-sensitive and live (image-measured) rows in ``build``."""
+    from brain.prep.index import POOL_DROP_DATASETS
+
+    drop_dir = STORE / "labels" / "pool_drop"
+    dups: set[str] = set()
+    qc_drops: set[str] = set()
+    for f in sorted(drop_dir.glob("*.csv")) if drop_dir.exists() else []:
+        d = pd.read_csv(f)
+        if d.empty:
+            continue
+        reasons = d["reason"].astype(str) if "reason" in d else pd.Series("duplicate", index=d.index)
+        dup = reasons.isin(HARD_DROP_REASONS)
+        dups |= set(d.loc[dup, "volume_id"].astype(str))
+        qc_drops |= set(d.loc[~dup, "volume_id"].astype(str))
+    vid = volumes["volume_id"].astype(str)
+    pretrain = volumes["pretrain"].astype(bool)
+    bhsd = volumes["bhsd"].astype(bool) if "bhsd" in volumes else False
+    ssl_qc = volumes["ssl_qc_drop"].astype(bool) if "ssl_qc_drop" in volumes else False
+    ssl_only = (ssl_qc | vid.isin(qc_drops)) & ~pretrain
+    keep = (pretrain | bhsd | ssl_only) & ~volumes["held_out"].astype(bool) \
+        & ~volumes["dataset"].isin(POOL_DROP_DATASETS) & ~vid.isin(dups)
+    return volumes[keep], set(vid[keep & ssl_only])
+
+
 def _mask_asym(path: str) -> float:
     try:
         b = np.asarray(store.read(STORE / path, "brain")) > 0
@@ -392,12 +433,13 @@ def _mask_asym(path: str) -> float:
 
 
 def registration_qc(volumes: pd.DataFrame, workers: int = 8, path: Path | None = None) -> pd.DataFrame:
-    """Per-volume registration check for pretraining-pool volumes, cached (``regqc.parquet``; only new volumes are
+    """Per-volume registration check for label-pool volumes, cached (``regqc.parquet``; only new volumes are
     read). ``ok`` is False when the brain mask is left-right asymmetric about the grid midline (> REG_ASYM_MAX),
-    overlaps the template brain poorly (< REG_DICE_MIN), or a SynthSeg segmentation of the scan failed its QC.
+    overlaps the template brain poorly (< REG_DICE_MIN), a SynthSeg segmentation of the scan failed its QC, or the
+    registration fell back to rigid / translation (not scaled to the template; counted only from 2026-10-25).
     Volumes failing it lose their registration-sensitive training rows (``registration_sensitive``) only."""
     path = path or OUT_DIR / "regqc.parquet"
-    pool = volumes[volumes["pretrain"].astype(bool) & ~volumes["held_out"].astype(bool)]
+    pool, _ = label_pool(volumes)
     old = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=["volume_id", "mask_asym"])
     todo = pool[~pool["volume_id"].isin(old["volume_id"])]
     if len(todo):
@@ -407,23 +449,26 @@ def registration_qc(volumes: pd.DataFrame, workers: int = 8, path: Path | None =
                          pd.DataFrame({"volume_id": todo["volume_id"].to_numpy(), "mask_asym": asym})])
         path.parent.mkdir(parents=True, exist_ok=True)
         old.to_parquet(path, index=False)
-    q = pool[["volume_id", "dataset_family", "brain_dice_tpl"]].merge(old, on="volume_id", how="left")
+    cols = ["volume_id", "dataset_family", "brain_dice_tpl"] + (["reg_method"] if "reg_method" in pool else [])
+    q = pool[cols].merge(old, on="volume_id", how="left")
     ss = synthseg_volumes()
     q["synthseg_ok"] = q["volume_id"].map(ss["qc_ok"]) if "qc_ok" in ss else np.nan
     # a missing value (no brain mask / not segmented) never fails a check on its own: plain booleans, no NA
     asym_bad = q["mask_asym"].gt(REG_ASYM_MAX).to_numpy(bool)
     dice_bad = q["brain_dice_tpl"].lt(REG_DICE_MIN).to_numpy(bool)
     seg_bad = q["synthseg_ok"].map(lambda x: x is False or x is np.False_).to_numpy(bool)
-    q["ok"] = ~(asym_bad | dice_bad | seg_bad)
+    # a rigid or translation-only fallback registration is unscaled: template-space volumes are native ml there
+    fit_bad = (q["reg_method"].notna() & q["reg_method"].astype(str).ne("affine")).to_numpy(bool) \
+        if "reg_method" in q else np.zeros(len(q), bool)
+    q["ok"] = ~(asym_bad | dice_bad | seg_bad | fit_bad)
     return q
 
 
 # ------------------------------------------------------------------------------------------------ build
 def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFrame | None = None) -> pd.DataFrame:
-    # training sources read the pretraining pool, plus BHSD: its RSNA studies were kept out of SSL only, and its
-    # hemorrhage masks train the multitask model (split == train rows, like every other source)
-    bhsd = volumes["bhsd"].astype(bool) if "bhsd" in volumes else False
-    pool = volumes[(volumes["pretrain"].astype(bool) | bhsd) & ~volumes["held_out"].astype(bool)]
+    # training sources read the label pool (``label_pool``): the pretraining pool, BHSD, and the volumes kept out of
+    # SSL only (split == train rows, like every other source)
+    pool, ssl_only = label_pool(volumes)
     split = dict(zip(volumes["volume_id"].astype(str), volumes["split"].astype(str)))
     frames = []
     for t in reg.tasks:
@@ -448,6 +493,21 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
         drop = (out["use"] == "train") & out["volume_id"].isin(bad) & sensitive
         print(f"[labels] registration QC: {len(bad)} volumes fail; {int(drop.sum())} training rows of "
               f"registration-sensitive tasks dropped (their other labels kept)", flush=True)
+        out = out[~drop]
+    skull = {t.id for t in reg.tasks if t.needs_skull}
+    if skull and "stripped_input" in volumes:   # a scan distributed skull-stripped cannot answer a skull task
+        stripped = set(volumes.loc[volumes["stripped_input"].astype(str).str.lower().isin(["true", "1", "1.0"]),
+                                   "volume_id"].astype(str))
+        drop = out["task"].isin(skull) & out["volume_id"].astype(str).isin(stripped)
+        print(f"[labels] {int(drop.sum())} rows of skull tasks {sorted(skull)} dropped on skull-stripped scans",
+              flush=True)
+        out = out[~drop]
+    if ssl_only:                           # SSL-only drops: study-level labels and masks stay, image measures go
+        live = {t.id for t in reg.tasks if any(s.get("source") == "live" for s in t.sources)}
+        unsafe = out["task"].map(lambda t: registration_sensitive(t) or t in live).astype(bool)
+        drop = (out["use"] == "train") & out["volume_id"].isin(ssl_only) & unsafe
+        print(f"[labels] {len(ssl_only)} SSL-only-dropped volumes back in the label pool; {int(drop.sum())} of their "
+              f"registration-sensitive / live rows dropped", flush=True)
         out = out[~drop]
     return out[COLS + ["use"]].reset_index(drop=True)
 
@@ -515,7 +575,11 @@ def main() -> None:
     a = ap.parse_args()
     reg = load_registry(a.registry)
     volumes = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
-    qc = registration_qc(volumes, a.workers)
+    cache = a.out / "regqc.parquet"
+    if not cache.exists() and (OUT_DIR / "regqc.parquet").exists():      # a new label version reuses the v1 cache
+        a.out.mkdir(parents=True, exist_ok=True)
+        pd.read_parquet(OUT_DIR / "regqc.parquet").to_parquet(cache, index=False)
+    qc = registration_qc(volumes, a.workers, path=cache)
     print("[labels] registration QC fail share per family:\n"
           + (1 - qc.groupby("dataset_family")["ok"].mean()).round(3).to_string(), flush=True)
     labels = build(reg, volumes, a.workers, qc)

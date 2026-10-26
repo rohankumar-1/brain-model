@@ -7,7 +7,7 @@ import math
 import torch
 
 NO_DECAY_SUFFIXES = ("bias", "pos_embed", "cls_token", "register_tokens", "mask_token", "prefix")
-NO_DECAY_TABLES = ("task_emb", "type_emb", "cls_emb", "cls_pos")      # multitask identities, not weights to shrink
+NO_DECAY_TABLES = ("task_emb", "type_emb", "cls_emb", "cls_pos", "meta_emb")   # identities, not weights to shrink
 # encoder modules after the blocks: under layer decay they get the deepest block's LR, not the embedding's
 POST_BLOCKS = ("norm.", "projector.", "token_head.", "predictor.")
 

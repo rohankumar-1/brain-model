@@ -111,3 +111,68 @@ def test_final_norm_gets_the_deepest_lr_and_task_tables_no_decay():
     assert where[id(named["backbone.norm.weight"])]["lr_scale"] == 1.0
     assert where[id(named["backbone.patch_embed.proj.weight"])]["lr_scale"] < 1.0
     assert where[id(named["task_emb.weight"])]["weight_decay"] == 0.0
+
+
+def test_metadata_ids_harmonise_contrast_names():
+    from brain.data.volumes import META, meta_id
+
+    assert META[meta_id("t1w", "mri")] == META[meta_id("t1n", 1)] == META[meta_id(None, "mri", "oasis1")] == "t1"
+    assert META[meta_id("t2f", "mri")] == "flair" and META[meta_id(float("nan"), "mri", "brainmetshare_bravo")] == "t1c"
+    assert META[meta_id(None, "ct", "rsna_ich")] == "ct" and META[meta_id("cta", "ct")] == "cta"
+    assert meta_id("weird", "mri") == 0                       # unknown label -> unknown
+
+
+def test_metadata_embedding_starts_neutral_and_can_be_added_to_a_trained_encoder():
+    from brain.models.vit3d import BrainEncoder
+    from brain.multitask.explain import encode_backbone
+
+    torch.manual_seed(0)
+    enc = BrainEncoder(size="test", patch_xyz=(8, 8, 4), qk_norm=True, n_cls=1, proj_dim=16, proj_hidden=32,
+                       checkpoint_blocks=False).eval()
+    x, keep = torch.randn(2, 1, 16, 32, 32), torch.ones(2, 64, dtype=torch.bool)
+    before = encode_backbone(enc, x, keep)["tokens"]
+    enc.enable_meta(11)
+    coords_out = enc(x.permute(0, 1, 4, 3, 2), *_coords(enc, x), keep=keep, meta=torch.tensor([3, 4]))["tokens"]
+    assert torch.allclose(before, coords_out, atol=1e-5)      # zero-initialised: nothing changes
+    with torch.no_grad():
+        enc.meta_emb.weight[3] += 1.0
+    after = enc(x.permute(0, 1, 4, 3, 2), *_coords(enc, x), keep=keep, meta=torch.tensor([3, 4]))["tokens"]
+    assert not torch.allclose(after[0], before[0]) and torch.allclose(after[1], before[1], atol=1e-5)
+
+
+def _coords(enc, x):
+    from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
+
+    size = (x.shape[4], x.shape[3], x.shape[2])
+    bbox = crop_bbox_mm((0, 0, 0), size, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0))
+    c, p = token_centers_mm(bbox, size, enc.patch_xyz), patch_size_mm(bbox, size, enc.patch_xyz)
+    return c.unsqueeze(0).expand(x.shape[0], -1, -1), p.unsqueeze(0).expand(x.shape[0], -1)
+
+
+def test_skull_strip_never_touches_scans_asked_a_skull_task(tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from brain.data.volumes import META
+    from brain.multitask.data import MultitaskDataset
+
+    shape = (8, 12, 12)
+    brain = np.zeros(shape, bool)
+    brain[2:6, 3:9, 3:9] = True
+    img = np.where(brain, 1.0, 5.0).astype(np.float32)      # "skull" brighter than brain
+    img[0] = -6.0                                             # background floor
+    monkeypatch.setattr("brain.prep.store.read_many", lambda path, keys: {"image": img, "brain": brain.astype(np.uint8)})
+    rows = [("v_age", "age", 40.0, ""), ("v_mask", "brain_mask", np.nan, "@brain")]
+    labels = pd.DataFrame([(v, t, y, r) for v, t, y, r in rows], columns=["volume_id", "task", "value", "ref"]) \
+        .assign(split="train", use="train")
+    vols = pd.DataFrame({"volume_id": ["v_age", "v_mask"], "image_path": "a.zip", "modality": "mri",
+                         "dataset_family": ["f0", "f1"], "dataset": "d", "contrast": "t1w", "brain_ok": True,
+                         "brain_method": "synthstrip", "stripped_input": False})
+    ds = MultitaskDataset(tmp_path, labels, vols, REG, {"age": {"mean": 0.0, "std": 1.0}}, split="train",
+                          k_max=1, p_all=0.0, max_seg=1, skull_strip=1.0)
+    i_age = [v for v, _ in ds.items].index("v_age")
+    a = ds[i_age]["image"].numpy()
+    assert (a[~brain] == -6.0).all() and (a[brain] == 1.0).all()          # stripped to the background floor
+    b = ds[1 - i_age]["image"].numpy()
+    assert (b[~brain & (img == 5.0)] == 5.0).all()                        # brain_mask asked: skull kept
+    assert ds[i_age]["meta"] == META.index("t1")

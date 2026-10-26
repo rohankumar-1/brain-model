@@ -111,6 +111,11 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
     b = int(mod.shape[0])
     d["contrast_id"] = torch.cat([c["contrast_id"].to(device, non_blocking=True) for c in chunks])
     d["tissue_q"] = torch.cat([c["tissue_q"].to(device, non_blocking=True) for c in chunks])
+    # the scan's modality / contrast for the encoder (model.meta), replaced by "unknown" (0) with probability drop
+    d["meta"] = torch.cat([c.get("meta_id", torch.zeros(len(c["modality"]), dtype=torch.long)) for c in chunks]).to(device)
+    drop = float(((cfg.get("model") or {}).get("meta") or {}).get("drop", 0.0))
+    if drop > 0:
+        d["meta"] = torch.where(torch.rand(b, device=device) < drop, torch.zeros_like(d["meta"]), d["meta"])
     cid, vid, tq = d["contrast_id"], torch.arange(b, device=device), d["tissue_q"]
     d["plans"] = {}
     if "volume_full" in first:

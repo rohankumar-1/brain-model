@@ -10,6 +10,7 @@ import torch
 
 from brain.data.gate import token_keep
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
+from brain.data.volumes import meta_id, n_meta
 from brain.models.vit3d import VIT_SIZES, BrainEncoder
 from brain.common.windowing import asinh_window, windows_for
 from brain.common.grid import GRID_XYZ, PATCH_XYZ
@@ -17,6 +18,24 @@ from brain.common.grid import GRID_XYZ, PATCH_XYZ
 
 DEFAULT_GATE = {"ct_hu": (-500.0, 200.0), "mri_lo": -5.5}
 FINE_TILE = ((128, 128, 64), (64, 64, 32))  # training crop size and stride, voxels (x, y, z)
+
+
+_VOLUME_META: dict[str, int] | None = None
+
+
+def volume_meta() -> dict[str, int]:
+    """volume_id -> META id from the store index (cached), for encoders trained with metadata."""
+    global _VOLUME_META
+    if _VOLUME_META is None:
+        import pandas as pd
+
+        from brain.downstream.tasks import DEFAULT_VOLUMES
+
+        v = pd.read_csv(DEFAULT_VOLUMES, usecols=lambda c: c in ("volume_id", "contrast", "modality", "dataset"),
+                        low_memory=False)
+        _VOLUME_META = {str(i): meta_id(c, m, d) for i, c, m, d in
+                        zip(v.volume_id, v.get("contrast", [None] * len(v)), v.modality, v.dataset)}
+    return _VOLUME_META
 
 
 def embed_batch_size() -> int:
@@ -74,6 +93,7 @@ class FrozenEncoder3D:
         self.tap_blocks: tuple[int, ...] = ()
         self.tap_norm = False          # layer-normalise tapped (pre-norm residual) features, as the final tokens are
         self.taps_only = False         # drop the final tokens (and the CLS) and keep only the tapped blocks
+        self.meta: int | None = None   # the next volume's META id (``volume_meta``); None = unknown
         # CLS embeddings (models with a CLS token): of the last single-pass encode, per window of the last
         # ``embed_windows`` call, and per volume of the last ``extract_volume_embeddings_3d`` run.
         self._last_cls: torch.Tensor | None = None
@@ -160,8 +180,11 @@ class FrozenEncoder3D:
         coords, pmm = torch.cat(coords, 0), torch.cat(pmms, 0)
         self.model.eval()
         amp = dict(device_type=x.device.type, dtype=torch.bfloat16, enabled=x.is_cuda)
+        meta = None
+        if getattr(self.model, "meta_emb", None) is not None:   # a model trained with metadata: the scan's, or unknown
+            meta = torch.full((view.shape[0],), int(self.meta or 0), dtype=torch.long, device=view.device)
         with torch.autocast(**amp):
-            out = self.model(view, coords, pmm, keep=keep, patch_xyz=self.patch_xyz, taps=self.tap_blocks)
+            out = self.model(view, coords, pmm, keep=keep, patch_xyz=self.patch_xyz, taps=self.tap_blocks, meta=meta)
         taps = [t.float() for t in out["taps"]]                 # bf16 under autocast; float32 like the final tokens
         if self.tap_norm:
             taps = [torch.nn.functional.layer_norm(t, t.shape[-1:]) for t in taps]
@@ -322,6 +345,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"),
         rope_min_period_mm=m.get("rope_min_period_mm"),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
+        n_meta=n_meta(m),
     ).to(device)
     if pretrained:
         net.load_state_dict(state)
@@ -385,6 +409,7 @@ def extract_volume_embeddings_3d(
         x = torch.from_numpy(np.ascontiguousarray(vol)).to(device)
         mod = modalities.get(vid, sample_mod)
         wins = windows_for(window, mod)
+        enc.meta = volume_meta().get(str(vid)) if getattr(enc.model, "meta_emb", None) is not None else None
         # BRAIN_EVAL_TILE=1: encode as overlapping training-size windows (128 x 128 x 64 mm, half overlap) instead of
         # the whole volume at once, so attention sees the context size the encoder was trained on
         tile = os.environ.get("BRAIN_EVAL_TILE", "") == "1"

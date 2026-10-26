@@ -85,7 +85,9 @@ def init_encoder(enc: nn.Module, cfg: dict, src_path) -> None:
         bad.append(f"views.gate.mode: run {gate.get('mode', 'center')} vs source {sgate.get('mode', 'center')}")
     if bad:
         raise SystemExit("[init] this run's encoder differs from its init_from source:\n  " + "\n  ".join(bad))
-    enc.load_state_dict(src["model"])
+    missing, unexpected = enc.load_state_dict(src["model"], strict=False)
+    if unexpected or set(missing) - {"meta_emb.weight"}:       # only the (zero-initialised) metadata table may be new
+        raise SystemExit(f"[init] state mismatch: missing {missing[:5]}, unexpected {unexpected[:5]}")
 
 
 class JointNet(nn.Module):
@@ -99,7 +101,8 @@ class JointNet(nn.Module):
         out = {"ssl": self.core(ssl_batch), "task": None}
         if task_batch is not None:
             b = task_batch
-            out["task"] = self.mt(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=encoder_grad)
+            out["task"] = self.mt(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=encoder_grad,
+                                  meta=b.get("meta"))
         return out
 
 

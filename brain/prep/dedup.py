@@ -1,10 +1,12 @@
 """Cross-dataset duplicate scans: the same acquisition redistributed under another dataset (e.g. INDI / FCP releases
 inside several FOMO folders). Run after prep + index for newly added families.
 
-1. Shortlist from the index alone: within each bucket of identical source grid (``src_n*``, ``src_d*``) and contrast,
-   each new volume's nearest other-subject volume by registration fingerprint (scale, rotation, brain fraction,
-   brain/head ratio, final MI; each in units of its tolerance). An exact copy re-registers to the same result, so
-   only pairs within ``MAX_DIST`` tolerance units are kept.
+1. Shortlist from the index alone: within each bucket of identical source grid (``src_n*``, ``src_d*``), each new
+   volume's nearest other-subject volumes by image fingerprint (brain fraction, brain/head ratio; each in units of
+   its tolerance); only pairs within ``MAX_DIST`` tolerance units are kept. Before 2026-10-25 the shortlist also used
+   the registration result (scale, rotation, final MI) and bucketed by contrast: copies registered by the other
+   backend (whose MI is on another scale) or labelled with another contrast string (MSD "" vs BraTS "t1n") were
+   never compared.
 2. Confirm by image: Pearson correlation of the two registered volumes (2x downsampled, inside the union of their
    brain masks). The same scan gives ~1.0; different people stay far below.
 
@@ -30,7 +32,7 @@ ROOT = DEFAULT_VOLUMES.parent
 OUT = ROOT / "labels" / "dedup"
 DROP = ROOT / "labels" / "pool_drop" / "duplicates.csv"
 GRID = ["src_nx", "src_ny", "src_nz", "src_dx", "src_dy", "src_dz"]
-FEAT = {"reg_scale": 0.01, "reg_rot_deg": 1.0, "brain_frac": 0.01, "brain_head_ratio": 0.01, "reg_mi": 0.01}
+FEAT = {"brain_frac": 0.01, "brain_head_ratio": 0.01}        # image-derived: the same for a copy whatever registered it
 MAX_DIST = 1.0
 DUP_CORR = 0.98
 
@@ -51,7 +53,7 @@ def shortlist(v: pd.DataFrame, fams: list[str]) -> pd.DataFrame:
         v["f_" + c] = pd.to_numeric(v[c], errors="coerce").fillna(0.0) / tol
     feats = ["f_" + c for c in FEAT]
     out = []
-    for _, b in v.groupby(GRID + ["contrast"]):
+    for _, b in v.groupby(GRID):
         new = b[b["dataset_family"].isin(fams)]
         if new.empty or len(b) < 2:
             continue
@@ -111,8 +113,12 @@ def main() -> None:
     pairs.to_csv(OUT / "candidates.csv", index=False)
     dup = pairs[pairs["corr"] >= DUP_CORR].sort_values("corr", ascending=False).drop_duplicates("volume_id")
     dup = dup.rename(columns={"volume_id_o": "duplicate_of"})
-    dup.assign(reason="duplicate")[["volume_id", "reason", "duplicate_of", "dataset_family", "dataset_family_o",
-                                    "corr"]].to_csv(DROP, index=False)
+    dup = dup.assign(reason="duplicate")[["volume_id", "reason", "duplicate_of", "dataset_family", "dataset_family_o",
+                                          "corr"]]
+    if DROP.exists():                      # earlier runs' duplicates (other families) stay dropped
+        old = pd.read_csv(DROP)
+        dup = pd.concat([old, dup], ignore_index=True).drop_duplicates("volume_id", keep="last")
+    dup.to_csv(DROP, index=False)
     print(f"[dedup] duplicates (corr >= {DUP_CORR}): {len(dup)}", flush=True)
     if len(dup):
         print(dup.groupby(["dataset_family", "dataset_family_o"]).size().to_string(), flush=True)

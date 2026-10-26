@@ -187,11 +187,11 @@ class MultitaskModel(nn.Module):
         bbox = crop_bbox_mm((0, 0, 0), size, (1.0, 1.0, 1.0), (0.0, 0.0, 0.0)).to(device)
         return token_centers_mm(bbox, size, self.backbone.patch_xyz), patch_size_mm(bbox, size, self.backbone.patch_xyz)
 
-    def encode(self, x: torch.Tensor, keep: torch.Tensor) -> dict:
+    def encode(self, x: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None = None) -> dict:
         b = x.shape[0]
         coords, pmm = self._coords(x.shape[2:], x.device)
         out = self.backbone(x.permute(0, 1, 4, 3, 2), coords.unsqueeze(0).expand(b, -1, -1),
-                            pmm.unsqueeze(0).expand(b, -1), keep=keep, taps=self.taps)
+                            pmm.unsqueeze(0).expand(b, -1), keep=keep, taps=self.taps, meta=meta)
         out["coords"] = coords
         return out
 
@@ -254,9 +254,9 @@ class MultitaskModel(nn.Module):
                 "multiclass": logits.masked_fill(~valid, float("-inf")), "survival": self.survival(z)}
 
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
-                encoder_grad: bool = True, alone: bool = False) -> dict:
+                encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None) -> dict:
         with torch.set_grad_enabled(encoder_grad and torch.is_grad_enabled()):
-            enc = self.encode(x, keep)
+            enc = self.encode(x, keep, meta)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         out = self.heads(z, task)
         if self.has_general:

@@ -386,22 +386,22 @@ def build_rsna_volume_labels(
     return out
 
 
-RSNA_MAX_TRAIN = 4000   # frozen heads need far fewer than 18k training studies; the full token cache does not fit
-RSNA_MAX_EVAL = 1000    # per validation / test split (the rest of RSNA val + test is ~5.4k studies)
+RSNA_MAX_TRAIN = 2000   # frozen heads need far fewer than 18k training studies; the token cache is ~11.8 MB per study
+RSNA_MAX_EVAL = {"val": 500, "test": 1000}   # of ~5.4k val + test studies: test AUC intervals about +-0.02
 
 
 def load_rsna_task(volumes: pd.DataFrame, labels: pd.DataFrame | None = None, name: str = "rsna_ich",
                    max_train: int | None = None, max_eval: int | None = None) -> TaskBundle:
     """RSNA study-level subtypes. The train split is subsampled to ``max_train`` studies (env ``BRAIN_RSNA_MAX_TRAIN``;
-    0 = all) and validation and test each to ``max_eval`` (env ``BRAIN_RSNA_MAX_EVAL``), stratified on ``any``, with a
-    fixed seed. Whole-split token embeddings (~5.4k val + test studies at 5120 tokens) ran out of host memory; 1000
-    evaluation studies still give AUC intervals of about +-0.02."""
+    0 = all) and validation / test to ``RSNA_MAX_EVAL`` (env ``BRAIN_RSNA_MAX_EVAL`` / ``max_eval`` for both),
+    stratified on ``any``, with a fixed seed. Whole-split token embeddings (~5.4k val + test studies at 5120 tokens)
+    ran out of host memory, and even 6k studies' cache (~70 GB per model) overfilled scratch when several models ran."""
     labels = labels if labels is not None else build_rsna_volume_labels()
     rsna = volumes[volumes["dataset"] == "rsna_ich"].copy()
     merged = rsna.merge(labels, on="volume_id", how="inner")
     caps = {"train": int(os.environ.get("BRAIN_RSNA_MAX_TRAIN", RSNA_MAX_TRAIN) if max_train is None else max_train)}
-    caps["val"] = caps["test"] = int(os.environ.get("BRAIN_RSNA_MAX_EVAL", RSNA_MAX_EVAL) if max_eval is None
-                                     else max_eval)
+    for split in ("val", "test"):
+        caps[split] = int(os.environ.get("BRAIN_RSNA_MAX_EVAL", RSNA_MAX_EVAL[split]) if max_eval is None else max_eval)
     for split, cap in caps.items():
         part = merged["split"] == split
         if cap and part.sum() > cap:
