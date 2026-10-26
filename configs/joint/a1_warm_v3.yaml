@@ -6,6 +6,9 @@
 # Exposure: 40k steps x 2 volumes x 4 GPUs = run 6's 20k x 16 task samples, plus SSL. LR warmup-stable-decay (peak
 # 2.5e-4, last 8k steps decay); snapshots every 5k keep optimizer state, so a cooldown branched from step 20k gives a
 # fairly decayed 20k model to test whether the longer run helps.
+# 2026-10-25 review fixes: v3's encoder numerics kept (rope_fp32 / fp32_residual false) and its 2-GPU weighting of the
+# gathered SSL terms reproduced (loss.gather_world_ref 2); FOV cut, live-target protection, task-table weight-decay
+# exemption, data-term normalisation and the clamped, synced uncertainty weights now apply. Adam betas: optim.betas.
 #   sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/a1_warm_v3.yaml jobs/train_pi4.sbatch
 seed: 42
 data:
@@ -36,6 +39,8 @@ model:
   n_cls: 1
   n_registers: 0
   rope_min_period_mm: null
+  rope_fp32: false          # v3's numerics (bf16 RoPE angles, bf16 residual stream): A1 matches v3 / run 6
+  fp32_residual: false
   taps: [3, 7]
   slot: {dim: 256, layers: 3, heads: 8, width: null, mode: slots, cross_task: true, embedding: learned}
   seg:
@@ -114,6 +119,7 @@ loss:
   local_pooled: false
   n_proj: 256
   gather_ddp: true
+  gather_world_ref: 2       # v3 trained on 2 GPUs, when gathered terms got 1/W of their gradient: reproduce its weighting
   dense: {weight: 1.0, tokens_per_view: 32, fine_weight: 0.0, stopgrad_mean: false}
   predict:
     weight: 1.0

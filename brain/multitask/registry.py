@@ -58,6 +58,9 @@ class Task:
         return self.role == "train"
 
 
+TRAINABLE_TYPES = ("binary", "regression", "multiclass", "segmentation")     # types slot_losses has a loss for
+
+
 @dataclass
 class Registry:
     tasks: list[Task]
@@ -87,8 +90,12 @@ class Registry:
         ``exclude``."""
         tk = tk or {}
         only, ids, drop = set(tk.get("groups") or []), set(tk.get("ids") or []), set(tk.get("exclude") or [])
-        return [t.id for t in self.trained if (not only or t.group in only) and (not ids or t.id in ids)
-                and t.id not in drop]
+        out = [t.id for t in self.trained if (not only or t.group in only) and (not ids or t.id in ids)
+               and t.id not in drop]
+        lossless = [i for i in out if self[i].type not in TRAINABLE_TYPES]
+        if lossless:                          # slot_losses has no branch for them: they would train silently on nothing
+            raise SystemExit(f"tasks {lossless} have a type with no training loss (trainable: {TRAINABLE_TYPES})")
+        return out
 
     def texts(self) -> list[str]:
         """Every string the text encoder must embed: descriptions and class names."""

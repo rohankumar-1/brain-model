@@ -226,13 +226,16 @@ def _rotation(deg: torch.Tensor) -> torch.Tensor:
     return rz @ ry @ rx
 
 
-def augment_theta(b: int, shape_zyx, aug: dict, device) -> torch.Tensor | None:
+def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | None = None) -> torch.Tensor | None:
     """Per-row affine (B, 3, 4) for ``F.affine_grid`` (normalised x, y, z): a rotation in millimetres about the grid
-    centre and a shift, applied with probability ``aug.p``. None when nothing is drawn."""
+    centre and a shift, applied with probability ``aug.p`` (never on ``skip`` rows). None when nothing is drawn."""
     p = float(aug.get("p", 0.0))
     if p <= 0:
         return None
-    on = (torch.rand(b, device=device) < p).float().unsqueeze(-1)
+    on = torch.rand(b, device=device) < p
+    if skip is not None:
+        on &= ~skip
+    on = on.float().unsqueeze(-1)
     deg = (torch.rand(b, 3, device=device) * 2 - 1) * torch.tensor(aug.get("rot_deg", [10, 10, 10]), device=device)
     shift = (torch.rand(b, 3, device=device) * 2 - 1) * float(aug.get("shift_mm", 0.0))
     half = torch.tensor([shape_zyx[2], shape_zyx[1], shape_zyx[0]], device=device, dtype=torch.float32) / 2
@@ -279,17 +282,35 @@ def fov_cut(raw: torch.Tensor, seg: torch.Tensor, rows: torch.Tensor, mod: torch
     return raw, seg
 
 
-def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None) -> dict:
+def protected_tasks(reg) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per registry task, two bool tensors for ``prepare``: ``fov_unsafe`` (the target needs the whole brain in view:
+    alignment-dependent and live targets; no field-of-view cut) and ``aug_unsafe`` (a live target, measured by
+    ``labels.live_targets`` on the unaugmented, template-aligned image: no rotation / shift, bias field or drift, which
+    would move the image away from its label; the mirror flip is fine, the measures are flip-invariant)."""
+    from brain.multitask.labels import registration_sensitive
+
+    live = [any(s.get("source") == "live" for s in t.sources) for t in reg.tasks]
+    fov = [registration_sensitive(t.id) or lv for t, lv in zip(reg.tasks, live)]
+    return torch.tensor(fov), torch.tensor(live)
+
+
+def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None,
+            aug_unsafe: torch.Tensor | None = None) -> dict:
     """Raw batch -> encoder input (B, 1, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
-    moved with their image. Training: flip, rotation / shift, a field-of-view cut on rows asking no task in
-    ``fov_unsafe`` (n_tasks bool: targets that need the whole brain in view), then appearance augmentation
+    moved with their image. Training: flip, rotation / shift (not on rows asking a task in ``aug_unsafe``), a
+    field-of-view cut on rows asking no task in ``fov_unsafe`` (n_tasks bool: targets that need the whole brain in
+    view; see ``protected_tasks``; None = every row is unsafe, no cut), then appearance augmentation
     (``aug.appearance``: bias / through-plane blur / noise / blur / drift, ``brain.data.augment``) with the window
     pinned to each modality's canonical one (frozen evaluation's; CT density targets live in it). The foreground
-    gate is taken before appearance augmentation, so noise cannot flip background tokens."""
+    gate is taken before appearance augmentation, so noise cannot flip background tokens. ``aug_unsafe`` rows also
+    get no bias field or drift."""
     aug = (cfg.get("aug") or {}) if train else {}
     raw = batch["image"].to(device, non_blocking=True).float().unsqueeze(1)
     mod = batch["modality"].to(device)
     b = raw.shape[0]
+    task = batch["task"].to(device)
+    asked = task >= 0
+    live_rows = (aug_unsafe.to(device)[task.clamp_min(0)] & asked).any(1) if aug_unsafe is not None else None
     seg = batch["seg"].to(device, non_blocking=True).float().unsqueeze(1)
     rows = batch["seg_pair"][:, 0].to(device)
     if train and float(aug.get("flip_lr", 0.0)) > 0:
@@ -297,7 +318,7 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
         raw = torch.where(flip.view(-1, 1, 1, 1, 1), raw.flip(-1), raw)
         if len(seg):
             seg = torch.where(flip[rows].view(-1, 1, 1, 1, 1), seg.flip(-1), seg)
-    theta = augment_theta(b, raw.shape[2:], aug.get("affine") or {}, device) if train else None
+    theta = augment_theta(b, raw.shape[2:], aug.get("affine") or {}, device, skip=live_rows) if train else None
     if theta is not None:
         bg = raw.amin(dim=(1, 2, 3, 4), keepdim=True)
         grid = F.affine_grid(theta, list(raw.shape), align_corners=False)
@@ -305,7 +326,6 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
         if len(seg):
             seg = F.grid_sample(seg, grid[rows], mode="bilinear", padding_mode="zeros", align_corners=False)
         del grid
-    task = batch["task"].to(device)
     if train and (aug.get("fov_cut") or {}).get("p", 0.0):
         unsafe = fov_unsafe.to(device)[task.clamp_min(0)] & (task >= 0) if fov_unsafe is not None \
             else torch.ones_like(task, dtype=torch.bool)
@@ -315,7 +335,7 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     if train and app:
         thick = batch["thick"].to(device) if "thick" in batch else None
         x = appearance(raw, mod, {**app, "window": {"mode": "fixed"}},
-                       thick=(thick[:, 0], thick[:, 1].long()) if thick is not None else None)
+                       thick=(thick[:, 0], thick[:, 1].long()) if thick is not None else None, protect=live_rows)
     else:
         x = canonical_window(raw, mod)
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),

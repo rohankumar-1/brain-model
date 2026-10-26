@@ -38,6 +38,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         qk_norm=bool(m.get("qk_norm", False)),
         rope_base_mm=float(m.get("rope_base_mm", 100.0)),
         rope_min_period_mm=m.get("rope_min_period_mm"),
+        rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
         checkpoint_blocks=bool(m.get("checkpoint", True)),
         proj_norm=str(m.get("proj_norm", "batch")),
         dense_dim=int(m.get("dense_dim", 0)) if dense else 0,
@@ -60,6 +61,7 @@ def loss_kwargs(cfg: dict) -> dict:
         stopgrad_mean=bool(dense.get("stopgrad_mean", False)),
         fine_weight=float(dense.get("fine_weight", 0.0)),
         fine_predict_weight=float(pr.get("fine_weight", 0.0)),
+        gather_world_ref=lc.get("gather_world_ref"),
     )
 
 
@@ -176,7 +178,7 @@ class Trainer(engine.Trainer):
                             cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
         self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"])), lr=float(o["lr"]),
-                                     betas=(0.9, 0.95), fused=dev.type == "cuda")
+                                     betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
         if ckpt is not None:
             raw.load_state_dict(ckpt["model"])
             self.opt.load_state_dict(ckpt["optimizer"])

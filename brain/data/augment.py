@@ -68,7 +68,7 @@ def _foreground(x: torch.Tensor, modality: torch.Tensor) -> torch.Tensor:
     return x > fg_thresh(modality).to(x.device).view(-1, 1, 1, 1, 1)
 
 
-def bias_field(x: torch.Tensor, modality: torch.Tensor, cfg: dict) -> torch.Tensor:
+def bias_field(x: torch.Tensor, modality: torch.Tensor, cfg: dict, skip: torch.Tensor | None = None) -> torch.Tensor:
     """Multiplicative shading on MRI rows, applied about the background floor so air stays air.
 
     For robust-z volumes (tissue median 0, floor -6) ``floor + (x - floor) * gain`` is a multiplicative field on a
@@ -77,6 +77,8 @@ def bias_field(x: torch.Tensor, modality: torch.Tensor, cfg: dict) -> torch.Tens
     """
     r = x.shape[0]
     on = (torch.rand(r, device=x.device) < float(cfg["p"])) & (modality.to(x.device) == MOD_MRI)
+    if skip is not None:
+        on &= ~skip.to(x.device)
     idx = on.nonzero(as_tuple=True)[0]
     if idx.numel():
         low = torch.randn(idx.numel(), 1, 4, 4, 4, device=x.device) * float(cfg.get("amp", 0.3))
@@ -220,9 +222,10 @@ def histogram_match(x: torch.Tensor, modality: torch.Tensor, fg: torch.Tensor, v
     return x
 
 
-def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None) -> torch.Tensor:
+def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None,
+            skip_drift: torch.Tensor | None = None) -> torch.Tensor:
     """Isotropic blur, a smooth additive drift, and noise, in windowed units. Each is drawn per row.
-    ``skip_noise`` marks rows that already got (Rician) noise in native units."""
+    ``skip_noise`` marks rows that already got (Rician) noise in native units; ``skip_drift`` rows get no drift."""
     r, device = x.shape[0], x.device
     n, bl, dr = (aug.get(k) or {} for k in ("noise", "blur", "drift"))
     if bl and float(bl.get("p", 0)) > 0:
@@ -230,7 +233,10 @@ def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None) 
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
         x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)))
     if dr and float(dr.get("p", 0)) > 0:
-        on = (torch.rand(r, device=device) < float(dr["p"])).view(r, 1, 1, 1, 1)
+        on = torch.rand(r, device=device) < float(dr["p"])
+        if skip_drift is not None:
+            on &= ~skip_drift.to(device)
+        on = on.view(r, 1, 1, 1, 1)
         field = torch.randn(r, 1, 3, 3, 3, device=device) * float(dr.get("amp", 0.25))
         x = x + on * F.interpolate(field, size=x.shape[2:], mode="trilinear", align_corners=True)
     if n and float(n.get("p", 0)) > 0:
@@ -246,16 +252,17 @@ def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None) 
 def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
                thick: tuple[torch.Tensor, torch.Tensor] | None = None,
                vol: torch.Tensor | None = None, contrast: torch.Tensor | None = None,
-               quant: torch.Tensor | None = None) -> torch.Tensor:
+               quant: torch.Tensor | None = None, protect: torch.Tensor | None = None) -> torch.Tensor:
     """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
     ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching against another volume of the same contrast
-    group, using whole-volume tissue quantiles."""
+    group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
+    measured on the unaugmented intensities)."""
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
     if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
         x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
-        x = bias_field(x, modality, aug["bias"])
+        x = bias_field(x, modality, aug["bias"], skip=protect)
     if _enabled(aug.get("through_plane")):
         x = through_plane(x, aug["through_plane"], thick)
     noisy = None
@@ -265,7 +272,7 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     y = window_view(x, modality, aug)
     if _enabled(aug.get("curve")):
         y = contrast_curve(y, fg, aug["curve"])
-    return degrade(y, aug, skip_noise=noisy)
+    return degrade(y, aug, skip_noise=noisy, skip_drift=protect)
 
 
 def skull_dropout(volume: torch.Tensor, brain: torch.Tensor, modality: int, p: float,

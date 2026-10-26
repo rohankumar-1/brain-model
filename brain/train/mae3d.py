@@ -31,6 +31,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         rope_base_mm=float(m.get("rope_base_mm", 100.0)), checkpoint_blocks=bool(m.get("checkpoint", True)),
         n_cls=int(m.get("n_cls", 0)), n_registers=int(m.get("n_registers", 0)),
         mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"), drop_path=float(m.get("drop_path", 0.0)),
+        rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
     ).to(device)
 
 
@@ -76,7 +77,7 @@ class Trainer(engine.Trainer):
                          lesion_weight=float((pr.get("lesion") or {}).get("weight", 1.0)))
         self.module = enc
         self.opt = torch.optim.AdamW(param_groups(self.raw, float(o["weight_decay"])), lr=float(o["lr"]),
-                                     betas=(0.9, 0.95), fused=dev.type == "cuda")
+                                     betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
         if ckpt is not None:
             enc.load_state_dict(ckpt["model"])
             dec.load_state_dict(ckpt["decoder"])

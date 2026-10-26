@@ -30,7 +30,7 @@ from brain.common.optim import param_groups
 from brain.common.paths import resolve
 from brain.data.batch3d import prepare as ssl_prepare
 from brain.models.viewnet3d import ViewNet, batch_meta
-from brain.multitask.data import task_loaders
+from brain.multitask.data import protected_tasks, task_loaders
 from brain.multitask.data import prepare as task_prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
@@ -66,7 +66,8 @@ def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
 # encoder settings that are not in the weights (RoPE frequencies are rebuilt from them) or that change what the weights
 # mean; a warm start must match its source on all of them
 ARCH_KEYS = ("size", "rope_base_mm", "rope_min_period_mm", "qk_norm", "n_cls", "n_registers", "proj_dim", "proj_hidden",
-             "dense_dim", "dense_hidden", "proj_norm")
+             "dense_dim", "dense_hidden", "proj_norm", "rope_fp32", "fp32_residual")
+LEGACY = {"rope_fp32": False, "fp32_residual": False}        # what a config without the key was trained with
 
 
 def init_encoder(enc: nn.Module, cfg: dict, src_path) -> None:
@@ -75,7 +76,8 @@ def init_encoder(enc: nn.Module, cfg: dict, src_path) -> None:
     src = torch.load(src_path, map_location="cpu", weights_only=False)
     sm, sv = (src.get("config") or {}).get("model") or {}, (src.get("config") or {}).get("views") or {}
     m, v = cfg["model"], cfg["views"]
-    bad = [f"model.{k}: run {m.get(k)!r} vs source {sm.get(k)!r}" for k in ARCH_KEYS if m.get(k) != sm.get(k)]
+    bad = [f"model.{k}: run {m.get(k, LEGACY.get(k))!r} vs source {sm.get(k, LEGACY.get(k))!r}" for k in ARCH_KEYS
+           if m.get(k, LEGACY.get(k)) != sm.get(k, LEGACY.get(k))]
     if list(v["patch_xyz"]) != list(sv.get("patch_xyz", [])):
         bad.append(f"views.patch_xyz: run {v['patch_xyz']} vs source {sv.get('patch_xyz')}")
     gate, sgate = dict(v.get("gate") or {}), dict(sv.get("gate") or {})
@@ -126,9 +128,11 @@ class Trainer(engine.Trainer):
 
         # encoder (from scratch, or warm from an SSL checkpoint), SSL view network, multitask model on the same encoder
         enc = build_encoder(cfg, dev)
-        if m.get("init_from") and ckpt is None and not synthetic:
-            init_encoder(enc, cfg, resolve(m["init_from"]))
-            rt.log(f"[init] encoder, projector and predictor from {m['init_from']}")
+        if m.get("init_from") and not synthetic:
+            if ckpt is None:
+                init_encoder(enc, cfg, resolve(m["init_from"]))
+                rt.log(f"[init] encoder, projector and predictor from {m['init_from']}")
+            self.ramp = 0                     # the predictor comes trained: no re-ramp of the prediction terms
         pcfg = lc.get("predict") or {}
         dense_on = self.lk["dense_weight"] > 0
         predict_on = dense_on and self.lk["predict_weight"] > 0
@@ -147,7 +151,9 @@ class Trainer(engine.Trainer):
         gw = tk.get("group_weights") or {}
         self.balancer = Balancer(len(self.reg), lc.get("balance", "ema"), float(lc.get("ema_decay", 0.99)),
                                  group_of=[groups.index(x.group) for x in self.reg.tasks],
-                                 group_weight=[float(gw.get(g, 1.0)) for g in groups]).to(dev)
+                                 group_weight=[float(gw.get(g, 1.0)) for g in groups],
+                                 clamp=lc.get("uncertainty_clamp")).to(dev)
+        self.fov_unsafe, self.aug_unsafe = (x.to(dev) for x in protected_tasks(self.reg))
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
 
         seed = int(cfg["seed"]) + rt.rank
@@ -164,22 +170,24 @@ class Trainer(engine.Trainer):
         self.opt = torch.optim.AdamW(
             param_groups(self.raw, float(o["weight_decay"])) + [{"params": list(self.balancer.parameters()),
                                                                  "weight_decay": 0.0, "lr_scale": 1.0}],
-            lr=float(o["lr"]), betas=(0.9, 0.95), fused=dev.type == "cuda")
+            lr=float(o["lr"]), betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
+        self.normalize, self.ema_decay = bool(self.j.get("normalize", True)), 0.99
+        self.register_ema = {"ssl": None, "task": None}
         if ckpt is not None:
             self.raw.load_state_dict(ckpt["joint"])
             self.balancer.load_state_dict(ckpt["balancer"])
             self.opt.load_state_dict(ckpt["optimizer"])
+            self.register_ema.update({k: torch.tensor(v, device=dev) for k, v in (ckpt.get("joint_norm") or {}).items()
+                                      if v is not None})
         self.net = torch.nn.parallel.DistributedDataParallel(self.raw, device_ids=[rt.local],
                                                              find_unused_parameters=True) \
             if rt.world > 1 else self.raw
         self.w = (1.0, 0.0)
-        self.normalize, self.ema_decay = bool(self.j.get("normalize", True)), 0.99
-        self.register_ema = {"ssl": None, "task": None}
         self.t_sum, self.t_cnt = torch.zeros(1, device=dev), 0
         self._banner = (f"brain-{enc.size} params={enc.count_parameters():,} ssl_batch={self.batch}x{rt.world} "
                         f"task_batch={self.task_batch}x{rt.world} tasks={len(self.train_ids)}/{len(self.reg)} "
                         f"rope_min_period={m.get('rope_min_period_mm')} gate={m['gate'].get('mode', 'center')} "
-                        f"schedule={ {k: self.j.get(k) for k in ('warmup_frac', 'task_ramp_frac', 'taper_end_frac', 'ssl_floor')} }")
+                        f"schedule={ {k: v for k, v in self.j.items() if k.endswith(('_frac', '_steps', 'floor')) and v is not None} }")
 
     def banner(self) -> str:
         return self._banner
@@ -200,7 +208,8 @@ class Trainer(engine.Trainer):
         self.w = (w_ssl, w_task)
         dev = self.rt.device
         ssl_b = ssl_prepare(next(self.ssl_loader), self.cfg, dev, self.buckets)
-        task_b = task_prepare(self._next_task(), self.cfg, dev, self.encoder.patch_xyz, train=True) if w_task > 0 else None
+        task_b = task_prepare(self._next_task(), self.cfg, dev, self.encoder.patch_xyz, train=True,
+                              fov_unsafe=self.fov_unsafe, aug_unsafe=self.aug_unsafe) if w_task > 0 else None
         self.opt.zero_grad(set_to_none=True)
         with torch.autocast(**self.amp):
             out = self.net(ssl_b, task_b)
@@ -213,21 +222,23 @@ class Trainer(engine.Trainer):
             loss, has = slot_losses(out["task"], task_b["task"], task_b["y"], self.raw.mt.task_type, task_b["seg"],
                                     task_b["seg_pair"], self.stride)
             task_loss, _ = self.balancer(loss, has, task_b["task"])
-            total = total + w_task * self._norm("task", task_loss)
+            # normalised by the magnitude of the data term: uncertainty weighting's total (exp(-s) L + s) crosses zero
+            total = total + w_task * self._norm("task", task_loss, self.balancer.data_term)
             self.t_sum += task_loss.detach()
             self.t_cnt += 1
         total.backward()
+        self.balancer.sync_grads()
         torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
         self.opt.step()
         res = {k: parts[k].detach() for k in self.ssl_keys}
         res["loss"] = total.detach()
         return res
 
-    def _norm(self, name: str, loss: torch.Tensor) -> torch.Tensor:
-        """``loss`` divided by a running mean of its magnitude (no gradient through the mean)."""
+    def _norm(self, name: str, loss: torch.Tensor, scale: torch.Tensor | None = None) -> torch.Tensor:
+        """``loss`` divided by a running mean of the magnitude of ``scale`` (default ``loss``; no gradient through it)."""
         if not self.normalize:
             return loss
-        v = loss.detach().abs().clamp_min(1e-6)
+        v = (loss if scale is None else scale).detach().abs().clamp_min(1e-6)
         e = self.register_ema[name]
         e = v if e is None else self.ema_decay * e + (1 - self.ema_decay) * v
         self.register_ema[name] = e
@@ -249,7 +260,8 @@ class Trainer(engine.Trainer):
 
     def state(self, model_only: bool) -> dict:
         s = {"model": self.encoder.state_dict(), "multitask": self.raw.mt.state_dict(), "joint": self.raw.state_dict(),
-             "balancer": self.balancer.state_dict(), "tasks": [x.id for x in self.reg.tasks]}
+             "balancer": self.balancer.state_dict(), "tasks": [x.id for x in self.reg.tasks],
+             "joint_norm": {k: (float(v) if v is not None else None) for k, v in self.register_ema.items()}}
         if not model_only:
             s["optimizer"] = self.opt.state_dict()
         return s

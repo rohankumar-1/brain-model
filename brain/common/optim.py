@@ -7,6 +7,9 @@ import math
 import torch
 
 NO_DECAY_SUFFIXES = ("bias", "pos_embed", "cls_token", "register_tokens", "mask_token", "prefix")
+NO_DECAY_TABLES = ("task_emb", "type_emb", "cls_emb", "cls_pos")      # multitask identities, not weights to shrink
+# encoder modules after the blocks: under layer decay they get the deepest block's LR, not the embedding's
+POST_BLOCKS = ("norm.", "projector.", "token_head.", "predictor.")
 
 
 def lr_at(step: int, total: int, peak: float, warmup: int, floor: float = 0.01, kind: str = "cosine",
@@ -43,9 +46,11 @@ def param_groups(model: torch.nn.Module, wd: float, layer_decay: float | None = 
         if layer_decay is not None and n_blocks:
             if name.startswith("backbone.blocks."):
                 scale = layer_decay ** (n_blocks - 1 - int(name.split(".")[2]))
+            elif name.startswith(tuple("backbone." + m for m in POST_BLOCKS)):
+                scale = 1.0
             elif name.startswith("backbone."):
                 scale = layer_decay ** n_blocks
-        skip = p.ndim < 2 or name.endswith(NO_DECAY_SUFFIXES)
+        skip = p.ndim < 2 or name.endswith(NO_DECAY_SUFFIXES) or any(k in name for k in NO_DECAY_TABLES)
         buckets.setdefault((scale, 0.0 if skip else wd), []).append(p)
     return [{"params": ps, "lr": lr * s, "weight_decay": d, "lr_scale": s} for (s, d), ps in buckets.items()]
 

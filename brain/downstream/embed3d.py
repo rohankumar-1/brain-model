@@ -321,6 +321,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         n_cls=int(m.get("n_cls", 0)), n_registers=int(m.get("n_registers", 0)),
         mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"),
         rope_min_period_mm=m.get("rope_min_period_mm"),
+        rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
     ).to(device)
     if pretrained:
         net.load_state_dict(state)

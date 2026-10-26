@@ -103,15 +103,26 @@ def lejepa_loss(
     return total, inv, reg
 
 
-def gather_batch(z: torch.Tensor, enabled: bool = True) -> torch.Tensor:
+def scale_grad(z: torch.Tensor, m: float) -> torch.Tensor:
+    """``z`` in the forward pass, ``m`` times its gradient in the backward pass."""
+    return z if m == 1.0 else z.detach() + (z - z.detach()) * m           # exactly z forward
+
+
+def gather_batch(z: torch.Tensor, enabled: bool = True, world_ref: int | None = None) -> torch.Tensor:
     """All-gather (V, B, D) along the batch axis for the statistic. Other ranks are detached.
+
+    Each rank differentiates only through its own slice and DDP then averages over ranks, so the local slice's
+    gradient is scaled by the world size W to give the gradient of the loss over the whole gathered batch (before
+    2026-10-25 it was not: gathered terms got 1/W of their gradient, so the objective changed with the GPU count).
+    ``world_ref`` reproduces that old weighting of a ``world_ref``-GPU run on any W (scale W / world_ref).
 
     Every rank holds the same B (the loader drops the last partial batch), so no counts are exchanged
     and nothing is read back to the host.
     """
     if not enabled or not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
-        return z
-    parts = [torch.empty_like(z) for _ in range(dist.get_world_size())]
+        return z if not world_ref else scale_grad(z, 1.0 / float(world_ref))
+    w = dist.get_world_size()
+    parts = [torch.empty_like(z) for _ in range(w)]
     dist.all_gather(parts, z.detach().contiguous())
-    parts[dist.get_rank()] = z
+    parts[dist.get_rank()] = scale_grad(z, w / float(world_ref) if world_ref else float(w))
     return torch.cat(parts, dim=1)

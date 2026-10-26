@@ -227,6 +227,8 @@ class BrainEncoder(nn.Module):
         layer_scale: float | None = None,
         drop_path: float = 0.0,
         rope_min_period_mm: float | None = None,
+        rope_fp32: bool = False,
+        fp32_residual: bool = False,
     ):
         super().__init__()
         if size not in VIT_SIZES:
@@ -237,7 +239,10 @@ class BrainEncoder(nn.Module):
         self.patch_xyz = tuple(int(v) for v in patch_xyz)
         self.checkpoint_blocks = bool(checkpoint_blocks)
         head_dim = dim // heads
-        self.rope = RoPE3D(head_dim, base_mm=rope_base_mm, min_period_mm=rope_min_period_mm)
+        self.rope = RoPE3D(head_dim, base_mm=rope_base_mm, min_period_mm=rope_min_period_mm, fp32=rope_fp32)
+        # fp32 residual stream under autocast (the block outputs stay bf16 and are added to it); without it the stream
+        # is bf16 end to end and small updates round away (checkpoints from before 2026-10-25)
+        self.fp32_residual = bool(fp32_residual)
         self.patch_embed = PatchEmbed3D(in_chans, dim, self.patch_xyz)
         self.scale_embed = ScaleEmbed(dim)
         # stochastic depth rises linearly with depth, as in DeiT / Primus
@@ -288,6 +293,8 @@ class BrainEncoder(nn.Module):
         if coords_mm.shape[:2] != (b, n) or coords_mm.size(-1) != 3:
             raise ValueError(f"coords_mm {tuple(coords_mm.shape)} does not match tokens {(b, n, 3)}")
         scale = self.scale_embed(patch_size_mm)
+        if self.fp32_residual:
+            tokens, scale = tokens.float(), scale.float()
         return tokens + (scale.unsqueeze(1) if patch_size_mm.ndim == 2 else scale), grid
 
     def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor,

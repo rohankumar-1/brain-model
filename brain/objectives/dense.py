@@ -32,16 +32,23 @@ def consensus(emb: list[torch.Tensor], valid: list[torch.Tensor], pos: list[torc
     positions covered by at least two views count. Returns the loss and the fraction of entries that were
     covered (a health number, not a loss term). ``stopgrad_mean`` freezes the consensus so each view has
     to match a target it does not move.
+
+    Each view first averages its own entries at a position (a rotated crop can put two of its tokens in one coarse
+    cell), so the consensus is the mean over views and coverage counts views. Before 2026-10-25 it counted entries:
+    a cell seen by one view twice counted as covered (pulling that view's neighbouring tokens together) and such a
+    view weighed double in the mean.
     """
     b, d, dev = emb[0].shape[0], emb[0].shape[-1], emb[0].device
     trash = b * n_pos
     rows = torch.arange(b, device=dev)[:, None] * n_pos
     flats = [torch.where(v, rows + p, torch.full_like(p, trash)).reshape(-1) for v, p in zip(valid, pos)]
     s = emb[0].new_zeros(trash + 1, d, dtype=torch.float32)
-    c = emb[0].new_zeros(trash + 1, dtype=torch.float32)
+    c = emb[0].new_zeros(trash + 1, dtype=torch.float32)                     # views covering each position
     for e, v, f in zip(emb, valid, flats):
-        s = s.index_add(0, f, e.float().reshape(-1, d) * v.reshape(-1, 1))
-        c = c.index_add(0, f, v.float().reshape(-1))
+        sv = emb[0].new_zeros(trash + 1, d, dtype=torch.float32).index_add(0, f, e.float().reshape(-1, d) * v.reshape(-1, 1))
+        cv = emb[0].new_zeros(trash + 1, dtype=torch.float32).index_add(0, f, v.float().reshape(-1))
+        s = s + sv / cv.clamp_min(1.0)[:, None]
+        c = c + (cv > 0).float()
     mean = s / c.clamp_min(1.0)[:, None]
     if stopgrad_mean:
         mean = mean.detach()

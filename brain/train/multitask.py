@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import torch
 
-from brain.common.optim import NO_DECAY_SUFFIXES
+from brain.common.optim import NO_DECAY_SUFFIXES, NO_DECAY_TABLES, POST_BLOCKS
 from brain.common.paths import resolve
-from brain.multitask.data import prepare, ssl_view, task_loaders
+from brain.multitask.data import prepare, protected_tasks, ssl_view, task_loaders
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
 from brain.multitask.model import MultitaskModel
@@ -23,7 +23,6 @@ from brain.multitask.registry import load_registry
 from brain.objectives.sigreg import SIGReg, gather_batch, lejepa_loss
 from brain.train import engine
 
-NO_DECAY_TABLES = ("task_emb", "type_emb", "cls_emb", "cls_pos")      # identities, not weights to shrink
 # log column per task group: the raw (unbalanced) mean loss of the group's tasks, averaged over the steps of the
 # logging window in which the group was asked (the balanced ``loss`` sits near 1 by construction under ``ema``)
 GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich", "tumor": "tumor",
@@ -38,7 +37,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     m = cfg["model"]
     if synthetic or not m.get("init_from"):
         enc = BrainEncoder(size=m.get("size", "test"), patch_xyz=tuple(cfg["views"]["patch_xyz"]),
-                           qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32)
+                           qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
+                           rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)))
     else:
         src = torch.load(resolve(m["init_from"]), map_location="cpu", weights_only=False)
         enc = load_brain3d(src, torch.device("cpu")).model
@@ -49,13 +49,16 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         cfg["views"] = {**(scfg.get("views") or {}), "gate": cfg["views"].get("gate")}
         cfg["views"]["patch_xyz"] = list(enc.patch_xyz)
         m["size"] = enc.size
+        # the encoder keeps the numerics it was trained with (the defaults' True would not describe it)
+        m["rope_fp32"], m["fp32_residual"] = bool(enc.rope.fp32), bool(enc.fp32_residual)
     enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
     return enc.to(device).train().requires_grad_(True)
 
 
 def param_groups(model: MultitaskModel, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
-    """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``), the rest
-    at 1. Biases, norms and learned tokens get no weight decay."""
+    """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``, the final
+    norm and heads at ``enc_mult``), the rest at 1. Biases, norms, learned tokens and the task tables get no weight
+    decay."""
     depth = model.backbone.depth
     buckets: dict[tuple[float, float], list] = {}
     named = list(model.named_parameters()) + [(f"extra.{i}", p) for i, p in enumerate(extra)]
@@ -66,6 +69,8 @@ def param_groups(model: MultitaskModel, extra: list, wd: float, enc_mult: float,
         if name.startswith("backbone."):
             if name.startswith("backbone.blocks."):
                 scale = enc_mult * layer_decay ** (depth - 1 - int(name.split(".")[2]))
+            elif name.startswith(tuple("backbone." + m for m in POST_BLOCKS)):
+                scale = enc_mult                                    # final norm / heads: the deepest block's LR
             else:
                 scale = enc_mult * layer_decay ** depth
         skip = p.ndim < 2 or name.endswith(NO_DECAY_SUFFIXES) or any(k in name for k in NO_DECAY_TABLES)
@@ -91,7 +96,7 @@ class Trainer(engine.Trainer):
         # ``tasks.groups`` / ``tasks.ids`` restrict training (no-label control; single-task models), ``tasks.exclude`` drops tasks
         self.train_ids = self.reg.train_ids(tk)
         if not self.train_ids:
-            raise SystemExit(f"tasks.groups {only} selects no trained task (groups: {self.reg.groups})")
+            raise SystemExit(f"tasks {tk} selects no trained task (groups: {self.reg.groups})")
         enc = build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
         text = None
@@ -105,18 +110,15 @@ class Trainer(engine.Trainer):
         self.balancer = Balancer(len(self.reg), cfg["loss"].get("balance", "ema"),
                                  float(cfg["loss"].get("ema_decay", 0.99)),
                                  group_of=[groups.index(t.group) for t in self.reg.tasks],
-                                 group_weight=[float(gw.get(g, 1.0)) for g in groups]).to(dev)
+                                 group_weight=[float(gw.get(g, 1.0)) for g in groups],
+                                 clamp=cfg["loss"].get("uncertainty_clamp")).to(dev)
         self.module = self.raw
-        # tasks whose target needs the whole brain in view: no field-of-view cut on rows that ask them
-        from brain.multitask.labels import registration_sensitive
-
         groups = self.reg.groups
         self.group_of = torch.tensor([groups.index(t.group) for t in self.reg.tasks], device=dev)
         self.log_groups = [(i, GROUP_COLUMNS.get(g, g[:8])) for i, g in enumerate(groups) if g != "held_out"]
         self.g_sum = torch.zeros(len(groups), device=dev)
         self.g_cnt = torch.zeros(len(groups), device=dev)
-        unsafe = [registration_sensitive(t.id) or any(s.get("source") == "live" for s in t.sources) for t in self.reg.tasks]
-        self.fov_unsafe = torch.tensor(unsafe, device=dev)
+        self.fov_unsafe, self.aug_unsafe = (t.to(dev) for t in protected_tasks(self.reg))
         # general embedding (LeJEPA on a task-agnostic slot, two global views): model.general.enabled + loss.general
         self.gen = cfg["loss"].get("general") or {}
         self.gen_w = float(self.gen.get("weight", 0.0)) if (cfg["model"].get("general") or {}).get("enabled") else 0.0
@@ -132,7 +134,7 @@ class Trainer(engine.Trainer):
         self.opt = torch.optim.AdamW(
             param_groups(self.raw, list(self.balancer.parameters()), float(o["weight_decay"]),
                          float(o.get("enc_lr_mult", 0.25)), float(o.get("layer_decay", 0.8))),
-            lr=float(o["lr"]), betas=(0.9, 0.999), fused=dev.type == "cuda")
+            lr=float(o["lr"]), betas=tuple(o.get("betas", (0.9, 0.999))), fused=dev.type == "cuda")
         if ckpt is not None:
             self.raw.load_state_dict(ckpt["multitask"])
             self.balancer.load_state_dict(ckpt["balancer"])
@@ -172,7 +174,8 @@ class Trainer(engine.Trainer):
 
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
         raw = self._next()
-        b = prepare(raw, self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe)
+        b = prepare(raw, self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe,
+                    aug_unsafe=self.aug_unsafe)
         n = b["x"].shape[0]
         if self.gen_w > 0:
             b, rows = self._with_general_views(raw, b)
@@ -189,6 +192,7 @@ class Trainer(engine.Trainer):
             self.gen_sum += torch.stack([inv.detach(), reg.detach()])
             self.gen_cnt += 1
         total.backward()
+        self.balancer.sync_grads()
         torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
         self.opt.step()
         present = torch.zeros_like(per_task, dtype=torch.bool)

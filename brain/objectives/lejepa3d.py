@@ -32,9 +32,11 @@ def lejepa_loss(
     stopgrad_mean: bool = False,
     fine_weight: float = 0.0,
     fine_predict_weight: float = 0.0,
+    gather_world_ref: int | None = None,
 ) -> dict[str, torch.Tensor]:
-    """``out`` is ``ViewNet`` output (globals first in ``proj``); ``meta`` is ``batch_meta`` of the batch."""
-    proj = gather_batch(out["proj"].float(), gather_ddp)
+    """``out`` is ``ViewNet`` output (globals first in ``proj``); ``meta`` is ``batch_meta`` of the batch.
+    ``gather_world_ref``: see ``sigreg.gather_batch`` (None: the gathered terms get their full gradient)."""
+    proj = gather_batch(out["proj"].float(), gather_ddp, gather_world_ref)
     inv, reg = prediction_loss(proj, n_global=meta["n_global"]), sigreg(proj)
     win = prediction_loss(out["win"].float())
     total = (1.0 - lamb) * inv + lamb * reg + win_weight * win
@@ -45,7 +47,7 @@ def lejepa_loss(
             dense["emb"], dense["valid"], meta["pos"], meta["n_pos"], stopgrad_mean=stopgrad_mean)
         keep = [i for i, name in enumerate(meta["view_groups"]) if name != "win"]
         slots = sample_slots([dense["emb"][i] for i in keep], [dense["valid"][i] for i in keep], tokens_per_view)
-        d_reg = sigreg(gather_batch(slots, gather_ddp))
+        d_reg = sigreg(gather_batch(slots, gather_ddp, gather_world_ref))
         total = total + dense_weight * ((1.0 - lamb) * d_inv + lamb * d_reg)
         parts.update(dense_inv=d_inv, dense_sig=d_reg, overlap=overlap)
         fine = out.get("dense_fine")

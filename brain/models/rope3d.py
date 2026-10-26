@@ -29,10 +29,15 @@ class RoPE3D(nn.Module):
     Frequencies per axis are ``f_max * base_mm ** -k`` for k in [0, 1). The original ``f_max`` is 1 rad/mm (shortest
     period 6.3 mm): with 16 mm tokens ~38% of the pairs then rotate faster than the token grid can resolve and carry
     aliased noise. ``min_period_mm`` sets ``f_max = 2 pi / min_period_mm`` instead (e.g. 32 mm, twice the token
-    spacing); None keeps the original frequencies (checkpoints trained with them)."""
+    spacing); None keeps the original frequencies (checkpoints trained with them).
 
-    def __init__(self, head_dim: int, base_mm: float = 100.0, min_period_mm: float | None = None):
+    ``fp32``: compute the angles in fp32 and cast only cos / sin to the query dtype. Without it (checkpoints from
+    before 2026-10-25) the coordinates and angles follow the queries' dtype, which is bf16 under autocast: positions
+    round to ~0.5 mm and high-frequency angles are up to ~0.5 rad off, differently at different absolute positions."""
+
+    def __init__(self, head_dim: int, base_mm: float = 100.0, min_period_mm: float | None = None, fp32: bool = False):
         super().__init__()
+        self.fp32 = bool(fp32)
         if head_dim % 2:
             raise ValueError(f"head_dim must be even, got {head_dim}")
         self.head_dim = int(head_dim)
@@ -66,5 +71,9 @@ class RoPE3D(nn.Module):
 
     def rotate(self, q: torch.Tensor, k: torch.Tensor, coords_mm: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Rotate ``q, k`` of shape (B, H, N, Dh) using ``coords_mm`` (B, N, 3)."""
-        cos, sin = self.cos_sin(coords_mm.to(dtype=q.dtype))
+        if self.fp32:
+            cos, sin = self.cos_sin(coords_mm.float())
+            cos, sin = cos.to(q.dtype), sin.to(q.dtype)
+        else:
+            cos, sin = self.cos_sin(coords_mm.to(dtype=q.dtype))
         return apply_rotary(q, cos, sin), apply_rotary(k, cos, sin)

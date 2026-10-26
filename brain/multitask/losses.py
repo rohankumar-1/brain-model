@@ -13,6 +13,7 @@ the group weights), so a group of many tasks (SynthSeg) weighs as one group:
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -61,10 +62,21 @@ def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch
 
 
 class Balancer(nn.Module):
+    """Per-task loss weighting, then a group-first average. ``ema``: each task's loss over its running mean;
+    ``uncertainty``: ``exp(-s) L + s`` with a learned log-variance ``s`` per task, soft-clamped to +-``clamp``
+    (unclamped, near-solved tasks reach e^2.5 = 12x the weight of hard ones); ``uniform``.
+
+    Under DDP the ``ema`` statistics are all-reduced in ``forward`` and ``sync_grads`` averages the log-variance
+    gradients (call it after ``backward``): the balancer lives outside the DDP module, so without these every rank
+    learned its own task weights from its own few volumes. ``data_term`` (after ``forward``) is the balanced loss
+    without the ``+ s`` regulariser: its magnitude, unlike the total's, does not cross zero."""
+
     def __init__(self, n_tasks: int, mode: str = "ema", decay: float = 0.99, group_of: list[int] | None = None,
-                 group_weight: list[float] | None = None):
+                 group_weight: list[float] | None = None, clamp: float | None = None):
         super().__init__()
         self.mode, self.decay = str(mode), float(decay)
+        self.clamp = float(clamp) if clamp else None
+        self.data_term: torch.Tensor | None = None
         self.register_buffer("ema", torch.zeros(n_tasks))
         g = torch.as_tensor(group_of if group_of is not None else range(n_tasks), dtype=torch.long)
         self.register_buffer("group_of", g, persistent=False)
@@ -84,26 +96,59 @@ class Balancer(nn.Module):
         cnt = torch.zeros(n, device=loss.device).index_add(0, t, torch.ones_like(loss[has]))
         present = cnt > 0
         per_task = sums / cnt.clamp_min(1)
+        if self.mode == "ema":                                  # before any early return: every rank must all-reduce
+            with torch.no_grad():
+                g_sums, g_cnt = sums.detach(), cnt
+                if _distributed():                              # every rank updates the same running means
+                    st = torch.stack([g_sums, g_cnt])
+                    dist.all_reduce(st)
+                    g_sums, g_cnt = st[0], st[1]
+                g_present = g_cnt > 0
+                cur = g_sums / g_cnt.clamp_min(1)
+                fresh = g_present & (self.ema == 0)
+                self.ema[fresh] = cur[fresh]
+                upd = g_present & ~fresh
+                self.ema[upd] = self.decay * self.ema[upd] + (1 - self.decay) * cur[upd]
         if not present.any():
+            self.data_term = loss.sum().detach() * 0.0
             return loss.sum() * 0.0, per_task.detach()
+        data = None
         if self.mode == "uniform":
             scaled = per_task
         elif self.mode == "ema":
-            with torch.no_grad():
-                cur = per_task.detach()
-                fresh = present & (self.ema == 0)
-                self.ema[fresh] = cur[fresh]
-                upd = present & ~fresh
-                self.ema[upd] = self.decay * self.ema[upd] + (1 - self.decay) * cur[upd]
             scaled = per_task / self.ema.clamp_min(1e-3)
         else:
-            scaled = torch.exp(-self.log_var) * per_task + self.log_var
-        # mean over the present tasks of each group, then the weighted mean over present groups
+            s = self.log_var if self.clamp is None else self.clamp * torch.tanh(self.log_var / self.clamp)
+            data = torch.exp(-s) * per_task
+            scaled = data + s
+        total = self._group_mean(scaled, present)
+        self.data_term = total.detach() if data is None else self._group_mean(data, present).detach()
+        return total, per_task.detach()
+
+    def _group_mean(self, scaled: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
+        """Mean over the present tasks of each group, then the weighted mean over present groups."""
         n_g = self.group_weight.numel()
         g = self.group_of[present]
-        g_sum = torch.zeros(n_g, device=loss.device).index_add(0, g, scaled[present])
-        g_cnt = torch.zeros(n_g, device=loss.device).index_add(0, g, torch.ones_like(g, dtype=torch.float32))
+        g_sum = torch.zeros(n_g, device=scaled.device).index_add(0, g, scaled[present])
+        g_cnt = torch.zeros(n_g, device=scaled.device).index_add(0, g, torch.ones_like(g, dtype=torch.float32))
         g_on = g_cnt > 0
         w = self.group_weight[g_on]
-        total = (w * g_sum[g_on] / g_cnt[g_on]).sum() / w.sum()
-        return total, per_task.detach()
+        return (w * g_sum[g_on] / g_cnt[g_on]).sum() / w.sum()
+
+    def weights(self) -> torch.Tensor | None:
+        """The current per-task loss weights exp(-s) (uncertainty mode), for logging."""
+        if self.log_var is None:
+            return None
+        s = self.log_var if self.clamp is None else self.clamp * torch.tanh(self.log_var / self.clamp)
+        return torch.exp(-s.detach())
+
+    def sync_grads(self) -> None:
+        """Average the log-variance gradients over DDP ranks (after ``backward``, before the optimizer step)."""
+        if self.log_var is not None and _distributed():          # every rank joins, with zeros if it had no task
+            if self.log_var.grad is None:
+                self.log_var.grad = torch.zeros_like(self.log_var)
+            dist.all_reduce(self.log_var.grad, op=dist.ReduceOp.AVG)
+
+
+def _distributed() -> bool:
+    return dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1

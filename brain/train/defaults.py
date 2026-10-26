@@ -189,12 +189,25 @@ JOINT: dict[str, Any] = _joint_defaults()
 
 _DEFAULTS = {"lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK,
              "joint": JOINT}
-for _c in _DEFAULTS.values():
+for _name, _c in _DEFAULTS.items():
     # optim.schedule: cosine | wsd (warmup-stable-decay; decay_steps = length of the final decay, None = 20% of the
     # run). train.keep_full: keep_every snapshots carry optimizer state too (to branch a WSD cooldown from them).
     _c["optim"].setdefault("schedule", "cosine")
     _c["optim"].setdefault("decay_steps", None)
+    _c["optim"].setdefault("betas", [0.9, 0.999] if _name == "multitask" else [0.9, 0.95])
     _c["train"].setdefault("keep_full", False)
+    # encoder numerics fixed 2026-10-25, on for new runs: RoPE angles in fp32 (under bf16 autocast they were bf16, up
+    # to ~0.5 rad wrong for the high frequencies) and an fp32 residual stream. Checkpoints whose config lacks the keys
+    # load with the old behaviour (False), so existing models evaluate as they were trained; multitask post-training
+    # inherits them from its init_from encoder.
+    _c["model"].setdefault("rope_fp32", True)
+    _c["model"].setdefault("fp32_residual", True)
+    if "gather_ddp" in _c["loss"]:
+        # None: gathered SSL terms get their full gradient; an int reproduces the old (1/W) weighting of that GPU count
+        _c["loss"].setdefault("gather_world_ref", None)
+    if _name in ("multitask", "joint"):
+        # uncertainty balancing: log-variances soft-clamped to +-uncertainty_clamp (task weights within e^+-clamp)
+        _c["loss"].setdefault("uncertainty_clamp", 1.0)
 
 
 def default_config(method: str) -> dict[str, Any]:
