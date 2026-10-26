@@ -55,7 +55,7 @@ data:
   default_origin_mm: [0.0, 0.0, 0.0]
   default_spacing_mm: [1.0, 1.0, 1.0]
   index_name: volumes.csv
-  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
   num_workers: 10
   store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
   val_max_seg: 4

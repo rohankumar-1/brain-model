@@ -122,7 +122,7 @@ def _multitask_defaults() -> dict[str, Any]:
     return {
         "seed": 42,
         "data": {"store_root": "data/processed/slices_zarr", "index_name": "volumes.csv",
-                 "labels_dir": "data/processed/slices_zarr/labels/multitask", "registry": None,
+                 "labels_dir": "data/processed/slices_zarr/labels/multitask_v2", "registry": None,
                  "volume_size_xyz": list(GRID_XYZ), "default_spacing_mm": [1.0, 1.0, 1.0],
                  "num_workers": 10, "balance_alpha": 0.5, "balance_groups": None,
                  "val_per_task": 64, "val_max_seg": 4},

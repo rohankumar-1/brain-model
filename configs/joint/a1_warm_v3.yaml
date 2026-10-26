@@ -21,7 +21,7 @@ data:
   balance_alpha: 0.5
   balance_groups:
     brats: [brats_gli, brats_men, brats_ped, brats_goat]
-  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
   val_per_task: 64
   val_max_seg: 4
 model:

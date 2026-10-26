@@ -1,6 +1,6 @@
 """Label table for the multitask model: one row per (volume, task).
 
-    python -m brain.multitask.labels                      # build labels/multitask/{labels.parquet, stats.json}
+    python -m brain.multitask.labels                      # build labels/multitask_v2/{labels.parquet, stats.json}
     python -m brain.multitask.labels --live-sample 1500   # sample size for the live targets' normalisation
 
 Columns: ``volume_id, task, value, ref, split``. ``value`` is the target (0/1, class index, raw regression value;
@@ -36,7 +36,7 @@ from brain.multitask.registry import Registry, Task, load_registry
 from brain.prep import store
 
 STORE = DEFAULT_VOLUMES.parent
-OUT_DIR = STORE / "labels" / "multitask"
+OUT_DIR = STORE / "labels" / "multitask_v2"     # v1 (labels/multitask) stays as built for checkpoints trained on it
 GRID_ML = 256 * 256 * 160 / 1000.0          # store grid volume in ml (1 mm voxels): brain_frac -> template-space ml
 # volumes.csv family -> FOMO participants.tsv dataset
 FOMO_PT = {"fomo_" + short: pt for pt, short in PT_SHORT.items()}
