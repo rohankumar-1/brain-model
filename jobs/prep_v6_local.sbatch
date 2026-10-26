@@ -4,6 +4,8 @@
 #
 #   PART=brats sbatch --export=ALL --array=0-3%2 jobs/prep_v6_local.sbatch   # local BraTS cohorts + GoAT (PT009)
 #   PART=hbn   sbatch --export=ALL --array=0-3%2 jobs/prep_v6_local.sbatch   # FOMO HBN (PT018)
+#   PART=infant EXTRA_ARGS="--require-attr infant_age_months" sbatch --export=ALL --array=0-1 jobs/prep_v6_local.sbatch
+#       # infants (PT023) through the age-matched NIHPD templates; the attr redoes every infant scan stored before
 #
 # brats: every task unpacks all of PT009 (25 GB) so case discovery is identical, then takes --shard i/n of the cases.
 # hbn:   every task unpacks only its subjects (crc32 of the subject folder, i/n) of PT018 (170 GB) and preps them all.
@@ -37,6 +39,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # many processes share
 case "$PART" in
   brats) ZIP=PT009_BraTS-GEN.jls.zip; SUBSET=();               DATASETS=brats; SHARD=(--shard "$I/$N"); NEED_GB=80 ;;
   hbn)   ZIP=PT018_HBN.jls.zip;       SUBSET=(--subset "$I/$N"); DATASETS=fomo;  SHARD=();                NEED_GB=$(( 400 / N + 40 )) ;;
+  infant) ZIP=PT023_Infant_Development_Brain.jls.zip; SUBSET=(); DATASETS=fomo; SHARD=(--shard "$I/$N"); NEED_GB=30 ;;
   *) echo "unknown PART=$PART" >&2; exit 2 ;;
 esac
 echo "[prep-v6-local] $(date -Is) host=$(hostname) part=$PART shard=$I/$N local=$LOCAL"

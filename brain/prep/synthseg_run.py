@@ -106,6 +106,18 @@ def run_shard(shard: int, n_shards: int, batch: int = 1, amp: bool = False) -> N
     print(f"[synthseg] shard {shard} done: {done} volumes in {(time.time() - t0) / 3600:.2f}h", flush=True)
 
 
+def forget(families: list[str]) -> None:
+    """Drop the selected volumes of ``families`` from every ``volumes_*.csv`` (their zips get overwritten on redo)."""
+    sel = pd.read_csv(OUT / "select.csv")
+    ids = set(sel.loc[sel["dataset_family"].isin(families), "volume_id"].astype(str))
+    for f in sorted(OUT.glob("volumes_*.csv")):
+        d = pd.read_csv(f)
+        keep = ~d["volume_id"].astype(str).isin(ids)
+        if (~keep).any():
+            d[keep].to_csv(f, index=False)
+            print(f"[synthseg] {f.name}: {int((~keep).sum())} rows of {families} forgotten", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--select", action="store_true")
@@ -114,7 +126,12 @@ def main() -> None:
     ap.add_argument("--n-shards", type=int, default=1)
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--amp", action="store_true")
+    ap.add_argument("--redo-families", default="",
+                    help="comma list of dataset_family whose volumes were re-prepped (new geometry): their rows are "
+                         "removed from volumes_*.csv first, so this run segments them again")
     a = ap.parse_args()
+    if a.redo_families:
+        forget(a.redo_families.split(","))
     if a.select:
         sel = select(a.n)
         OUT.mkdir(parents=True, exist_ok=True)

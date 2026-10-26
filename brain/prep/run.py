@@ -59,6 +59,35 @@ def discover(names: list[str]) -> list[sources.Case]:
     return sorted((c for n in names for c in found[n]()), key=lambda c: (c.dataset, c.case_id))
 
 
+def hard_drops(root: Path) -> set[str]:
+    """Volume ids that must never be (re)stored: ``labels/pool_drop`` rows with a hard reason (a duplicate of a scan
+    kept under another dataset, a scan the old fallback reader mirrored). Dedup happens at prep time: ``brain.prep.dedup``
+    adds to these lists as the last step of every prep job, and prep then skips the cases."""
+    from brain.multitask.labels import HARD_DROP_REASONS
+
+    out: set[str] = set()
+    for f in sorted((root / "labels" / "pool_drop").glob("*.csv")):
+        d = pd.read_csv(f)
+        if "reason" in d and len(d):
+            out |= set(d.loc[d["reason"].astype(str).isin(HARD_DROP_REASONS), "volume_id"].astype(str))
+    return out
+
+
+def skip_hard_drops(root: Path, cases: list) -> tuple[list, list]:
+    """(cases to process, hard-dropped cases); a dropped case's stored files are deleted."""
+    from brain.prep.index import volume_id
+
+    drops = hard_drops(root)
+    keep, dropped = [], []
+    for c in cases:
+        if volume_id(c.dataset, c.case_id, c.modality) in drops:
+            store.remove_case(root, c)
+            dropped.append(c)
+        else:
+            keep.append(c)
+    return keep, dropped
+
+
 def work(args) -> dict:
     """Process one case. Flagged or failed volumes are not stored and any old file is removed."""
     case, root, z_anchor, opts = args
@@ -324,6 +353,7 @@ def main() -> None:
             groups.setdefault(c.folder, []).append(c)
         cases = [c for g in groups.values() for c in g[:: max(1, len(g) // a.limit_per_dataset)][: a.limit_per_dataset]]
     cases = cases[i::n]
+    cases, dropped = skip_hard_drops(a.root, cases)
     manifest = Path(a.manifest) if a.manifest else a.root / f"manifest_{i}of{n}.jsonl"
     if not manifest.is_absolute():
         manifest = a.root / manifest
@@ -351,7 +381,12 @@ def main() -> None:
                 for c in skipped:
                     out.write(json.dumps({"dataset": c.dataset, "case_id": c.case_id,
                                           "status": "ok", "skipped_existing": True}) + "\n")
-    print(f"[run] shard {i}/{n}: {len(cases)} cases, {len(done)} already done, {len(todo)} to do", flush=True)
+    if dropped:                                  # recorded so the index never lists them from an older manifest row
+        with open(manifest, "a") as out:
+            for c in dropped:
+                out.write(json.dumps({"dataset": c.dataset, "case_id": c.case_id, "status": "duplicate"}) + "\n")
+    print(f"[run] shard {i}/{n}: {len(cases)} cases, {len(done)} already done, {len(todo)} to do, "
+          f"{len(dropped)} known duplicates skipped", flush=True)
 
     def guard() -> bool:
         pct = scratch_used_pct()

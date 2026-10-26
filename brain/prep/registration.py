@@ -145,13 +145,13 @@ def as_affine(tf: sitk.Transform, center) -> sitk.AffineTransform:
     return aff
 
 
-def _sane(tf: sitk.Transform) -> bool:
+def _sane(tf: sitk.Transform, scale_range: tuple[float, float] = SCALE_RANGE) -> bool:
     p = pose_summary(tf)
-    return SCALE_RANGE[0] <= p["smin"] and p["smax"] <= SCALE_RANGE[1] and p["rot_deg"] <= MAX_ROT_DEG
+    return scale_range[0] <= p["smin"] and p["smax"] <= scale_range[1] and p["rot_deg"] <= MAX_ROT_DEG
 
 
 def register(moving: sitk.Image, template: Template, modality: str, init_center_mm, mode: str = "affine",
-             seed: int = 0, stripped: bool = False) -> RegResult:
+             seed: int = 0, stripped: bool = False, scale_range: tuple[float, float] = SCALE_RANGE) -> RegResult:
     """Fit ``template -> moving``. ``init_center_mm`` is the scan's brain center in physical space.
 
     A skull-stripped scan is fitted to the brain-only template when the template has a brain mask: against the
@@ -173,14 +173,14 @@ def register(moving: sitk.Image, template: Template, modality: str, init_center_
         rigid = Rr.Execute(fixed, mov)
         mi_r = float(Rr.GetMetricValue())
         info |= {"reg_mi_init": mi0, "reg_mi": mi_r, "reg_iters": int(Rr.GetOptimizerIteration())}
-        if _sane(rigid) and (mi0 is None or mi_r < mi0):
+        if _sane(rigid, scale_range) and (mi0 is None or mi_r < mi0):
             best, info["reg_method"] = rigid, "rigid"
             if mode == "affine":
                 aff = as_affine(rigid, template.center_mm)
                 Ra = _method(fixed, mov, aff, levels=2, lr=1.0, iters=80, seed=seed + 1)
                 fit = Ra.Execute(fixed, mov)
                 mi_a = float(Ra.GetMetricValue())
-                if _sane(fit) and mi_a < mi_r:
+                if _sane(fit, scale_range) and mi_a < mi_r:
                     best, info["reg_method"], info["reg_mi"] = fit, "affine", mi_a
     except RuntimeError as e:  # ITK optimizer failure: keep the best transform so far
         info["reg_error"] = str(e)[:120]
@@ -189,6 +189,64 @@ def register(moving: sitk.Image, template: Template, modality: str, init_center_
     info |= {"reg_rot_deg": p["rot_deg"], "reg_scale": p["scale"], "reg_aniso": p["aniso"],
              "reg_shift_mm": float(np.linalg.norm(moved)), "reg_ok": info["reg_method"] != "translation"}
     return RegResult(best, info)
+
+
+# ------------------------------------------------------------------------------------------------ infant templates
+# Infants (0-3 years) registered to the adult template fell back to rigid / translation (184 of 1,665) or sat at the
+# scale limit: the adult T1 differs in size and, before ~6 months, in contrast. They are registered to the age-matched
+# MNI NIHPD Objective-2 asymmetric template (T1w / T2w, 11 bins from birth to 60 months; Fonov et al. 2011) and carried
+# into the adult template's grid by a fixed NIHPD -> adult affine per bin, so they land on the same grid as everyone.
+NIHPD_BINS = ((0, 2), (2, 5), (5, 8), (8, 11), (11, 14), (14, 17), (17, 21), (21, 27), (27, 33), (33, 44), (44, 60))
+TEMPLATE_SCALE_RANGE = (0.4, 1.6)        # a newborn template is ~0.6x the adult one, linearly
+
+
+def nihpd_dir() -> Path:
+    return Path(os.environ.get("BRAIN_INFANT_TEMPLATES", "/home/roku/orcd/scratch/brain-model/templates/nihpd"))
+
+
+def nihpd_bin(age_months: float) -> str:
+    """The NIHPD age bin (``"05-08"``) holding ``age_months``; ages past the last bin use the last."""
+    for lo, hi in NIHPD_BINS:
+        if age_months < hi:
+            return f"{lo:02d}-{hi:02d}"
+    lo, hi = NIHPD_BINS[-1]
+    return f"{lo:02d}-{hi:02d}"
+
+
+def infant_template(age_months: float, contrast: str) -> Template:
+    b = nihpd_bin(age_months)
+    c = "t2w" if contrast == "t2w" else "t1w"
+    d = nihpd_dir()
+    return load_template(str(d / f"nihpd_asym_{b}_{c}.nii.gz"), str(d / f"nihpd_asym_{b}_mask.nii.gz"))
+
+
+@functools.lru_cache(maxsize=16)
+def nihpd_to_adult(bin_: str, adult_path: str, adult_mask: str | None) -> sitk.AffineTransform:
+    """Affine mapping adult-template points to the NIHPD ``bin_`` T1w template's points (fitted once per bin and
+    process: the template-to-template registration, scale allowed down to 0.4)."""
+    d = nihpd_dir()
+    adult = load_template(adult_path, adult_mask)
+    infant = geometry.read(d / f"nihpd_asym_{bin_}_t1w.nii.gz")
+    inf_tpl = load_template(str(d / f"nihpd_asym_{bin_}_t1w.nii.gz"), str(d / f"nihpd_asym_{bin_}_mask.nii.gz"))
+    rr = register(infant, adult, "mri", inf_tpl.center_mm, "affine", scale_range=TEMPLATE_SCALE_RANGE)
+    if rr.info["reg_method"] != "affine":
+        raise RuntimeError(f"NIHPD {bin_} -> adult template registration fell back to {rr.info['reg_method']}")
+    return as_affine(rr.transform, adult.center_mm)
+
+
+def compose(outer: sitk.Transform, inner: sitk.Transform) -> sitk.AffineTransform:
+    """One affine for ``p -> outer(inner(p))`` (both affine)."""
+    def mat(tf):
+        a, t = linear_part(tf)
+        m = np.eye(4)
+        m[:3, :3], m[:3, 3] = a, t
+        return m
+
+    m = mat(outer) @ mat(inner)
+    out = sitk.AffineTransform(3)
+    out.SetMatrix(tuple(float(v) for v in m[:3, :3].flatten()))
+    out.SetTranslation(tuple(float(v) for v in m[:3, 3]))
+    return out
 
 
 def output_grid(template: Template, size=geometry.GRID_XYZ) -> geometry.Grid:

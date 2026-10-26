@@ -9,7 +9,8 @@ Scores are computed on the pooled out-of-fold predictions of each repeat; the re
 with a bootstrap interval over the pooled predictions of the first repeat and the per-repeat values alongside.
 
 Policy (``--cv auto``): small tasks (< ``max_subjects`` subjects) whose volumes were never in the SSL pool, and every
-task whose rarest class has fewer than ``MIN_MINORITY`` volumes. For tasks from pretraining families only the fixed
+classification task whose fixed split leaves its rarest class with fewer than ``MIN_TEST_MINORITY`` test or
+``MIN_VAL_MINORITY`` validation volumes. For tasks from pretraining families only the fixed
 test split was kept out of pretraining, so cross-validating over all subjects tests on images the encoder saw
 (unlabelled); a rare-class task gets CV anyway, since its fixed split leaves a few test positives and often none in
 validation (before 2026-10-25 CQ500 EDH had 2 test and 0 validation positives, so its head was picked on test). The
@@ -25,19 +26,24 @@ from sklearn.model_selection import StratifiedGroupKFold
 from brain.downstream.tasks import TaskBundle
 
 VAL_FRAC = 0.15
-MIN_MINORITY = 100            # rarest-class volumes below which a classification task is cross-validated
+MIN_TEST_MINORITY = 15        # rarest-class test volumes of the fixed split below which a task is cross-validated
+MIN_VAL_MINORITY = 3          # ... and validation volumes (head choice needs both classes)
 
 
-def minority(task: TaskBundle) -> int | None:
-    """Volumes in the task's rarest class (multilabel: the rarest label's positives); None for regression."""
+def minority(task: TaskBundle, split: str | None = None) -> int | None:
+    """Volumes in the task's rarest class (multilabel: the rarest label's positives), over the whole task or one
+    fixed ``split``; None for regression."""
     if task.task_type == "regression":
         return None
-    y = np.asarray(task.y)
+    y_all = np.asarray(task.y)
+    y = y_all if split is None else y_all[[task.splits.get(str(v)) == split for v in task.volume_ids]]
+    if not len(y):
+        return 0
     if y.ndim > 1:
         y = y.reshape(len(y), -1) > 0
         return int(min(y.sum(0).min(), (~y).sum(0).min()))
-    counts = np.bincount(y.astype(int))
-    return int(counts[counts > 0].min()) if counts.size else 0
+    classes = np.unique(y_all.astype(int))                  # a class absent from the split counts as 0
+    return int(min((y.astype(int) == c).sum() for c in classes))
 
 
 def subjects(task: TaskBundle, volumes: pd.DataFrame | None) -> np.ndarray:
@@ -86,8 +92,8 @@ def use_cv(mode: str, task: TaskBundle, volumes: pd.DataFrame | None, overlap: f
         return True
     if mode == "off" or task.task_type == "segmentation":
         return False
-    rare = minority(task)
-    if rare is not None and rare < MIN_MINORITY:
+    test_min, val_min = minority(task, "test"), minority(task, "val")
+    if test_min is not None and (test_min < MIN_TEST_MINORITY or val_min < MIN_VAL_MINORITY):
         return True
     return len(set(subjects(task, volumes))) < max_subjects and not (overlap or 0.0) > 0.0
 

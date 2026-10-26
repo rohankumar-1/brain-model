@@ -3,6 +3,7 @@
 # (copied once to volumes_v5.csv) so train/val/test stay comparable across the grid change.
 #
 #   sbatch --dependency=afterok:<A>:<B>:<C> jobs/index_v6.sbatch
+#   INHERIT=volumes_2026-10-25.csv sbatch --export=ALL jobs/index_v6.sbatch   # keep a frozen index's splits instead
 # CPU only and quick: --no-slices skips the 2D slice table (only the legacy 2D trainers read it).
 
 #SBATCH -p mit_normal
@@ -22,5 +23,5 @@ export BRAIN_FOMO="${BRAIN_DATASETS:-/home/roku/orcd/pool/datasets}/fomo260k"   
 [[ -f "$STORE/volumes_v5.csv" ]] || cp -p "$STORE/volumes.csv" "$STORE/volumes_v5.csv"
 echo "[index-v6] $(date -Is) v6 manifests: $(ls "$STORE"/manifest_v6_*.jsonl | wc -l)"
 "$PY" -u -m brain.prep.index --root "$STORE" --workers "${SLURM_CPUS_PER_TASK:-16}" \
-  --manifests "manifest_v6_*.jsonl" --inherit-splits "$STORE/volumes_v5.csv" --no-slices
+  --manifests "manifest_v6_*.jsonl" --inherit-splits "$STORE/${INHERIT:-volumes_v5.csv}" --no-slices
 echo "[index-v6] done $(date -Is)"

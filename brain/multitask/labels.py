@@ -575,11 +575,8 @@ def main() -> None:
     a = ap.parse_args()
     reg = load_registry(a.registry)
     volumes = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
-    cache = a.out / "regqc.parquet"
-    if not cache.exists() and (OUT_DIR / "regqc.parquet").exists():      # a new label version reuses the v1 cache
-        a.out.mkdir(parents=True, exist_ok=True)
-        pd.read_parquet(OUT_DIR / "regqc.parquet").to_parquet(cache, index=False)
-    qc = registration_qc(volumes, a.workers, path=cache)
+    # each label version computes its own registration-QC cache: re-registered volumes (infants) change their masks
+    qc = registration_qc(volumes, a.workers, path=a.out / "regqc.parquet")
     print("[labels] registration QC fail share per family:\n"
           + (1 - qc.groupby("dataset_family")["ok"].mean()).round(3).to_string(), flush=True)
     labels = build(reg, volumes, a.workers, qc)

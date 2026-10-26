@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from brain.common.paths import DATASETS, SCRATCH
+from brain.data.volumes import META, meta_id
 from brain.prep import store
 from brain.prep.fomo import CONTRAST_SUFFIXES, load_holdout_families, strip_contrast
 DEFAULT_STORE = SCRATCH / "data" / "processed" / "slices_zarr"
@@ -133,6 +134,22 @@ def valdo_subject(case_id: str) -> str:
     return case_id.split("_", 1)[1] if case_id[:1] == "t" and "_" in case_id else case_id
 
 
+_RSNA_PATIENTS: dict[str, str] = {}
+
+
+def load_rsna_patients(root: Path) -> None:
+    """RSNA case_id -> DICOM PatientID from ``<root>/labels/rsna_patients.csv`` (read once from one header per study
+    by ``runs/diagnostics/rsna_patients.py``); ``build`` calls this before computing dedup keys."""
+    global _RSNA_PATIENTS
+    f = root / "labels" / "rsna_patients.csv"
+    _RSNA_PATIENTS = dict(zip(*[pd.read_csv(f)[c].astype(str) for c in ("case_id", "patient_id")])) if f.exists() else {}
+    print(f"[rsna] {len(_RSNA_PATIENTS)} studies mapped to {len(set(_RSNA_PATIENTS.values()))} patients", flush=True)
+
+
+def rsna_patients() -> dict[str, str]:
+    return _RSNA_PATIENTS
+
+
 def dedup_key(dataset: str, case_id: str) -> str:
     fam = dataset_family(dataset)
     if fam.startswith("brats"):
@@ -140,7 +157,8 @@ def dedup_key(dataset: str, case_id: str) -> str:
     if fam == "cq500":
         return "cq500:" + case_id
     if fam in ("rsna_ich", "bhsd", "hemseg"):       # BHSD / HemSeg volumes are RSNA studies (same subject, split)
-        return "rsna:" + case_id
+        pid = rsna_patients().get(case_id)          # by patient: 810 patients had studies in more than one split
+        return "rsna:" + (f"patient:{pid}" if pid else case_id)
     if fam in ("oasis1", "oasis2"):
         return "oasis:" + oasis_subject(case_id)
     if fam == "ixi":
@@ -391,11 +409,26 @@ def inherit_current_splits(vols: pd.DataFrame, old_vols: pd.DataFrame) -> pd.Dat
            .set_index("dedup_key")["split"].astype(str).to_dict())
     strata = {k: (m, f) for k, m, f in vols[["dedup_key", "modality", "dataset_family"]].itertuples(index=False, name=None)}
     fresh = [k for k in vols["dedup_key"].unique() if k not in old]
-    assigned = stratified_subjects(fresh, strata) if fresh else {}
+    # a re-keyed subject (RSNA studies grouped by patient) keeps the majority old split of its volumes (ties: train,
+    # then val), so only subjects whose volumes straddled splits move; truly new subjects get a stratified split
+    old_vol = old_vols.dropna(subset=["split"]).set_index("volume_id")["split"].astype(str).to_dict() \
+        if {"volume_id", "split"} <= set(old_vols.columns) else {}
+    by_key = vols.groupby("dedup_key")["volume_id"].apply(list).to_dict() if "volume_id" in vols else {}
+    rekeyed = {}
+    for k in fresh:
+        votes = [old_vol[v] for v in by_key.get(k, []) if v in old_vol]
+        if votes:
+            counts = {s: votes.count(s) for s in set(votes)}
+            rekeyed[k] = max(counts, key=lambda s: (counts[s], {"train": 2, "val": 1}.get(s, 0)))
+    new = [k for k in fresh if k not in rekeyed]
+    assigned = stratified_subjects(new, strata) if new else {}
     assigned.update(old)
+    assigned.update(rekeyed)
     vols = vols.copy()
     vols["split"] = vols["dedup_key"].map(assigned)
-    print(f"[split] inherited current store subjects={len(old)} newly assigned={len(fresh)}", flush=True)
+    moved = sum(1 for k in rekeyed for v in by_key[k] if old_vol.get(v) != rekeyed[k])
+    print(f"[split] inherited current store subjects={len(old)} re-keyed={len(rekeyed)} ({moved} volumes changed "
+          f"split) newly assigned={len(new)}", flush=True)
     return pin_official_splits(vols)
 
 
@@ -443,6 +476,7 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
           manifests: str = "manifest_*.jsonl", inherit_splits: Path | None = None, slice_table: bool = True) -> None:
     bhsd = bhsd_case_ids()
     print(f"[bhsd] {len(bhsd)} RSNA studies with hemorrhage masks", flush=True)
+    load_rsna_patients(root)
     man = load_ok_manifests(root, manifests)
     recs = []
     for r in man.itertuples(index=False):
@@ -463,6 +497,7 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
             "dataset": ds,
             "dataset_family": fam,
             "contrast": contrast_of(ds, cid),
+            "contrast_std": META[meta_id(contrast_of(ds, cid), mod, ds)],     # harmonised (brain.data.volumes.META)
             "folder": folder,
             "image_path": img.relative_to(root).as_posix(),
             "priority": ssl_priority(ds, cid),

@@ -467,7 +467,7 @@ def test_fomo_case_ids_keep_contrasts_in_one_folder():
     assert t1.folder == fl.folder == "fomo_hbn"
     assert t1.case_id != fl.case_id
     assert needs_n4("fomo_hbn_t1w") and needs_n4("fomo_nki_t2w")
-    assert not needs_n4("brats2023_gli_t1n") and not needs_n4("oasis1")
+    assert needs_n4("brats2023_gli_t1n") and not needs_n4("oasis1")     # BraTS is corrected since 2026-10-25
 
 
 def test_fomo_jpegls_roundtrip_uint16():
