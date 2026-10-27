@@ -161,3 +161,29 @@ def test_write_bias_keeps_a_warm_encoder_unchanged_until_it_opens():
     assert torch.allclose(damped["tokens"], plain, atol=1e-4)
     enc.task_write_bias = 0.0
     assert not torch.allclose(enc(view, coords, psize, keep=keep, task_tokens=tt)["tokens"], plain, atol=1e-3)
+
+
+def test_frozen_transfer_encodes_with_the_trained_task_tokens():
+    """A task-token checkpoint is read out (frozen transfer) with its trained tasks' tokens in the sequence, as in
+    training: its patch tokens equal BrainQuery.encode's, and differ without the tokens."""
+    from brain.downstream.embed3d import load_brain3d
+
+    cfg, model = _model(tokens=True)
+    cfg["model"].update(size="test", qk_norm=True, n_cls=1, proj_dim=16, proj_hidden=32)   # what build_encoder made
+    ck = {"model": model.backbone.state_dict(), "multitask": model.state_dict(), "config": cfg,
+          "tasks": [t.id for t in REG.tasks]}
+    enc = load_brain3d(ck, CPU)
+    enc.patch_xyz = (8, 8, 4)                  # the test model's own patch (load_brain3d maps 8x8x4 to fine pooling)
+    ids = model.tt_write.nonzero()[:, 0]
+    assert torch.allclose(enc.task_tokens, model.task_queries(ids).detach())
+    torch.manual_seed(2)
+    x = torch.randn(1, 32, 32, 16)
+    keep = torch.ones(1, 64, dtype=torch.bool)
+    with torch.no_grad():
+        got, _, _ = enc._encode_batch(x, [(0, 0, 0)], (32, 32, 16), keep)
+        want = model.encode(x.unsqueeze(1).permute(0, 1, 4, 3, 2), keep)["tokens"]
+        enc.task_tokens = None
+        bare, _, _ = enc._encode_batch(x, [(0, 0, 0)], (32, 32, 16), keep)
+    assert torch.allclose(got, want, atol=1e-4)
+    assert not torch.allclose(bare, want, atol=1e-3)
+    assert load_brain3d(ck, CPU, pretrained=False).task_tokens is None

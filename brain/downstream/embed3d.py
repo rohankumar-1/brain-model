@@ -94,6 +94,7 @@ class FrozenEncoder3D:
         self.tap_norm = False          # layer-normalise tapped (pre-norm residual) features, as the final tokens are
         self.taps_only = False         # drop the final tokens (and the CLS) and keep only the tapped blocks
         self.meta: int | None = None   # the next volume's META id (``volume_meta``); None = unknown
+        self.task_tokens: torch.Tensor | None = None   # a task-token model's trained-task tokens (task_token_prefix)
         # CLS embeddings (models with a CLS token): of the last single-pass encode, per window of the last
         # ``embed_windows`` call, and per volume of the last ``extract_volume_embeddings_3d`` run.
         self._last_cls: torch.Tensor | None = None
@@ -180,8 +181,10 @@ class FrozenEncoder3D:
         meta = None
         if getattr(self.model, "meta_emb", None) is not None:   # a model trained with metadata: the scan's, or unknown
             meta = torch.full((view.shape[0],), int(self.meta or 0), dtype=torch.long, device=view.device)
+        tt = None if self.task_tokens is None else self.task_tokens.to(view.device)
         with torch.autocast(**amp):
-            out = self.model(view, coords, pmm, keep=keep, patch_xyz=self.patch_xyz, taps=self.tap_blocks, meta=meta)
+            out = self.model(view, coords, pmm, keep=keep, patch_xyz=self.patch_xyz, taps=self.tap_blocks, meta=meta,
+                             task_tokens=tt)
         taps = [t.float() for t in out["taps"]]                 # bf16 under autocast; float32 like the final tokens
         if self.tap_norm:
             taps = [torch.nn.functional.layer_norm(t, t.shape[-1:]) for t in taps]
@@ -332,6 +335,23 @@ class FrozenEncoder3D:
         return (acc / count.clamp_min(1)).reshape(-1, acc.shape[-1]), full[0]
 
 
+def task_token_prefix(ckpt: dict) -> torch.Tensor | None:
+    """(T, D) inputs of a task-token BrainQuery's trained-task tokens (``BrainQuery.task_queries`` of its written
+    tasks), or None. Its patch tokens attended them throughout training, so frozen transfer encodes with them in the
+    sequence too: without, the features shift (~40% for a warm start) and the model is scored on features it never
+    produced."""
+    st = ckpt.get("multitask") or {}
+    if "tt_write" not in st or not bool(st["tt_write"].any()):
+        return None
+    from brain.multitask.data import TYPE_ID
+    from brain.multitask.registry import load_registry
+
+    reg = load_registry((ckpt.get("config") or {}).get("data", {}).get("registry")).subset(list(ckpt["tasks"]))
+    ids = st["tt_write"].nonzero()[:, 0].cpu()
+    types = torch.tensor([TYPE_ID[reg.tasks[int(i)].type] for i in ids])
+    return (st["task_emb.weight"].float().cpu()[ids] + st["type_emb.weight"].float().cpu()[types]).contiguous()
+
+
 def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> FrozenEncoder3D:
     """``pretrained=False`` keeps the architecture and drops the weights (a random-init control)."""
     state = {str(k).removeprefix("_orig_mod.").removeprefix("module."): v for k, v in ckpt["model"].items()
@@ -373,6 +393,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
     native_fine = patch == fine_patch_xyz(PATCH_XYZ)
     enc = FrozenEncoder3D(net, PATCH_XYZ if native_fine else patch, native, spacing)
     enc.force_fine_pool = native_fine
+    enc.task_tokens = task_token_prefix(ckpt) if pretrained else None
     gate = v.get("gate") or (cfg.get("loss") or {}).get("parenchyma")
     if isinstance(gate, dict):
         enc.gate = gate
