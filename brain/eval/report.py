@@ -190,6 +190,9 @@ def pair_rows(part: str, group: str, task: str, metric: str, runs: list, refs: l
             "run": [align(r) for r in runs], "ref": [align(r) for r in refs]}
 
 
+MIN_IN_DOMAIN_SCANS = 20     # SynthSeg-derived tasks have ~4 test scans: too few to compare, and they swamp the CI
+
+
 def heads_pairs(preds: pd.DataFrame, run: str, ref: str, tasks: set[str]) -> list[dict]:
     from brain.multitask.registry import load_registry
 
@@ -205,7 +208,7 @@ def heads_pairs(preds: pd.DataFrame, run: str, ref: str, tasks: set[str]) -> lis
         r = pair_rows("in_domain", group.get(t, "?"), t, metric[kind],
                       [(a.volume_id.tolist(), a.y.to_numpy(), a.p.to_numpy())],
                       [(b.volume_id.tolist(), b.y.to_numpy(), b.p.to_numpy())], n_classes().get(t, 2))
-        if r:
+        if r and len(r["vids"]) >= MIN_IN_DOMAIN_SCANS:
             out.append(r)
     return out
 

@@ -60,7 +60,7 @@ def test_slice2d_provider_lands_on_the_3d_grid():
     assert feat.shape == (N_TOK, _Enc.model.embed_dim) and fg.shape == (N_TOK,)
 
 
-def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path=None):
+def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path):
     from pathlib import Path
 
     from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG

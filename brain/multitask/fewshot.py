@@ -146,20 +146,26 @@ def main() -> None:
     ap.add_argument("--tasks", nargs="*", default=None, help="held-out task ids (default: all)")
     ap.add_argument("--no-transfer", action="store_true")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--labels-dir", default=None,
+                    help="label table to score on (default: the checkpoint's own); compare models on one table")
     a = ap.parse_args()
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
     model, reg, cfg = load_model(a.ckpt, dev)
     d = cfg["data"]
     store = resolve(d["store_root"])
-    labels, stats = load_labels(resolve(d["labels_dir"]))
-    stats = checkpoint_stats(model.label_stats, resolve(d["labels_dir"]), stats)
+    labels_dir = resolve(a.labels_dir or d["labels_dir"])
+    labels, stats = load_labels(labels_dir)
+    stats = checkpoint_stats(model.label_stats, labels_dir, stats)
     volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
     out: dict = {"ckpt": str(a.ckpt), "fewshot": [], "transfer": [], "preds": []}
 
     if not a.no_transfer:
+        # an older label table lists scans dedup has removed; ids the index lists twice name no single image
+        indexed = set(volumes["volume_id"]) - set(volumes.loc[volumes["volume_id"].duplicated(), "volume_id"])
         for t in reg.trained:
             rows = labels[(labels["task"] == t.id) & (labels["use"] == "eval") & (labels["split"] == "test")]
+            rows = rows[rows["volume_id"].isin(indexed)]
             if rows.empty:
                 continue
             for cohort, ids in rows.groupby(volumes.set_index("volume_id").loc[rows["volume_id"],

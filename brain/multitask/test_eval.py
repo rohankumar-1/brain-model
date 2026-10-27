@@ -79,20 +79,27 @@ def main() -> None:
     ap.add_argument("--probe-only", action="store_true", help="skip the heads (the first --ckpts still defines tasks)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out", default="runs/diagnostics/test_eval")
+    ap.add_argument("--labels-dir", default=None,
+                    help="label table (default: the first checkpoint's); one table for every model, e.g. the newest")
+    ap.add_argument("--split", default="test", choices=["test", "val", "train"],
+                    help="split the heads are scored on (train: how well they fit their own training scans; heads only)")
     a = ap.parse_args()
+    if a.split != "test" and a.probe_ckpts:
+        raise SystemExit("[test_eval] --split train/val scores heads only (probes fit on the train split)")
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
 
     ref_model, ref_reg, ref_cfg = load_model(Path(a.ckpts[0]), dev)
     store = resolve(ref_cfg["data"]["store_root"])
-    labels, stats = load_labels(resolve(ref_cfg["data"]["labels_dir"]))
+    labels_dir = resolve(a.labels_dir or ref_cfg["data"]["labels_dir"])
+    labels, stats = load_labels(labels_dir)
     volumes = pd.read_csv(store / ref_cfg["data"].get("index_name", "volumes.csv"), low_memory=False)
     tasks = [t.id for t in ref_reg.trained if a.tasks is None or t.id in a.tasks]
     lab = labels[(labels["use"] == "train") & labels["task"].isin(tasks)]
     test_ids, train_ids = {}, {}
     for t in tasks:
         cap = a.max_seg if ref_reg[t].type == "segmentation" else a.max_test
-        test_ids[t] = pick(lab.loc[(lab.task == t) & (lab.split == "test"), "volume_id"].unique().tolist(), cap)
+        test_ids[t] = pick(lab.loc[(lab.task == t) & (lab.split == a.split), "volume_id"].unique().tolist(), cap)
         train_ids[t] = pick(lab.loc[(lab.task == t) & (lab.split == "train"), "volume_id"].unique().tolist(), a.max_train)
     n_with = sum(1 for v in test_ids.values() if v)
     print(f"[test_eval] {len(tasks)} tasks, {n_with} with test scans (SynthSeg tasks have no test split); median "
@@ -105,11 +112,11 @@ def main() -> None:
         model, reg, cfg = (ref_model, ref_reg, ref_cfg) if i == 0 else load_model(Path(ck), dev)
         name = Path(ck).parent.name + "/" + Path(ck).stem
         patch = tuple(model.backbone.patch_xyz)
-        m_stats = checkpoint_stats(model.label_stats, resolve(ref_cfg["data"]["labels_dir"]), stats)
+        m_stats = checkpoint_stats(model.label_stats, labels_dir, stats)
         for t in tasks:
             if t not in reg.index or not test_ids[t]:
                 continue
-            loader, _ = _loader(store, labels, volumes, reg, m_stats, t, "test", ids=test_ids[t], use="train",
+            loader, _ = _loader(store, labels, volumes, reg, m_stats, t, a.split, ids=test_ids[t], use="train",
                                 workers=a.workers)
             _, pr = run_eval(model, loader, cfg, reg, m_stats, dev, patch, amp, return_preds=True)
             r = pr.get(reg.index[t], [])
@@ -186,9 +193,12 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
     tag = "probe_" + "_".join(Path(c).parent.name for c in a.probe_ckpts) if a.probe_only else "heads"
+    if a.split != "test":
+        tag += f"_{a.split}"
     df.to_csv(out / f"test_eval_{tag}.csv", index=False)
     if pred_rows:                                          # per-scan predictions: brain.eval.report bootstraps these
-        pd.DataFrame(pred_rows).to_parquet(out / "test_eval_preds.parquet", index=False)
+        pd.DataFrame(pred_rows).to_parquet(out / f"test_eval_preds{'' if a.split == 'test' else '_' + a.split}.parquet",
+                                           index=False)
     wide = df.pivot_table(index=["group", "task", "metric"], columns=["kind", "model"], values="score")
     print(wide.round(3).to_string(), flush=True)
     print("wrote", out / f"test_eval_{tag}.csv", flush=True)

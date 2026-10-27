@@ -19,6 +19,8 @@ Every model against one reference run, on three questions (`brain/eval/report.py
 
 All metrics are **skill**: 0 = chance, 1 = perfect (AUROC → `(auc − 0.5) / 0.5`, R² clipped at 0, Dice as is). A headline is the mean over groups of the mean over tasks, on tasks and scans both models have. Intervals: a paired bootstrap over subjects (one Poisson weight per person, shared across that person's scans and tasks), recomputing the headline each time.
 
+**Models: those scored on the current splits** (labels v2, rebuilt 2026-10-25: duplicates removed, RSNA split by patient). Runs 2 to 5, the joint pilot and the single-task model only have results on the old splits, so they are left out until re-scored. Tasks with fewer than 20 test scans (the SynthSeg anatomy tasks) are left out of in-domain. The task-token arms (A: slots, B: task tokens, C: tokens + MoE; 12k steps each) are short runs on one GPU: compare them with each other first. Arms B and C trained their encoder with task tokens in its sequence, so their frozen transfer (encoder run without the tokens) is a harder test for them than for the others.
+
 Edit `MODELS` / `REF` below and re-run from the top. One run's report alone: `runs/eval/<run>/report.md` (`jobs/submit_report.sh RUN REF`)."""),
 ("code", """import sys
 import warnings
@@ -40,18 +42,17 @@ from brain.eval.report import compare, val_history
 warnings.filterwarnings("ignore")
 R = Path("/orcd/scratch/orcd/011/roku/brain-model/runs")
 MODELS = {                                    # display name -> checkpoint; order = colour order
-    "v3 SSL": R / "v3/snapshots/v3_cls_s42/step_0018000.pt",
-    "run2 synthseg": R / "multitask/snapshots/mt_synthseg_s42/step_0017000.pt",
-    "run3 general": R / "multitask/v4general_s42/best.pt",
-    "run4 enc-lr": R / "multitask/v5enclr_s42/best.pt",
-    "run5 uncert": R / "multitask/v6nogenunc_s42/best.pt",
+    "v3 SSL": R / "v3/cls_s42/best.pt",                              # A1's starting encoder
     "run6 no-small": R / "multitask/v7nosmall_s42/best.pt",
-    "joint pilot": R / "joint/pilot_joint/best.pt",
-    "single hemorrhage": R / "single/hemorrhage/best.pt",
+    "A1 joint": R / "joint/a1_warm_v3/best.pt",
+    "arm A slots": R / "multitask/omni_a_slots/best.pt",
+    "arm B tokens": R / "multitask/omni_b_tokens/best.pt",
+    "arm C tokens+MoE": R / "multitask/omni_c_tokens_moe/best.pt",
 }
 REF = "run6 no-small"
-VAL_DIRS = {"run2 synthseg": R / "multitask/v3synthseg_s42"}   # training dirs of snapshot copies (their metrics.json)
-HEADS_PREDS = Path("/home/roku/brain-model/runs/eval/heads_all/test_eval_preds.parquet")   # test_eval over all MODELS
+VAL_DIRS = {}                                 # training dirs of snapshot copies (their metrics.json)
+# own-head test predictions on the current splits, every model on the same scans (A1 report + arm comparison)
+HEADS_PREDS = Path("/home/roku/brain-model/runs/eval/heads_v2/test_eval_preds.parquet")
 PARTS = {"in_domain": "In-domain", "transfer": "Transfer", "adaptation": "Adaptation"}
 
 # fixed categorical order (validated reference palette); text stays in ink colours, never the series colour
@@ -147,7 +148,7 @@ if im is not None:
 plt.show()"""),
 ("md", """## 3. Training validation curves
 
-The validation score each run logged during training (recomputed on the skill scale from `metrics.json`, so older runs are comparable). **The joint pilot's curve (dashed) is on a different validation set**: it started before the stratified validation picker (2026-10-24 21:34), so its validation scans came from one cohort per task; the same weights score 0.44 on today's set (run 6: 0.64). Each run is scored on the tasks it trained, so a run with a different task set (run 2: SynthSeg anatomy only) is on a different, easier mix: compare curve shapes across such runs, not levels."""),
+The validation score each run logged during training (recomputed on the skill scale from `metrics.json`). Run 6 validated on the older label table (v1) and A1 and the arms on v2, so compare curve shapes across those, not levels. A1 (dashed) ran 40k steps; the arms 12k."""),
 ("code", """fig, ax = plt.subplots(figsize=(8, 3.6))
 for m, ck in MODELS.items():
     if "single" in m:                          # validated on its own task only: not on the shared scale
@@ -155,6 +156,8 @@ for m, ck in MODELS.items():
     try:
         v = val_history(VAL_DIRS.get(m, ck.parent))
     except FileNotFoundError:                  # snapshots keep no metrics.json
+        continue
+    if "group" not in v:                       # an SSL run logs no task validation
         continue
     v = v[v.group == "score"]
     if v.empty:
@@ -203,7 +206,7 @@ def main(out_nb: Path, out_py: Path) -> None:
             cells.append({"cell_type": "markdown", "metadata": {}, "source": lines})
         else:
             cells.append({"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": lines})
-    nb = {"cells": cells, "metadata": {"kernelspec": {"display_name": "ml-torch", "language": "python", "name": "python3"},
+    nb = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python (ml-torch)", "language": "python", "name": "ml-torch"},
                                        "language_info": {"name": "python"}}, "nbformat": 4, "nbformat_minor": 5}
     out_nb.write_text(json.dumps(nb, indent=1) + "\n")
     code = [src.replace("plt.show()", "_show()") for kind, src in CELLS if kind == "code"]

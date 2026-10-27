@@ -62,6 +62,15 @@ class MultitaskDataset(Dataset):
             lab = lab[lab["use"] == use]
         if volume_ids is not None:
             lab = lab[lab["volume_id"].isin(set(volume_ids))]
+        # an older label table (labels/multitask v1, for old checkpoints) still lists scans the prep-time dedup removed;
+        # an id the index lists twice (cq500 and seg_cq500 copies of one study since 2026-10-26) names no single image
+        ambiguous = set(volumes.loc[volumes["volume_id"].duplicated(), "volume_id"])
+        indexed = lab["volume_id"].isin(set(volumes["volume_id"]) - ambiguous)
+        if not indexed.all():
+            gone = lab.loc[~indexed, "volume_id"].nunique()
+            print(f"[data] {gone} labelled volumes are not in the store index once (deduplicated / dropped / "
+                  f"ambiguous): skipped", flush=True)
+            lab = lab[indexed]
         lab = lab.assign(t=lab["task"].map(reg.index).astype(int))
         # standardised regression targets (mean / std of the task's training labels)
         mean = lab["task"].map(lambda t: stats.get(t, {}).get("mean", 0.0)).astype(float)

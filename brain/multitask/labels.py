@@ -122,6 +122,7 @@ def _participants() -> pd.DataFrame:
         key = ["dataset", "participant_id", "session_id"]
         fill = p[key].merge(e[key + ["age"]], on=key, how="left")["age"].to_numpy()
         missing = pd.to_numeric(p["age"], errors="coerce").isna().to_numpy()
+        p["age"] = p["age"].astype(object)                   # read as text ("n/a" rows); values parse downstream
         p.loc[missing, "age"] = fill[missing]
     return p
 
