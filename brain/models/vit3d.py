@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Sequence
 
 import torch
@@ -51,6 +52,8 @@ class Attention(nn.Module):
             q, k = torch.cat([q[:, :, :n_prefix], qr], dim=2), torch.cat([k[:, :, :n_prefix], kr], dim=2)
         else:
             q, k = self.rope.rotate(q, k, coords_mm)
+        if attn_mask is not None and attn_mask.dtype not in (torch.bool, q.dtype):
+            attn_mask = attn_mask.to(q.dtype)                   # additive mask built in the residual dtype
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         return self.proj(out.transpose(1, 2).reshape(b, n, c))
 
@@ -66,6 +69,44 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         a, b = self.w12(x).chunk(2, dim=-1)
         return self.w3(F.silu(a) * b)
+
+
+class MoEMLP(nn.Module):
+    """Mixture-of-experts MLP (top-k routing, Switch load balancing) for the top blocks (OMNI, arXiv 2610.12574).
+
+    Built from a block's MLP: every expert starts as a copy of it and the top-k gates sum to 1, so a trained block
+    computes exactly what it did; the experts then diverge on the tokens they are sent. ``aux`` is the last forward's
+    load-balancing loss, ``n * sum_e f_e P_e`` (1 when tokens and router mass are spread evenly)."""
+
+    def __init__(self, mlp: nn.Module, dim: int, n_experts: int = 5, top_k: int = 2):
+        super().__init__()
+        self.experts = nn.ModuleList(copy.deepcopy(mlp) for _ in range(int(n_experts)))
+        self.router = nn.Linear(dim, int(n_experts), bias=False)
+        nn.init.normal_(self.router.weight, std=0.02)
+        self.top_k = int(top_k)
+        self.aux: torch.Tensor | None = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = x.reshape(-1, x.shape[-1])
+        probs = torch.softmax(self.router(h).float(), dim=-1)                # (M, E)
+        w, idx = probs.topk(self.top_k, dim=-1)
+        w = w / w.sum(-1, keepdim=True)
+        out = None
+        for e, expert in enumerate(self.experts):
+            rows, slot = (idx == e).nonzero(as_tuple=True)
+            if rows.numel() == 0:
+                continue
+            y = expert(h[rows])
+            y = y * w[rows, slot].unsqueeze(-1).to(y.dtype)
+            if out is None:
+                out = torch.zeros(h.shape[0], y.shape[-1], dtype=y.dtype, device=h.device)
+            out = out.index_add(0, rows, y.to(out.dtype))
+        if out is None:
+            out = torch.zeros_like(h)
+        n = len(self.experts)
+        frac = torch.zeros(n, device=h.device).index_add(0, idx.flatten(), torch.ones(idx.numel(), device=h.device))
+        self.aux = n * (frac / idx.numel() * probs.mean(0)).sum()
+        return out.reshape(*x.shape[:-1], out.shape[-1])
 
 
 def drop_path(x: torch.Tensor, p: float, training: bool) -> torch.Tensor:
@@ -110,6 +151,32 @@ def _key_mask(keep: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     allow = keep | ~keep.any(dim=1, keepdim=True)
     fill = torch.zeros(allow.size(0), 1, 1, allow.size(1), device=allow.device, dtype=dtype)
     return fill.masked_fill(~allow[:, None, None, :], torch.finfo(dtype).min)
+
+
+def _task_mask(pad: torch.Tensor, n_prefix: int, n_task: int, write: torch.Tensor | None,
+               write_bias: float = 0.0, dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    """Attention mask (B, 1, L, L) for a sequence [prefix | task tokens | patches] (OMNI).
+
+    Every query attends the prefix and the kept patch tokens (``pad``). A task token also attends itself, never another
+    task token. The other tokens attend the task tokens marked ``write``; read-only ones (a few-shot task's) change
+    nothing else in the sequence. A query left with no key attends everything, so softmax stays defined.
+    Boolean (True = attend), or with ``write_bias`` > 0 additive in ``dtype``: the other tokens' logits on the written
+    task tokens are lowered by ``write_bias``, so a warm-started encoder can open its write path gradually (the new
+    tokens otherwise shift its features ~40% before any training: pre-attention LayerNorm gives them full scale)."""
+    b, n = pad.shape
+    s, e = n_prefix, n_prefix + n_task
+    allow = pad[:, None, :].expand(b, n, n).clone()
+    allow[:, s:e, s:e] = torch.eye(n_task, dtype=torch.bool, device=pad.device)
+    w = torch.ones(n_task, dtype=torch.bool, device=pad.device) if write is None else write.to(pad.device).bool()
+    allow[:, :s, s:e] = w
+    allow[:, e:, s:e] = w
+    allow |= ~allow.any(dim=-1, keepdim=True)
+    if write_bias <= 0:
+        return allow[:, None]
+    mask = torch.zeros(b, 1, n, n, dtype=dtype, device=pad.device)
+    mask[:, 0, :s, s:e] = -float(write_bias)
+    mask[:, 0, e:, s:e] = -float(write_bias)
+    return mask.masked_fill(~allow[:, None], torch.finfo(dtype).min)
 
 
 def _masked_mean(tokens: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -273,6 +340,8 @@ class BrainEncoder(nn.Module):
             nn.init.trunc_normal_(self.prefix, std=0.02)
         self.meta_emb: nn.Embedding | None = None
         self.n_meta = 0
+        # logit offset on the other tokens' attention to task tokens (``_task_mask``); the trainer ramps it to 0
+        self.task_write_bias = 0.0
         if n_meta:
             self.enable_meta(n_meta)
 
@@ -284,6 +353,25 @@ class BrainEncoder(nn.Module):
         nn.init.zeros_(self.meta_emb.weight)
         p = next(self.parameters())
         self.meta_emb.to(device=p.device)
+
+    def enable_moe(self, blocks: int, n_experts: int = 5, top_k: int = 2) -> None:
+        """Mixture-of-experts MLPs in the last ``blocks`` blocks (``MoEMLP``), each expert a copy of the block's MLP:
+        on a trained encoder the outputs are unchanged until the experts diverge. Blocks already converted stay."""
+        for blk in self.blocks[len(self.blocks) - int(blocks):]:
+            if not isinstance(blk.mlp, MoEMLP):
+                p = next(blk.mlp.parameters())
+                blk.mlp = MoEMLP(blk.mlp, self.embed_dim, n_experts, top_k).to(device=p.device, dtype=p.dtype)
+
+    @property
+    def moe_blocks(self) -> list[MoEMLP]:
+        return [blk.mlp for blk in self.blocks if isinstance(blk.mlp, MoEMLP)]
+
+    def moe_aux(self) -> torch.Tensor:
+        """Mean load-balancing loss of the MoE blocks over the last forward (0 without MoE)."""
+        aux = [m.aux for m in self.moe_blocks if m.aux is not None]
+        if not aux:
+            return torch.zeros((), device=next(self.parameters()).device)
+        return torch.stack(aux).mean()
 
     @property
     def n_prefix(self) -> int:
@@ -314,23 +402,35 @@ class BrainEncoder(nn.Module):
             tokens = tokens + self.meta_emb(meta.to(tokens.device).long()).unsqueeze(1).to(tokens.dtype)
         return tokens, grid
 
-    def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor,
-             taps: Sequence[int] = ()) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor]]:
-        """Blocks over packed patch tokens (with the prefix in front). Returns the normed prefix outputs (or None),
-        the normed patch tokens, and the pre-norm patch tokens after each block in ``taps``."""
-        p = self.n_prefix
+    def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor, taps: Sequence[int] = (),
+             task_tokens: torch.Tensor | None = None, task_write: torch.Tensor | None = None,
+             ) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor], torch.Tensor | None]:
+        """Blocks over packed patch tokens (with the prefix, then any task tokens, in front). Returns the normed prefix
+        outputs (or None), the normed patch tokens, the pre-norm patch tokens after each block in ``taps``, and the
+        normed task-token outputs (or None). ``task_tokens`` (T, D) or (B, T, D) attend as in ``_task_mask``."""
+        p, b = self.n_prefix, x.size(0)
+        t = 0 if task_tokens is None else int(task_tokens.shape[-2])
+        front = []
         if p:
-            x = torch.cat([self.prefix.to(x.dtype).expand(x.size(0), -1, -1), x], dim=1)
-            pad = torch.cat([torch.ones(pad.size(0), p, dtype=torch.bool, device=pad.device), pad], dim=1)
-        # One row has no pad, so the additive mask is skipped and flash attention stays on.
-        mask = None if x.size(0) == 1 else _key_mask(pad, x.dtype)
+            front.append(self.prefix.to(x.dtype).expand(b, -1, -1))
+        if t:
+            front.append(task_tokens.to(x.dtype).expand(b, -1, -1) if task_tokens.dim() == 2 else
+                         task_tokens.to(x.dtype))
+        if front:
+            x = torch.cat([*front, x], dim=1)
+            pad = torch.cat([torch.ones(b, p + t, dtype=torch.bool, device=pad.device), pad], dim=1)
+        if t:
+            mask = _task_mask(pad, p, t, task_write, self.task_write_bias, x.dtype)
+        else:
+            # One row has no pad, so the additive mask is skipped and flash attention stays on.
+            mask = None if b == 1 else _key_mask(pad, x.dtype)
         tapped = []
         for i, block in enumerate(self.blocks):
-            x = self._run_block(block, x, coords, mask, p)
+            x = self._run_block(block, x, coords, mask, p + t)
             if i in taps:
-                tapped.append(x[:, p:])
+                tapped.append(x[:, p + t:])
         x = self.norm(x)
-        return (x[:, :p] if p else None), x[:, p:], tapped
+        return (x[:, :p] if p else None), x[:, p + t:], tapped, (x[:, p:p + t] if t else None)
 
     def _pool(self, prefix: torch.Tensor | None, x: torch.Tensor, pad: torch.Tensor) -> torch.Tensor:
         """The global embedding: the CLS output when there is one, else the mean over kept patch tokens."""
@@ -345,11 +445,15 @@ class BrainEncoder(nn.Module):
         keep: torch.Tensor | None = None,
         taps: Sequence[int] = (),
         meta: torch.Tensor | None = None,
+        task_tokens: torch.Tensor | None = None,
+        task_write: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """Dense token features for evaluation. ``view`` is (B, C, X, Y, Z). Dropped tokens are zero.
 
         ``taps`` are block indices whose (pre-norm) outputs are also returned, as ``out["taps"]``. ``meta`` (B,) are
-        ``META`` ids (ignored by an encoder without ``n_meta``).
+        ``META`` ids (ignored by an encoder without ``n_meta``). ``task_tokens`` (T, D) join the sequence after the
+        prefix (OMNI-style, ``_task_mask``; ``task_write`` (T,) False = read-only) and come back as
+        ``out["task_tokens"]`` (B, T, D).
         """
         tokens, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=False, meta=meta)
         b, n, _ = tokens.shape
@@ -358,8 +462,9 @@ class BrainEncoder(nn.Module):
         if keep.shape != (b, n):
             raise ValueError(f"keep {tuple(keep.shape)} does not match tokens {(b, n)}")
         seq, seq_coords, pad, _ = pack_kept(tokens, coords_mm, keep)
-        prefix, x, tapped = self._run(seq, seq_coords, pad, taps)
+        prefix, x, tapped, task_out = self._run(seq, seq_coords, pad, taps, task_tokens, task_write)
         return {
+            "task_tokens": task_out,
             "tokens": scatter_kept(x, keep),
             "cls": prefix[:, 0] if self.n_cls else None,       # (B, D) global embedding when the model has a CLS
             "registers": prefix[:, self.n_cls:] if self.n_registers else None,   # (B, R, D) register outputs
@@ -396,7 +501,7 @@ class BrainEncoder(nn.Module):
             idx = order[start:start + size]
             start += size
             seq, seq_coords, pad, _ = pack_kept(emb[idx], coords_mm[idx], keep[idx], max_keep=m)
-            prefix, x, _ = self._run(seq, seq_coords, pad)
+            prefix, x, _, _ = self._run(seq, seq_coords, pad)
             pooled.append(self._pool(prefix, x, pad))
             if tokens:
                 dense.append(scatter_kept(x, keep[idx]))

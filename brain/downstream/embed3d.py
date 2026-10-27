@@ -347,6 +347,10 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
         n_meta=n_meta(m),
     ).to(device)
+    moe_blocks = {int(k.split(".")[1]) for k in state if ".mlp.experts." in k}
+    if moe_blocks:                    # mixture-of-experts top blocks (multitask ``model.moe``): rebuild before loading
+        n_exp = 1 + max(int(k.split(".")[4]) for k in state if ".mlp.experts." in k)
+        net.enable_moe(net.depth - min(moe_blocks), n_exp, int((m.get("moe") or {}).get("top_k", 2)))
     if pretrained:
         net.load_state_dict(state)
     net.eval().requires_grad_(False)

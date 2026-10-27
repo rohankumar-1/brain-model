@@ -61,8 +61,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
 
 def param_groups(model: MultitaskModel, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
     """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``, the final
-    norm and heads at ``enc_mult``), the rest at 1. Biases, norms, learned tokens and the task tables get no weight
-    decay."""
+    norm and heads at ``enc_mult``), the rest at 1 (also MoE routers, new in the encoder). Biases, norms, learned tokens
+    and the task tables get no weight decay."""
     depth = model.backbone.depth
     buckets: dict[tuple[float, float], list] = {}
     named = list(model.named_parameters()) + [(f"extra.{i}", p) for i, p in enumerate(extra)]
@@ -71,7 +71,9 @@ def param_groups(model: MultitaskModel, extra: list, wd: float, enc_mult: float,
             continue
         scale = 1.0
         if name.startswith("backbone."):
-            if name.startswith("backbone.blocks."):
+            if ".mlp.router." in name:
+                pass                                                # new MoE router: no pretrained weights to keep
+            elif name.startswith("backbone.blocks."):
                 scale = enc_mult * layer_decay ** (depth - 1 - int(name.split(".")[2]))
             elif name.startswith(tuple("backbone." + m for m in POST_BLOCKS)):
                 scale = enc_mult                                    # final norm / heads: the deepest block's LR
@@ -109,6 +111,17 @@ class Trainer(engine.Trainer):
 
             text = load_embeddings([t.descriptions[0] for t in self.reg.tasks], self.reg.text_encoder)
         self.raw = MultitaskModel(enc, self.reg, cfg["model"], text).to(dev)
+        if self.raw.tokens:
+            # task tokens live inside the encoder: a no-grad encoder (freeze) would leave them untrained
+            if self.freeze_steps:
+                raise SystemExit("model.task_tokens needs optim.freeze_steps=0")
+            self.raw.set_token_tasks([self.reg.index[t] for t in self.train_ids])
+        # the patch tokens' attention to the new task tokens starts damped by ``write_bias`` logits and opens linearly
+        # over ``write_ramp_steps`` (warm start: undamped, random task tokens shift the encoder's features ~40%)
+        tt = cfg["model"].get("task_tokens") or {}
+        self.tt_bias0, self.tt_ramp = float(tt.get("write_bias", 10.0)), int(tt.get("write_ramp_steps", 2000))
+        self.moe_w = float((cfg["model"].get("moe") or {}).get("aux_weight", 0.05)) if enc.moe_blocks else 0.0
+        self.moe_sum, self.moe_cnt = torch.zeros((), device=dev), 0
         groups = self.reg.groups
         gw = tk.get("group_weights") or {}
         self.balancer = Balancer(len(self.reg), cfg["loss"].get("balance", "ema"),
@@ -178,6 +191,8 @@ class Trainer(engine.Trainer):
                 "meta": torch.cat([b["meta"], b["meta"][rows]]) if b.get("meta") is not None else None}, rows
 
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
+        if self.raw.tokens:
+            self.raw.backbone.task_write_bias = self.tt_bias0 * max(0.0, 1.0 - step / max(self.tt_ramp, 1))
         raw = self._next()
         b = prepare(raw, self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe,
                     aug_unsafe=self.aug_unsafe)
@@ -190,6 +205,11 @@ class Trainer(engine.Trainer):
                            meta=b["meta"])
         loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride)
         total, per_task = self.balancer(loss, has, b["task"])
+        if self.moe_w:
+            aux = self.raw.backbone.moe_aux()
+            total = total + self.moe_w * aux
+            self.moe_sum += aux.detach()
+            self.moe_cnt += 1
         if self.gen_w > 0:
             g = out["general"].float()
             views = torch.stack([g[rows], g[n:]])                                      # (2, R, D)
@@ -224,6 +244,10 @@ class Trainer(engine.Trainer):
             out.update(gen_inv=f"{inv:.4f}", gen_sig=f"{reg:.3f}")
             self.gen_sum.zero_()
             self.gen_cnt = 0
+        if self.moe_w:                                     # load balance: 1 = even routing, -> n_experts = collapse
+            out["moe"] = f"{(self.moe_sum / max(self.moe_cnt, 1)).item():.3f}"
+            self.moe_sum.zero_()
+            self.moe_cnt = 0
         return out
 
     @torch.no_grad()
