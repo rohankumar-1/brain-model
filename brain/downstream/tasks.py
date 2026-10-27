@@ -220,7 +220,7 @@ LABEL_FILES = (
     ("isles24", "clinical.tsv"),           # written by brain.prep.stage_new
     ("atlas", "metadata.tsv"),             # written by brain.prep.stage_new
     ("valdo", "labels.tsv"),
-    ("fomo260k", "participants.tsv"),     # demographics / diagnosis for the multitask model (brain.multitask)
+    ("fomo260k", "participants.tsv"),     # demographics / diagnosis for BrainQuery's tasks (brain.multitask)
 )
 
 

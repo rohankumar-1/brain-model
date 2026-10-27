@@ -1,4 +1,4 @@
-"""Whole-volume batches for the multitask model: image, the tasks asked of it, and their targets.
+"""Whole-volume batches for BrainQuery: image, the tasks asked of it, and their targets.
 
 Each training sample asks a random subset of the scan's labelled (trained) tasks: ``k`` uniform in
 ``1..min(n_available, k_max)``, or every available task (up to ``k_max``) with probability ``p_all``. Tasks are drawn

@@ -35,7 +35,7 @@ from brain.eval.skill import skill
 
 CORE = REPO_ROOT / "configs" / "bench" / "benchmark.yaml"
 HEADS_PREDS = REPO_ROOT / "runs" / "eval" / "heads_all" / "test_eval_preds.parquet"
-# readouts of a multitask model's own outputs, not its encoder (records from before 2026-10-27 still have them)
+# readouts of a BrainQuery model's own outputs, not its encoder (records from before 2026-10-27 still have them)
 SUPERVISED_READOUTS = ("slots", "taskout", "general")
 PARTS = {"in_domain": "In-domain (heads)", "transfer": "Transfer (frozen)", "adaptation": "Adaptation (few-shot)"}
 
@@ -57,6 +57,21 @@ def label(ckpt: Path) -> str:
     from brain.downstream.results_view import model_label
 
     return model_label(model_id(ckpt))
+
+
+def display_name(ckpt: Path) -> str:
+    """The checkpoint's BrainQuery name (``BQ-A1``, configs/bench/models.yaml) when it has one, else ``label``."""
+    from brain.downstream.models import bq_names
+
+    return bq_names().get(Path(ckpt).resolve(), label(ckpt))
+
+
+def _checkpoint(target: str) -> Path:
+    """A checkpoint path, or a BrainQuery name from configs/bench/models.yaml."""
+    from brain.downstream.models import registry
+
+    entry = registry().get(str(target)) or {}
+    return resolve(entry["ckpt"]) if entry.get("ckpt") else resolve(target)
 
 
 def heads_name(ckpt: Path) -> str:
@@ -240,16 +255,35 @@ def fixed_heads(t: pd.DataFrame) -> dict[str, str]:
     return {task: g.idxmax()[1] for task, g in means.groupby(level=0)}
 
 
-def _suite_preds(row) -> tuple[list[str], np.ndarray, np.ndarray] | None:
-    """(volume ids, targets, scores) of one suite result. Segmentation: per-volume macro Dice as the score (the Dice
-    metric averages scores), with unit targets."""
+def _suite_preds(row) -> list[tuple[list[str], np.ndarray, np.ndarray]] | None:
+    """[(volume ids, targets, scores)] of one suite result: one set, or one per CV repeat (results from before
+    2026-10-27 kept only the first repeat). Segmentation: per-volume macro Dice as the score (the Dice metric averages
+    scores), with unit targets."""
     if not row.pred or not Path(row.pred).exists():
         return None
     if str(row.pred).endswith(".csv"):
         d = pd.read_csv(row.pred)
-        return [str(v) for v in d.volume_id], np.ones(len(d)), d["dice_macro"].to_numpy(float)
+        return [([str(v) for v in d.volume_id], np.ones(len(d)), d["dice_macro"].to_numpy(float))]
     z = np.load(row.pred, allow_pickle=False)
-    return [str(v) for v in z["volume_ids"]], np.asarray(z["y_true"]), np.asarray(z["y_score"])
+    out = [([str(v) for v in z["volume_ids"]], np.asarray(z["y_true"]), np.asarray(z["y_score"]))]
+    k = 1
+    while f"y_score_r{k}" in z.files:
+        out.append(([str(v) for v in z[f"volume_ids_r{k}"]], np.asarray(z[f"y_true_r{k}"]),
+                    np.asarray(z[f"y_score_r{k}"])))
+        k += 1
+    return out
+
+
+def score_ci(metric: str, preds: list, reps: int = 1000, seed: int = 0) -> tuple[float, float, float]:
+    """One model's score on its own scans, in the metric's units: the mean over prediction sets (CV repeats) with a
+    subject-level Poisson bootstrap interval, the same resampling ``summarise`` pairs models with."""
+    subj = subject_of()
+    keys = sorted({subj.get(x, x) for vids, _, _ in preds for x in vids})
+    pos = {k: i for i, k in enumerate(keys)}
+    w_subj = np.vstack([np.ones(len(keys)), np.random.default_rng(seed).poisson(1.0, size=(reps, len(keys)))])
+    m = np.nanmean(np.stack([metric_reps(metric, np.asarray(y), np.asarray(p),
+                                         w_subj[:, [pos[subj.get(x, x)] for x in v]]) for v, y, p in preds]), axis=0)
+    return float(m[0]), float(np.nanpercentile(m[1:], 2.5)), float(np.nanpercentile(m[1:], 97.5))
 
 
 def transfer_pairs(run_ck: Path, ref_ck: Path, groups: dict[str, list[str]], seen: dict[str, list[str]],
@@ -281,7 +315,7 @@ def transfer_pairs(run_ck: Path, ref_ck: Path, groups: dict[str, list[str]], see
             if a is None or b is None:
                 notes.append({"task": task, "why": "prediction file missing"})
                 continue
-            r = pair_rows("transfer", g, task, picked[0].metric, [a], [b])
+            r = pair_rows("transfer", g, task, picked[0].metric, a, b)
             if r:
                 r["head"] = picked[0]["head"] if picked[0]["head"] == picked[1]["head"] else \
                     f"{picked[0]['head']} / {picked[1]['head']}"
@@ -437,20 +471,20 @@ def val_history(run_dir: Path) -> pd.DataFrame:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("ckpt", type=Path)
-    ap.add_argument("--ref", type=Path, required=True)
+    ap.add_argument("ckpt", help="a checkpoint or a BrainQuery name (BQ-A1)")
+    ap.add_argument("--ref", required=True, help="a checkpoint or a BrainQuery name (BQ-R6)")
     ap.add_argument("--heads", type=Path, default=None, help="test_eval predictions (default <out>/test_eval_preds.parquet)")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--core", type=Path, default=CORE)
     ap.add_argument("--with-seg", action="store_true", help="add the segmentation transfer group")
     ap.add_argument("--reps", type=int, default=1000)
     a = ap.parse_args()
-    ckpt, ref_ckpt = resolve(a.ckpt), resolve(a.ref)
+    ckpt, ref_ckpt = _checkpoint(a.ckpt), _checkpoint(a.ref)
     out = a.out or default_out(ckpt)
     out.mkdir(parents=True, exist_ok=True)
     tasks, heads, notes = compare_pair(ckpt, ref_ckpt, a.heads or out / "test_eval_preds.parquet", a.core,
                                        a.with_seg, a.reps)
-    text = render(label(ckpt), label(ref_ckpt), tasks, heads, notes)
+    text = render(display_name(ckpt), display_name(ref_ckpt), tasks, heads, notes)
     print(text, end="")
     (out / "report.md").write_text("```\n" + text + "```\n")
     tasks.to_csv(out / "report_tasks.csv", index=False)

@@ -1,4 +1,7 @@
-"""Task-conditioned multitask model on a 3D BrainEncoder.
+"""BrainQuery (BQ): the project's model, a 3D BrainEncoder that answers task queries.
+
+Named checkpoints (``configs/bench/models.yaml``): BQ-v3 is the self-supervised encoder alone; BQ-R6 / BQ-A1 the slot
+readout runs; BQ-T1 / BQ-A2 the task-token runs. The pieces:
 
     token_t = task_emb[t] + type_emb[type_t]                  one token per trained task, in the encoder's sequence
     tokens  = encoder([CLS | task tokens | patches])          task tokens see the patches and themselves, never each
@@ -123,7 +126,7 @@ class SegDecoder(nn.Module):
         return self.head(x)
 
 
-class MultitaskModel(nn.Module):
+class BrainQuery(nn.Module):
     def __init__(self, backbone: BrainEncoder, reg: Registry, cfg: dict):
         super().__init__()
         s = cfg.get("slot") or {}
@@ -312,7 +315,7 @@ class TokenTraining:
       averaged for the log as ``moe`` (1 = even routing; it rises towards the expert count as routing collapses).
     A model without task tokens or MoE makes every call a no-op."""
 
-    def __init__(self, model: MultitaskModel, cfg_model: dict, trained: list[int], device: torch.device):
+    def __init__(self, model: BrainQuery, cfg_model: dict, trained: list[int], device: torch.device):
         self.model = model
         tt = cfg_model.get("task_tokens") or {}
         self.bias0, self.ramp = float(tt.get("write_bias", 10.0)), int(tt.get("write_ramp_steps", 2000))

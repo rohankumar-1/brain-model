@@ -20,9 +20,14 @@ def main() -> None:
     r = sub.add_parser("run", help="run a model's benchmark tasks (extra evaluator arguments after --)")
     r.add_argument("--model", required=True, help="a checkpoint, or a configs/bench/models.yaml name")
     r.add_argument("--tasks", nargs="*", default=None, help="a subset of the benchmark tasks")
-    r.add_argument("--with-seg", action="store_true", help="also segmentation transfer (our 3D encoders)")
+    r.add_argument("--full", action="store_true",
+                   help="BrainQuery checkpoints: also segmentation transfer, token probes, own heads, few-shot")
     r.add_argument("--submit", action="store_true", help="one Slurm job (jobs/eval_run.sbatch) instead of here")
     r.add_argument("--dependency", default=None, help="Slurm dependency for --submit, e.g. afterok:123")
+    cd = sub.add_parser("card", help="every recorded number for one model -> runs/bench/cards/<name>.md")
+    cd.add_argument("--model", required=True)
+    pn = sub.add_parser("pin", help="fix each task's readout (best mean val over models with complete results)")
+    pn.add_argument("--models", nargs="*", default=None)
     bd = sub.add_parser("board", help="the leaderboard")
     bd.add_argument("--models", nargs="*", default=None, help="default: every model with benchmark results")
     bd.add_argument("--ref", default=None, help="default: the spec's reference")
@@ -44,7 +49,15 @@ def main() -> None:
     elif a.cmd == "run":
         from brain.bench.run import run
 
-        run(a.model, tasks=a.tasks, with_seg=a.with_seg, submit=a.submit, dependency=a.dependency, extra=extra)
+        run(a.model, tasks=a.tasks, full=a.full, submit=a.submit, dependency=a.dependency, extra=extra)
+    elif a.cmd == "pin":
+        from brain.bench.board import pin
+
+        pin(a.models)
+    elif a.cmd == "card":
+        from brain.bench.card import card
+
+        print(card(a.model))
     else:
         from brain.bench.board import board
 

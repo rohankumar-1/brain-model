@@ -147,7 +147,7 @@ and origin from the full affine. The 1,058 Yale-metastasis translation fallbacks
 
 Both are RSNA ICH studies with voxel masks (`jobs/archive/prep_bhsd.sbatch`, `jobs/archive/prep_hemseg.sbatch`). BHSD (190 studies):
 codes 1 EDH, 2 IPH, 3 IVH, 4 SAH, 5 SDH, matching RSNA's labels on 92-97% of studies; kept out of SSL (`bhsd`
-column) but its masks train the multitask model. HemSeg-500 (518 studies): images rebuilt from exactly the DICOM
+column) but its masks train BrainQuery. HemSeg-500 (518 studies): images rebuilt from exactly the DICOM
 members the authors listed, so the masks line up; each study is IPH-only or IVH-only, so each binary mask is the
 whole hemorrhage. Studies in both keep BHSD's masks. Mask zips must be named `<case>.ICH.zip`: the index only finds
 that name (the first build wrote `.ich.zip` and left hemorrhage segmentation without training rows).

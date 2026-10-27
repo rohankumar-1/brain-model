@@ -47,13 +47,20 @@ def save_head_result(
     y_true: np.ndarray,
     y_score: np.ndarray,
     volume_ids: list[str],
+    repeats: list[tuple] | None = None,
 ) -> None:
+    """``repeats``: further (volume_ids, y_true, y_score) sets (CV repeats after the first), saved with an ``_r<k>``
+    suffix next to the first."""
     write_json(run_dir / "heads" / f"{head_name}.json", metrics)
+    extra = {}
+    for k, (v, y, s) in enumerate(repeats or [], start=1):
+        extra.update({f"volume_ids_r{k}": np.asarray(v), f"y_true_r{k}": y, f"y_score_r{k}": s})
     np.savez_compressed(
         run_dir / "predictions" / f"{head_name}.npz",
         y_true=y_true,
         y_score=y_score,
         volume_ids=np.asarray(volume_ids),
+        **extra,
     )
 
 

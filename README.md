@@ -1,13 +1,18 @@
-# brain-model
+# BrainQuery (BQ)
 
-Modality-agnostic embeddings for brain CT and MRI. One package, `brain/`, holds the pipeline end to end: prep (raw archives to registered 1 mm Zarr volumes) -> SSL pretraining (several methods on one engine) -> task-conditioned multitask post-training -> frozen-encoder downstream evaluation.
+**BrainQuery** is a 3D foundation model for brain CT and MRI that answers task queries: a self-supervised ViT encoder
+whose sequence carries one token per task, so one pass answers any of its trained tasks and a new task is learned from
+a few labelled scans. Checkpoints are named `BQ-...` (`configs/bench/models.yaml`; e.g. BQ-v3, the self-supervised
+encoder; BQ-A1, joint SSL + tasks). One package, `brain/`, holds the pipeline end to end: prep (raw archives to
+registered 1 mm Zarr volumes) -> self-supervised pretraining -> task-query training -> evaluation and the benchmark
+against published models (`docs/benchmark.md`).
 
 | Method | Command | What it is |
 |---|---|---|
-| `lejepa3d` | `python -m brain.train lejepa3d` | **Project model.** 3D LeJEPA on native-grid crops with a dense token objective, RoPE in mm, optional masked-block prediction. `docs/lejepa3d.md` |
-| `mae3d` | `python -m brain.train mae3d` | 3D MAE, Primus-style ViT on 8 x 8 x 4 mm tokens (split voxel target, lesion-aware masking). |
-| `multitask` | `python -m brain.train multitask` | Task-conditioned multitask post-training of an SSL encoder on whole volumes. `docs/multitask.md` |
-| `joint` | `python -m brain.train joint` | Joint SSL + multitask training of one encoder from scratch, with an SSL -> task curriculum. `brain/train/joint.py` |
+| `lejepa3d` | `python -m brain.train lejepa3d` | BrainQuery's self-supervised pretraining: 3D LeJEPA on native-grid crops with a dense token objective, RoPE in mm, masked-block prediction (BQ-v3). `docs/lejepa3d.md` |
+| `multitask` | `python -m brain.train multitask` | BrainQuery task training: task tokens on a pretrained encoder, whole volumes (BQ-R*, BQ-T*). `docs/multitask.md` |
+| `joint` | `python -m brain.train joint` | BrainQuery joint SSL + task training of one encoder, with an SSL -> task curriculum (BQ-A*). `brain/train/joint.py` |
+| `mae3d` | `python -m brain.train mae3d` | A 3D MAE baseline, Primus-style ViT on 8 x 8 x 4 mm tokens (split voxel target, lesion-aware masking). |
 
 ## Layout
 
@@ -17,18 +22,22 @@ brain/
                checkpoint (atomic save, resume), windowing (asinh windows), paths
   prep/        read -> center -> register -> resample -> native units -> brain mask; index; QC; pilot;
                SynthSeg-robust 2.0 (PyTorch port) + runner for anatomy labels
-  data/        volume datasets, crops (3D; 2D for the UNETR readout), appearance augmentation, token gate
-  models/      vit3d, viewnet3d, mae3d, projector, patch_embed, rope3d, conv3d; vit2d (2D evaluation only)
+  data/        volume datasets, crops, appearance augmentation, token gate
+  models/      vit3d (BrainQuery's encoder), viewnet3d, mae3d, projector, patch_embed, rope3d, conv3d
   objectives/  sigreg (+ batch gather), lejepa3d, dense
   train/       engine (CLI, loop, resume, checkpoints), defaults, one Trainer per method
-  multitask/   task registry, label builder (incl. registration / SynthSeg QC), data, model, losses, few-shot
-  downstream/  frozen-encoder tasks, heads, probes, segmentation, results views
+  multitask/   BrainQuery's task side: task registry, label builder (incl. registration / SynthSeg QC), data, the
+               BrainQuery model (task tokens, typed heads), losses, few-shot
+  downstream/  frozen-encoder tasks, heads, probes, segmentation, results views; models.py (any model, ours or
+               published, behind one interface) and adapters/ (published encoders, baselines)
+  bench/       the benchmark: versioned spec, run, per-model card, leaderboard
   datasets/    download / fetch scripts, SinoCT overlap
 configs/<method>/*.yaml    only the keys that differ from brain/train/defaults.py need be set
+configs/bench/             benchmark.yaml (the protocol), models.yaml (BQ checkpoints by name; published models)
 jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep_v6*, synthseg, multitask_*, eval_run /
                            submit_eval.sh; jobs/archive/ = finished one-off jobs
 tests/                     CPU tests (python tests/run.py tests/test_*.py; pytest also works where installed)
-docs/                      prep.md, lejepa3d.md, downstream_3d.md, multitask.md; docs/archive/ = superseded plans
+docs/                      prep.md, lejepa3d.md, multitask.md, downstream_3d.md, benchmark.md; docs/archive/ = old plans
 ```
 
 ## Storage (ORCD)
@@ -87,12 +96,17 @@ All methods share: warmup + cosine schedule, bf16, DDP via `torchrun`, atomic `l
 
 Appearance augmentation (contrast curves with inversion, bias field, through-plane degradation, skull dropout) is **on by default** for `lejepa3d`; see `docs/lejepa3d.md` to turn parts off.
 
-## 3. Downstream
+## 3. Evaluation and the benchmark
 
 ```bash
-jobs/submit_eval.sh runs/<run>/last.pt            # the full suite (25 tasks + probes) as a Slurm array, then ingest
-python -m brain.downstream.db report --wide        # models x tasks from the experiment database
+python -m brain.bench run --model BQ-T1 --full --submit    # every evaluation that applies to a model
+python -m brain.bench card --model BQ-T1                   # every number recorded for it
+python -m brain.bench board                                # BQ models and published models, by training class
+jobs/submit_eval.sh runs/<run>/last.pt                     # the whole downstream suite (every task), then ingest
 ```
+
+The benchmark (`docs/benchmark.md`) is a versioned subset of the suite: fixed tasks, pinned splits, one readout per
+task, comparisons grouped by what a model learned from.
 
 Frozen encoder on the 256 x 256 x 160 grid (20 x 16 x 16 tokens). Classification and regression use PCA plane, grid
 and global readouts plus a 3D conv probe, with bootstrap 95% CIs. Segmentation uses a token U-Net decoder (`seg3d`).

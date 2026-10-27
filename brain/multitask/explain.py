@@ -105,7 +105,7 @@ def grad_x_token(model, enc: dict, keep: torch.Tensor, t: int, kind: str) -> np.
 
 
 def token_grid(model, shape_zyx) -> tuple[int, int, int]:
-    """Token grid (Z, Y, X) of a multitask model or a bare 3D encoder."""
+    """Token grid (Z, Y, X) of a BrainQuery model or a bare 3D encoder."""
     pz, py, px = reversed(getattr(model, "backbone", model).patch_xyz)
     return shape_zyx[0] // pz, shape_zyx[1] // py, shape_zyx[2] // px
 
@@ -129,7 +129,7 @@ def enrichment(weights: np.ndarray, lesion_frac: np.ndarray, valid: np.ndarray) 
 
 
 def encode_backbone(backbone, x: torch.Tensor, keep: torch.Tensor) -> dict:
-    """``MultitaskModel.encode`` for a bare 3D encoder (SSL checkpoints)."""
+    """``BrainQuery.encode`` for a bare 3D encoder (SSL checkpoints)."""
     from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 
     size = (x.shape[4], x.shape[3], x.shape[2])
@@ -141,7 +141,7 @@ def encode_backbone(backbone, x: torch.Tensor, keep: torch.Tensor) -> dict:
 
 
 def load_backbone(path: Path, device):
-    """The 3D encoder of any checkpoint (the multitask model keeps it under ``model`` too) and its gate config."""
+    """The 3D encoder of any checkpoint (BrainQuery keeps it under ``model`` too) and its gate config."""
     from brain.downstream.embed3d import load_brain3d
 
     ck = torch.load(path, map_location="cpu", weights_only=False)

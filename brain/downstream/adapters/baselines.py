@@ -36,7 +36,7 @@ class RegionalStats(ExternalEncoder):
         nx, ny, nz = (-(-256 // self.block), -(-256 // self.block), -(-160 // self.block))
         self.dim = 3 + len(QUANTILES) + 3 * nx * ny * nz
 
-    def encode(self, vol_xyz: np.ndarray, modality: str, brain: np.ndarray | None) -> dict:
+    def encode(self, vol_xyz: np.ndarray, modality: str, brain: np.ndarray | None, attrs: dict) -> dict:
         lo, hi = (-100.0, 200.0) if str(modality).lower().startswith("ct") else (-5.0, 5.0)
         v = np.clip(vol_xyz, lo, hi)
         m = brain if brain is not None else (vol_xyz > (-500.0 if str(modality).lower().startswith("ct") else -5.5))

@@ -4,7 +4,7 @@
   python -m brain.train joint --synthetic --max-steps 6          # CPU smoke run
 
 One encoder serves two branches in a single forward pass: the 3D LeJEPA objective on multi-crop views of the SSL pool
-(``brain.train.lejepa3d``) and the task-conditioned multitask model on whole volumes (``brain.multitask``). The loss is
+(``brain.train.lejepa3d``) and BrainQuery's task side on whole volumes (``brain.multitask``). The loss is
 ``w_ssl(t) * L_ssl + w_task(t) * L_task`` with a curriculum (``joint``): SSL alone for ``warmup_frac`` of training,
 then the task weight ramps 0 -> 1 over ``task_ramp_frac`` while the SSL weight tapers to ``ssl_floor`` by
 ``taper_end_frac`` and stays there. The floor keeps the end of training self-supervised as well, so the encoder does not
@@ -16,7 +16,7 @@ weighting: the weights then mean shares of the update, and ``ssl_floor: 0.5`` ke
 
 The config is the 3D LeJEPA config plus the multitask sections (``tasks``, multitask ``aug`` keys, ``model.slot`` /
 ``seg`` / ``taps``, ``data.labels_dir`` / ``registry``), so checkpoints load everywhere: the encoder under ``model``
-(frozen suite), the multitask model under ``multitask`` (few-shot, test_eval, slot readout, explain).
+(frozen suite), the BrainQuery model under ``multitask`` (few-shot, test_eval, explain).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from brain.multitask.data import protected_tasks, task_loaders
 from brain.multitask.data import prepare as task_prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
-from brain.multitask.model import MultitaskModel, TokenTraining
+from brain.multitask.model import BrainQuery, TokenTraining
 from brain.multitask.registry import load_registry
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
@@ -98,9 +98,9 @@ def init_encoder(enc: nn.Module, cfg: dict, src_path) -> None:
 
 
 class JointNet(nn.Module):
-    """The SSL view network and the multitask model over one shared encoder, as one module (one DDP forward)."""
+    """The SSL view network and the BrainQuery model over one shared encoder, as one module (one DDP forward)."""
 
-    def __init__(self, core: ViewNet, mt: MultitaskModel):
+    def __init__(self, core: ViewNet, mt: BrainQuery):
         super().__init__()
         self.core, self.mt = core, mt
 
@@ -136,7 +136,7 @@ class Trainer(engine.Trainer):
         # the multitask branch gates and windows with the encoder's gate (e.g. mode: max)
         m["gate"] = dict(cfg["views"].get("gate") or {})
 
-        # encoder (from scratch, or warm from an SSL checkpoint), SSL view network, multitask model on the same encoder
+        # encoder (from scratch, or warm from an SSL checkpoint), SSL view network, BrainQuery model on the same encoder
         enc = build_encoder(cfg, dev)
         if m.get("init_from") and not synthetic:
             if ckpt is None:
@@ -151,7 +151,7 @@ class Trainer(engine.Trainer):
                        cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
         self.reg = load_registry(d.get("registry"))
         self.train_ids = self.reg.train_ids(tk)
-        mt = MultitaskModel(enc, self.reg, m)
+        mt = BrainQuery(enc, self.reg, m)
         self.tokens = TokenTraining(mt, m, [self.reg.index[x] for x in self.train_ids], dev)
         self.task_start = task_start(self.max_steps, self.j)
         self.raw = JointNet(core, mt).to(dev)

@@ -10,7 +10,12 @@ version: 1
 # results computed on another index are flagged in the leaderboard
 index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
 # the model every other one is paired against (a checkpoint or a models.yaml name)
-reference: runs/multitask/v7nosmall_s42/best.pt
+reference: BQ-R6
+# the label table in-domain and few-shot scoring read (BrainQuery models with task heads), whatever a checkpoint
+# trained on: one table, one set of splits for every model
+labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
+# the pinned readout per task (written by python -m brain.bench pin)
+readouts: configs/bench/readouts_v1.yaml
 
 # transfer: frozen-encoder downstream tasks (brain.downstream.suite) that can tell models apart. Chosen 2026-10-25 from
 #   the results of v3, runs 2-6 and the joint pilot, in skill units (brain.eval.skill): 95% interval narrower than 0.65,
@@ -18,8 +23,9 @@ reference: runs/multitask/v7nosmall_s42/best.pt
 #   Out by that rule: abide_ados, isles24_nihss(_discharge), piop1/2_age, id1000_age (no model above 0.15);
 #   oasis2_conversion, cq500_chronic_bleed, gli_idh, gli_lgg, gli_survival_12m (intervals 0.66-1.5: too few scans);
 #   atlas_lesion_side, oasis1_age (saturated). They still run in the full suite and land in the per-task CSV.
-#   One readout per task for every model: the head with the best mean validation score over the evaluated models
-#   (brain.eval.report.fixed_heads), never chosen on test.
+#   One readout per task for every model: the head with the best mean validation score over the models with complete
+#   results when the benchmark was pinned (python -m brain.bench pin), never chosen on test, and then fixed, so a
+#   model's score does not move when other models are added. A model without the pinned head uses its best on val.
 # segmentation transfer is costly (decoder training, large caches): only with --with-seg, at milestones, and for our
 # 3D encoders only (brain.downstream.seg3d reads their token grids).
 transfer:

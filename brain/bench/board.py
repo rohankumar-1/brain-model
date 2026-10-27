@@ -67,7 +67,7 @@ def pairs(model, ref, b, t: pd.DataFrame, heads: dict, tasks: list[str]) -> tupl
         if pa is None or pr is None:
             notes.append({"task": task, "why": "prediction file missing"})
             continue
-        row = pair_rows("transfer", b.group_of(task), task, a.metric, [pa], [pr])
+        row = pair_rows("transfer", b.group_of(task), task, a.metric, pa, pr)
         if row:
             row["head"] = a["head"] if a["head"] == r["head"] else f"{a['head']} / {r['head']}"
             row["modality"] = b.modality[task]
@@ -88,7 +88,7 @@ def board(models: list[str] | None = None, ref: str | None = None, with_seg: boo
     t_all = t_all[t_all.task.isin(tasks)]
     current = t_all.index_sha1 == b.index_sha1 if b.index_sha1 else pd.Series(True, index=t_all.index)
     t = t_all[current]
-    heads = fixed_heads(t)
+    heads = b.readouts() or fixed_heads(t)
     refm = resolve_model(ref or b.reference)
     targets = models if models else discover(t, tasks)
     resolved = [refm] + [m for m in (resolve_model(x) for x in targets) if m.model_id != refm.model_id]
@@ -136,13 +136,54 @@ def render(tab: pd.DataFrame, ref, b) -> str:
         lines += [f"## {mod.upper()} tasks", "",
                   "| Model | Class | Tasks | Skill | Δ vs reference [95% CI] | Overlap | Left out | Stale |",
                   "|---|---|---:|---:|---|---:|---:|---:|"]
+        full = g.loc[g.model_id == ref.model_id, "tasks"].max() if (g.model_id == ref.model_id).any() else g.tasks.max()
         for r in g.itertuples():
             d = "reference" if r.model_id == ref.model_id else f"{r.delta:+.3f} [{r.lo:+.3f}, {r.hi:+.3f}]" + \
                 (" *" if (r.lo > 0 or r.hi < 0) else "")
+            if r.tasks + r.left_out < full:                     # still being evaluated: not a comparable headline
+                d += " (partial)"
             ov = "-" if not np.isfinite(r.overlap) else f"{r.overlap:.2f}"
             lines.append(f"| {r.model} | {r.training_class} | {r.tasks} | {r.skill:.3f} | {d} | {ov} | {r.left_out} | "
                          f"{r.stale_results} |")
         lines.append("")
     lines += ["`*`: the interval excludes 0. Left out: tasks dropped for that model (seen labels, missing results, "
-              "protocol mismatch; see `_left_out.csv`). Stale: results on another store index, not used.", ""]
+              "protocol mismatch; see `_left_out.csv`). Stale: results on another store index, not used. "
+              "(partial): results missing on some of its tasks, so its numbers are not yet comparable.", ""]
     return "\n".join(lines)
+
+
+def pin(models: list[str] | None = None) -> dict[str, str]:
+    """Choose each benchmark task's readout once: the head with the best mean validation score over ``models`` (default:
+    every model with results on all benchmark tasks of its modalities, on the pinned index), and write it to the spec's
+    ``readouts`` file. Pinning makes a model's score independent of which other models have been evaluated."""
+    import datetime
+
+    import yaml
+
+    from brain.bench.spec import load
+    from brain.downstream.models import resolve_model
+    from brain.eval.report import fixed_heads, suite_heads
+
+    b = load()
+    if b.readouts_file is None:
+        raise SystemExit("the spec has no readouts file")
+    t = suite_heads()
+    t = t[t.task.isin(b.tasks + b.seg_tasks)]
+    t = t[t.index_sha1 == b.index_sha1] if b.index_sha1 else t
+    refs = [resolve_model(x) for x in (models or discover(t, b.tasks))]
+    complete = []
+    for m in refs:
+        have = set(t[t.model_id == m.model_id].task)
+        if set(b.tasks_for(m)) <= have:
+            complete.append(m)
+    if not complete:
+        raise SystemExit("no model has results on all of its benchmark tasks yet")
+    heads = fixed_heads(t[t.model_id.isin({m.model_id for m in complete})])
+    doc = {"version": b.version, "pinned_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+           "from_models": [m.name for m in complete], "index_sha1": b.index_sha1,
+           "readouts": {k: heads[k] for k in b.tasks + b.seg_tasks if k in heads}}
+    b.readouts_file.write_text("# The pinned readout per benchmark task (python -m brain.bench pin): the head with the best "
+                               "mean validation\n# score over the models listed, never chosen on test. Re-pin only with a "
+                               "new benchmark version.\n" + yaml.safe_dump(doc, sort_keys=False))
+    print(f"[pin] {len(doc['readouts'])} readouts from {', '.join(doc['from_models'])} -> {b.readouts_file}")
+    return doc["readouts"]

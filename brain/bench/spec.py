@@ -21,7 +21,15 @@ class Benchmark:
     seg_groups: dict[str, list[str]]
     modality: dict[str, str]               # task -> ct | mri
     seen: dict[str, list[str]]             # benchmark task -> registry tasks whose training makes it in-domain
+    labels_dir: str | None                 # in-domain / few-shot label table
+    readouts_file: Path | None             # the pinned readout per task (``python -m brain.bench pin``)
     raw: dict
+
+    def readouts(self) -> dict[str, str] | None:
+        """task -> pinned readout head, or None before ``pin`` (then the leaderboard's validation choice)."""
+        if self.readouts_file is None or not self.readouts_file.exists():
+            return None
+        return dict((yaml.safe_load(self.readouts_file.read_text()) or {}).get("readouts") or {})
 
     @property
     def tasks(self) -> list[str]:
@@ -56,7 +64,8 @@ def load(path: Path = SPEC) -> Benchmark:
     b = Benchmark(version=int(raw.get("version", 1)), index_sha1=raw.get("index_sha1"),
                   reference=str(raw["reference"]), groups=dict(raw["transfer"]),
                   seg_groups=dict(raw.get("transfer_seg") or {}), modality=modality,
-                  seen={k: list(v) for k, v in (raw.get("seen") or {}).items()}, raw=raw)
+                  seen={k: list(v) for k, v in (raw.get("seen") or {}).items()}, labels_dir=raw.get("labels_dir"),
+                  readouts_file=REPO_ROOT / raw["readouts"] if raw.get("readouts") else None, raw=raw)
     missing = [t for t in b.tasks + b.seg_tasks if t not in modality]
     if missing:
         raise SystemExit(f"{path}: tasks without a modality: {missing}")

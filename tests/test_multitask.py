@@ -10,7 +10,7 @@ import torch
 from brain.multitask.data import MultitaskDataset, SyntheticMultitask, collate, prepare
 from brain.multitask.labels import live_targets
 from brain.multitask.losses import Balancer, seg_loss, slot_losses
-from brain.multitask.model import MultitaskModel
+from brain.multitask.model import BrainQuery
 from brain.multitask.registry import load_registry
 from brain.train.defaults import default_config, smoke_config
 from brain.train.multitask import build_encoder
@@ -34,7 +34,7 @@ def _model(tokens: bool = True, **slot):
     cfg = _cfg()
     cfg["model"]["slot"].update(slot)
     cfg["model"]["task_tokens"]["enabled"] = tokens
-    model = MultitaskModel(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
+    model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
     if tokens:
         model.set_token_tasks([REG.index[t] for t in REG.train_ids(cfg["tasks"])])
     return cfg, model

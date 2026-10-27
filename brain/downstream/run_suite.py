@@ -280,7 +280,8 @@ def main() -> None:
             metrics.update(head=name, view=views_of[name], n_train=int(np.mean(n_tr)),
                            n_val=int(np.mean([b for _, b in sizes[name]])), n_test=len(ids0),
                            cv={"folds": n_folds, "repeats": args.cv_repeats})
-            save_head_result(run_dir, name, metrics, y_true=y0, y_score=s0, volume_ids=ids0)
+            save_head_result(run_dir, name, metrics, y_true=y0, y_score=s0, volume_ids=ids0,
+                             repeats=[reps[r] for r in sorted(reps) if r != min(reps)])
             all_metrics[name] = metrics
             head_names.append(name)
             scored.append((name, views_of[name], metrics))

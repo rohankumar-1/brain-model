@@ -20,7 +20,7 @@ from brain.data.volumes import n_meta
 from brain.multitask.data import prepare, protected_tasks, task_loaders
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
-from brain.multitask.model import MultitaskModel, TokenTraining
+from brain.multitask.model import BrainQuery, TokenTraining
 from brain.multitask.registry import load_registry
 from brain.train import engine
 
@@ -59,7 +59,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     return enc.to(device).train().requires_grad_(True)
 
 
-def param_groups(model: MultitaskModel, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
+def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
     """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``, the final
     norm and heads at ``enc_mult``), the rest at 1 (also MoE routers, new in the encoder). Biases, norms, learned tokens
     and the task tables get no weight decay."""
@@ -105,7 +105,7 @@ class Trainer(engine.Trainer):
             raise SystemExit(f"tasks {tk} selects no trained task (groups: {self.reg.groups})")
         enc = build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
-        self.raw = MultitaskModel(enc, self.reg, cfg["model"]).to(dev)
+        self.raw = BrainQuery(enc, self.reg, cfg["model"]).to(dev)
         if self.raw.tokens and self.freeze_steps:
             # task tokens live inside the encoder: a no-grad encoder (freeze) would leave them untrained
             raise SystemExit("model.task_tokens needs optim.freeze_steps=0")

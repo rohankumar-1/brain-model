@@ -1,6 +1,12 @@
-# Models the benchmark can evaluate besides our own checkpoints (python -m brain.bench run --model <name>).
+# Models the benchmark evaluates by name (python -m brain.bench run --model <name>): our BrainQuery (BQ) checkpoints,
+# and published encoders and baselines behind adapters.
 #
-# An entry:
+# A BrainQuery entry has ``ckpt`` (and a ``note``); its training class, modalities and the tasks it trained on are read
+# from the checkpoint. Naming: BQ-v3 is the self-supervised encoder; BQ-R<n> multitask post-training run n; BQ-A<n> joint
+# SSL + task run n; BQ-T<n> task-token multitask run n; BQ-S-<task> a single-task specialist; BQ-12k-* the 12k-step
+# readout comparison of 2026-10-26.
+#
+# Any other entry:
 #   adapter:            module:Class, a brain.downstream.models.ExternalEncoder subclass (brain/downstream/adapters/)
 #   class:              what it learned from: ssl | supervised | specialist | baseline (brain.downstream.models)
 #   modalities:         [ct], [mri] or [ct, mri]: it is scored only on benchmark tasks of these modalities
@@ -11,6 +17,20 @@
 #   reference:          where it comes from (paper, repository, licence)
 #   kwargs:             adapter options
 models:
+  BQ-v3:          {ckpt: runs/v3/cls_s42/best.pt, note: "self-supervised 3D LeJEPA ViT-S, step 18k: the encoder every BQ run starts from"}
+  BQ-R2:          {ckpt: runs/multitask/snapshots/mt_synthseg_s42/step_0017000.pt, note: "multitask run 2: SynthSeg anatomy, task groups"}
+  BQ-R3:          {ckpt: runs/multitask/v4general_s42/best.pt, note: "multitask run 3: + general slot, more tasks"}
+  BQ-R4:          {ckpt: runs/multitask/v5enclr_s42/best.pt, note: "multitask run 4: encoder 0.5x LR"}
+  BQ-R5:          {ckpt: runs/multitask/v6nogenunc_s42/best.pt, note: "multitask run 5: uncertainty balancing"}
+  BQ-R6:          {ckpt: runs/multitask/v7nosmall_s42/best.pt, note: "multitask run 6: run 5 without the small clinical tasks (slot readout)"}
+  BQ-A1:          {ckpt: runs/joint/a1_warm_v3/best.pt, note: "joint SSL + tasks warm from BQ-v3, slot readout, 40k steps"}
+  BQ-12k-slots:   {ckpt: runs/multitask/omni_a_slots/best.pt, note: "12k-step comparison: slot readout"}
+  BQ-12k-tokens:  {ckpt: runs/multitask/omni_b_tokens/best.pt, note: "12k-step comparison: task tokens (became the default)"}
+  BQ-12k-moe:     {ckpt: runs/multitask/omni_c_tokens_moe/best.pt, note: "12k-step comparison: task tokens + MoE top blocks"}
+  BQ-S-hemorrhage: {ckpt: runs/single/hemorrhage/best.pt, note: "single-task specialist: the 6 hemorrhage tasks"}
+  BQ-T1:          {ckpt: runs/multitask/tokens_s42/best.pt, note: "task tokens, full length (configs/multitask/tokens.yaml); next batch"}
+  BQ-A2:          {ckpt: runs/joint/tokens_warm_v3/best.pt, note: "joint SSL + task tokens (configs/joint/tokens_warm_v3.yaml); next batch"}
+
   regional_stats:
     adapter: brain.downstream.adapters.baselines:RegionalStats
     class: baseline

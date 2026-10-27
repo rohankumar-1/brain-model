@@ -9,7 +9,7 @@ from pathlib import Path
 CELLS = [
 ("md", """# Run report
 
-Every model against one reference run, on three questions (`brain/eval/report.py`, task lists in `configs/bench/benchmark.yaml`):
+Every BrainQuery (BQ) model against one reference run, on three questions (`brain/eval/report.py`, task lists in `configs/bench/benchmark.yaml`):
 
 | Headline | Question | Source |
 |---|---|---|
@@ -19,7 +19,7 @@ Every model against one reference run, on three questions (`brain/eval/report.py
 
 All metrics are **skill**: 0 = chance, 1 = perfect (AUROC → `(auc − 0.5) / 0.5`, R² clipped at 0, Dice as is). A headline is the mean over groups of the mean over tasks, on tasks and scans both models have. Intervals: a paired bootstrap over subjects (one Poisson weight per person, shared across that person's scans and tasks), recomputing the headline each time.
 
-**Models: those scored on the current splits** (labels v2, rebuilt 2026-10-25: duplicates removed, RSNA split by patient). Runs 2 to 5, the joint pilot and the single-task model only have results on the old splits, so they are left out until re-scored. Tasks with fewer than 20 test scans (the SynthSeg anatomy tasks) are left out of in-domain. The task-token arms (A: slots, B: task tokens, C: tokens + MoE; 12k steps each) are short runs on one GPU: compare them with each other first. Arms B and C trained their encoder with task tokens in its sequence, so their frozen transfer (encoder run without the tokens) is a harder test for them than for the others.
+**Models: those scored on the current splits** (labels v2, rebuilt 2026-10-25: duplicates removed, RSNA split by patient). Runs 2 to 5, the joint pilot and the single-task model only have results on the old splits, so they are left out until re-scored. Tasks with fewer than 20 test scans (the SynthSeg anatomy tasks) are left out of in-domain. The 12k-step BQ models (slots, task tokens, tokens + MoE) are short runs on one GPU: compare them with each other first. The two token models trained their encoder with task tokens in its sequence, so their frozen transfer (encoder run without the tokens) is a harder test for them than for the others.
 
 Edit `MODELS` / `REF` below and re-run from the top. One run's report alone: `runs/eval/<run>/report.md` (`jobs/submit_report.sh RUN REF`)."""),
 ("code", """import sys
@@ -42,14 +42,14 @@ from brain.eval.report import compare, val_history
 warnings.filterwarnings("ignore")
 R = Path("/orcd/scratch/orcd/011/roku/brain-model/runs")
 MODELS = {                                    # display name -> checkpoint; order = colour order
-    "v3 SSL": R / "v3/cls_s42/best.pt",                              # A1's starting encoder
-    "run6 no-small": R / "multitask/v7nosmall_s42/best.pt",
-    "A1 joint": R / "joint/a1_warm_v3/best.pt",
-    "arm A slots": R / "multitask/omni_a_slots/best.pt",
-    "arm B tokens": R / "multitask/omni_b_tokens/best.pt",
-    "arm C tokens+MoE": R / "multitask/omni_c_tokens_moe/best.pt",
-}
-REF = "run6 no-small"
+    "BQ-v3": R / "v3/cls_s42/best.pt",                               # the self-supervised encoder (A1's start)
+    "BQ-R6": R / "multitask/v7nosmall_s42/best.pt",
+    "BQ-A1": R / "joint/a1_warm_v3/best.pt",
+    "BQ-12k-slots": R / "multitask/omni_a_slots/best.pt",
+    "BQ-12k-tokens": R / "multitask/omni_b_tokens/best.pt",
+    "BQ-12k-moe": R / "multitask/omni_c_tokens_moe/best.pt",
+}                                             # BrainQuery names: configs/bench/models.yaml
+REF = "BQ-R6"
 VAL_DIRS = {}                                 # training dirs of snapshot copies (their metrics.json)
 # own-head test predictions on the current splits, every model on the same scans (A1 report + arm comparison)
 HEADS_PREDS = Path("/home/roku/brain-model/runs/eval/heads_v2/test_eval_preds.parquet")
@@ -148,7 +148,7 @@ if im is not None:
 plt.show()"""),
 ("md", """## 3. Training validation curves
 
-The validation score each run logged during training (recomputed on the skill scale from `metrics.json`). Run 6 validated on the older label table (v1) and A1 and the arms on v2, so compare curve shapes across those, not levels. A1 (dashed) ran 40k steps; the arms 12k."""),
+The validation score each run logged during training (recomputed on the skill scale from `metrics.json`). BQ-R6 validated on the older label table (v1) and BQ-A1 and the 12k models on v2, so compare curve shapes across those, not levels. Joint models (BQ-A*, dashed) ran 40k steps; the 12k models 12k."""),
 ("code", """fig, ax = plt.subplots(figsize=(8, 3.6))
 for m, ck in MODELS.items():
     if "single" in m:                          # validated on its own task only: not on the shared scale
@@ -162,7 +162,7 @@ for m, ck in MODELS.items():
     v = v[v.group == "score"]
     if v.empty:
         continue
-    ax.plot(v.step, v.skill, "--" if "joint" in m else "-", color=COLOR[m], lw=2, label=m)
+    ax.plot(v.step, v.skill, "--" if m.startswith("BQ-A") else "-", color=COLOR[m], lw=2, label=m)
 ax.set_xlabel("step"); ax.set_ylabel("validation skill")
 ax.grid(color=GRID, lw=0.8)
 ax.legend(fontsize=8, frameon=False, loc="lower right", ncol=2)

@@ -6,7 +6,7 @@ import torch
 
 from brain.models.vit3d import BrainEncoder, MoEMLP, _task_mask
 from brain.multitask.data import SyntheticMultitask, collate, prepare
-from brain.multitask.model import MultitaskModel
+from brain.multitask.model import BrainQuery
 from brain.multitask.registry import load_registry
 from brain.train.defaults import default_config, smoke_config
 from brain.train.multitask import build_encoder
@@ -37,7 +37,7 @@ def _model(tokens=True, moe=0):
     cfg = smoke_config(default_config("multitask"))
     cfg["model"]["task_tokens"] = {"enabled": tokens}
     cfg["model"]["moe"] = {"blocks": moe, "experts": 3, "top_k": 2}
-    model = MultitaskModel(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
+    model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
     if tokens:
         model.set_token_tasks([REG.index[t] for t in REG.train_ids(cfg["tasks"])])
     return cfg, model

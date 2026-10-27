@@ -1,4 +1,4 @@
-"""Per-task metrics for the multitask model on a fixed set of volumes.
+"""Per-task metrics for BrainQuery on a fixed set of volumes.
 
 Each volume is asked every labelled task it has, each task on its own (``alone``: no slot sees another, as at
 deployment; the scan is encoded once). Metrics per task: binary AUROC, regression R2 and MAE (original units),

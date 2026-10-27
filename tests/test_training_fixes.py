@@ -100,11 +100,11 @@ def test_uncertainty_weights_are_clamped_and_the_data_term_stays_positive():
 
 
 def test_final_norm_gets_the_deepest_lr_and_task_tables_no_decay():
-    from brain.multitask.model import MultitaskModel
+    from brain.multitask.model import BrainQuery
     from brain.train.multitask import build_encoder
 
     cfg = smoke_config(default_config("multitask"))
-    model = MultitaskModel(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"])
+    model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"])
     groups = param_groups(model, 0.05, layer_decay=0.8)
     where = {id(p): g for g in groups for p in g["params"]}
     named = dict(model.named_parameters())

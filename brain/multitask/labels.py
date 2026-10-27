@@ -1,4 +1,4 @@
-"""Label table for the multitask model: one row per (volume, task).
+"""Label table for BrainQuery's tasks: one row per (volume, task).
 
     python -m brain.multitask.labels                      # build labels/multitask_v2/{labels.parquet, stats.json}
     python -m brain.multitask.labels --live-sample 1500   # sample size for the live targets' normalisation

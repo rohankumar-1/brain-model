@@ -10,8 +10,9 @@ A ``ModelRef`` is everything the suite needs to know about a model, wherever it 
 * ``seen_tasks``      tasks whose labels it trained on (left out of its comparisons)
 * ``info()``          the records' model section; ``load(device)`` a frozen encoder; ``pretrain_overlap(...)``
 
-``resolve_model(target)`` takes a checkpoint path (ours: SSL, multitask, joint, single-task, random init) or a name in
-``configs/bench/models.yaml`` (published encoders and baselines, each with an adapter class).
+``resolve_model(target)`` takes a name in ``configs/bench/models.yaml`` (our BrainQuery checkpoints, ``BQ-...``;
+published encoders and baselines, each with an adapter class) or a checkpoint path (ours: SSL, multitask, joint,
+single-task, random init; shown by its registry name when it has one, else as ``BQ <run>/<file>``).
 
 Every encoder the suite uses has ``encode_volume(path, volume_id, modality, window) -> VolumeEmbedding``: patch tokens
 (T, D) with normalised positions and a foreground mask, plus optional global vectors (CLS, registers). Our 3D encoder
@@ -132,20 +133,36 @@ def _checkpoint_class(ckpt: Path) -> tuple[str, tuple[str, ...]]:
     return ("specialist" if single else "supervised"), trained
 
 
-def resolve_model(target: str | Path) -> ModelRef:
-    """A checkpoint path (absolute, or relative to the repo) or a registry name."""
-    from brain.downstream.records import fingerprint, model_info
+def _checkpoint_ref(p: Path, name: str | None = None, spec: dict | None = None) -> ModelRef:
+    from brain.downstream.records import model_info
 
+    p = p.resolve()
+    cls, trained = _checkpoint_class(p)
+    mid = model_info(p)["model_id"]
+    return ModelRef(name=name or f"BQ {p.parent.name}/{p.stem}", model_id=mid, cache_key=f"{p.parent.name}_{p.stem}",
+                    fingerprint=mid.rpartition("@")[2], training_class=cls, ckpt=p, seen_tasks=trained,
+                    spec={"modalities": ["ct", "mri"], **(spec or {})})
+
+
+def bq_names() -> dict[Path, str]:
+    """Our named checkpoints: resolved path -> registry name (``BQ-...``)."""
+    return {resolve(e["ckpt"]).resolve(): n for n, e in registry().items() if e.get("ckpt")}
+
+
+def resolve_model(target: str | Path) -> ModelRef:
+    """A registry name (``BQ-A1``, ``regional_stats``) or a checkpoint path (absolute, or relative to the repo)."""
+    from brain.downstream.records import fingerprint
+
+    reg = registry()
+    if str(target) in reg and reg[str(target)].get("ckpt"):           # one of our checkpoints, by its BQ name
+        p = resolve(reg[str(target)]["ckpt"])
+        if not p.is_file():
+            raise SystemExit(f"{target}: checkpoint {p} does not exist (yet)")
+        return _checkpoint_ref(p, str(target), reg[str(target)])
     p = Path(target)
     p = p if p.is_absolute() else resolve(p)
     if p.is_file():
-        p = p.resolve()
-        cls, trained = _checkpoint_class(p)
-        mid = model_info(p)["model_id"]
-        return ModelRef(name=f"{p.parent.name}/{p.stem}", model_id=mid, cache_key=f"{p.parent.name}_{p.stem}",
-                        fingerprint=mid.rpartition("@")[2], training_class=cls, ckpt=p, seen_tasks=trained,
-                        spec={"modalities": ["ct", "mri"]})
-    reg = registry()
+        return _checkpoint_ref(p, bq_names().get(p.resolve()))
     if str(target) not in reg:
         raise SystemExit(f"{target}: neither a checkpoint file nor a model in {MODELS_YAML} ({', '.join(reg)})")
     spec = dict(reg[str(target)])
@@ -171,10 +188,20 @@ class ExternalEncoder:
         self.spec, self.device = spec, device
         self.modalities = tuple(spec.get("modalities") or ("ct", "mri"))
 
-    def encode(self, vol_xyz: np.ndarray, modality: str, brain: np.ndarray | None) -> dict:
-        """``vol_xyz`` (X, Y, Z) float32 on the store's 1 mm grid. Returns ``pooled`` (D,) and optionally ``tokens``
-        (T, D) with ``xyz`` (T, 3) in [0, 1] and ``keep`` (T,)."""
+    def encode(self, vol_xyz: np.ndarray, modality: str, brain: np.ndarray | None, attrs: dict) -> dict:
+        """``vol_xyz`` (X, Y, Z) float32 on the store's 1 mm MNI-registered grid; ``brain`` the stored brain mask (with
+        ``needs_brain``); ``attrs`` the volume's stored attributes (``raw_intensity`` undoes the MRI z-score;
+        ``native_spacing`` / ``thick_mm`` describe the acquisition; ``reg_affine`` maps the grid to the source scan).
+        Returns ``pooled`` (D,) and optionally ``tokens`` (T, D) with ``xyz`` (T, 3) in [0, 1] and ``keep`` (T,)."""
         raise NotImplementedError
+
+    @staticmethod
+    def raw_intensity(vol_xyz: np.ndarray, modality: str, attrs: dict) -> np.ndarray:
+        """The scan's own intensity scale: CT is already in HU; MRI is stored as a robust z-score of the (N4-corrected)
+        intensities, ``(x - raw_median) / raw_mad``, with the background set to -6, which this inverts."""
+        if str(modality).lower().startswith("ct") or "raw_mad" not in attrs:
+            return vol_xyz
+        return vol_xyz * float(attrs["raw_mad"]) + float(attrs["raw_median"])
 
     @torch.no_grad()
     def encode_volume(self, path: Path, volume_id: str, modality: str, window: str) -> VolumeEmbedding:
@@ -182,10 +209,11 @@ class ExternalEncoder:
 
         names = ("image", "brain") if self.needs_brain else ("image",)
         arrs = store.read_many(path, names)
+        attrs = store.read_attrs(path, "image")
         vol = np.transpose(store.squeeze_channel(arrs["image"]).astype(np.float32), (2, 1, 0))
         brain = (np.transpose(store.squeeze_channel(arrs["brain"]) > 0, (2, 1, 0))
                  if self.needs_brain and arrs.get("brain") is not None else None)
-        out = self.encode(vol, modality, brain)
+        out = self.encode(vol, modality, brain, attrs)
         pooled = torch.as_tensor(np.asarray(out["pooled"], dtype=np.float32))
         tokens = out.get("tokens")
         if tokens is None:                                     # a global-only encoder: one token, read out globally

@@ -30,22 +30,22 @@ from brain.common.paths import resolve
 from brain.multitask.data import MultitaskDataset, checkpoint_stats, load_labels, make_loader, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import slot_losses
-from brain.multitask.model import MultitaskModel
+from brain.multitask.model import BrainQuery
 from brain.multitask.registry import load_registry
 
 METRIC = {"binary": "auc", "regression": "r2", "multiclass": "bacc", "segmentation": "dice"}
 
 
 def load_model(ckpt_path: Path, device: torch.device):
-    """The full multitask model of a checkpoint (encoder built by the frozen suite's loader), frozen."""
+    """The full BrainQuery model of a checkpoint (encoder built by the frozen suite's loader), frozen."""
     from brain.downstream.embed3d import load_brain3d
 
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg = ck["config"]
     reg = load_registry(cfg["data"].get("registry")).subset(list(ck["tasks"]))      # the checkpoint's task order
     enc = load_brain3d(ck, torch.device("cpu"), pretrained=False).model
-    model = MultitaskModel(enc, reg, cfg["model"]).to(device)
-    # joint checkpoints also hold the SSL predictor, which the multitask model has no use for
+    model = BrainQuery(enc, reg, cfg["model"]).to(device)
+    # joint checkpoints also hold the SSL predictor, which BrainQuery has no use for
     model.load_state_dict({k: v for k, v in ck["multitask"].items() if not k.startswith("backbone.predictor.")})
     model.label_stats = ck.get("label_stats")            # the training normalisation (data.checkpoint_stats)
     return model.eval().requires_grad_(False), reg, cfg
