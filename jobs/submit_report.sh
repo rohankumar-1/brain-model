@@ -16,7 +16,7 @@ SEG=$([[ "${WITH_SEG:-0}" == 1 ]] && echo True || echo False)
 LABELS="${LABELS:-/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2}"
 OUT=$("$PY" -c "from pathlib import Path; from brain.eval.report import default_out; print(default_out(Path('$RUN')))")
 TASKS=$("$PY" -c "from brain.eval.report import core_tasks; print(' '.join(core_tasks(with_seg=$SEG)))")
-K=$("$PY" -c "import yaml; print(yaml.safe_load(open('configs/eval/core.yaml'))['adaptation']['k'])")
+K=$("$PY" -c "import yaml; print(yaml.safe_load(open('configs/bench/benchmark.yaml'))['adaptation']['k'])")
 DEP=(); [[ -n "${DEPENDENCY:-}" ]] && DEP=(--dependency="$DEPENDENCY" --kill-on-invalid-dep=yes)
 GPU=(--exclude=node3006 -p pi_dbertsim,mit_normal_gpu -c 12 --gres=gpu:l40s:1 --mem=96G)
 GPU_SUITE=(-p pi_dbertsim,mit_normal_gpu --gres=gpu:l40s:1)        # the suite job: an L40S on either partition

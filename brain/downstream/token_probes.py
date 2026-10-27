@@ -80,8 +80,7 @@ def make_token_heads(dim: int, n_out: int, multilabel: bool, seed: int, regressi
         n_tok *= int(s)
     # 32^3 x multi-window dims cannot sit on the GPU; smaller batches keep Conv3d activations in range.
     bs = 32 if n_tok <= int(np.prod(TOKEN_GRID)) else 8
-    h = AttnEnsemble(dim, 0, n_out, multilabel, seed, regression=regression, spatial=True,
-                     model_factory=lambda: ConvProbe(dim, n_out, grid_zyx=grid), half=True,
-                     batch_size=bs)
+    h = AttnEnsemble(dim, n_out, multilabel, seed, regression=regression,
+                     model_factory=lambda: ConvProbe(dim, n_out, grid_zyx=grid), half=True, batch_size=bs)
     h.name = "tok_conv"
     return [h]

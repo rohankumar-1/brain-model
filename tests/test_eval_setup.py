@@ -6,16 +6,12 @@ import numpy as np
 import torch
 
 from brain.common.windowing import windows_for
-from brain.downstream.embeddings import uniform_slice_indices
-from brain.downstream.heads import (
-    DEFAULT_HEADS, SliceAttnMLP, build_heads, make_logreg_pool, make_ridge, make_xgboost,
-)
+from brain.downstream.heads import DEFAULT_HEADS, TokenAttnMLP, build_heads, make_logreg_pool, make_ridge, make_xgboost
+from brain.downstream.seg3d import uniform_slice_indices
 from brain.downstream.tasks import (
-    AISD_REGIONS, CLASSIFICATION_TASKS, CQ500_LABELS, FOCAL_SLICE_TASKS, FROZEN_TASKS,
-    ICH_REGIONS, REGRESSION_TASKS, SEGMENTATION_TASKS, TASK_NAMES, cq500_majority,
-    load_aisd_task, load_instance_task,
+    AISD_REGIONS, CLASSIFICATION_TASKS, CQ500_LABELS, FROZEN_TASKS, ICH_REGIONS, REGRESSION_TASKS,
+    SEGMENTATION_TASKS, TASK_NAMES, cq500_majority, load_aisd_task, load_instance_task,
 )
-from brain.models.vit2d import VisionTransformer
 from brain.common.grid import DEPTH
 
 
@@ -34,31 +30,16 @@ def test_suite_lists_cover_every_named_task():
     assert set(("oasis1_age", "oasis1_cdr", "cq500")) <= set(FROZEN_TASKS)
 
 
-def test_focal_tasks_include_ich_and_seg():
-    assert "cq500" in FOCAL_SLICE_TASKS
-    assert "brats2023_gli" in FOCAL_SLICE_TASKS
-    assert "aisd" in SEGMENTATION_TASKS and "aisd" in FOCAL_SLICE_TASKS
-    assert "instance" in SEGMENTATION_TASKS and "instance" in FOCAL_SLICE_TASKS
+def test_segmentation_tasks_and_regions():
+    assert {"aisd", "instance"} <= set(SEGMENTATION_TASKS)
     assert AISD_REGIONS["infarct"] == (1, 2, 3, 5)
     assert ICH_REGIONS["ICH"] == (1, 2)
-    assert "oasis1_age" not in FOCAL_SLICE_TASKS
-    for name in SEGMENTATION_TASKS:
-        assert name in FOCAL_SLICE_TASKS
-    for name in ("cq500", "rsna_ich", "msd"):
-        assert name in FOCAL_SLICE_TASKS
 
 
 def test_uniform_64_covers_the_volume():
     z = uniform_slice_indices(DEPTH, 64)
     assert len(z) == 64 and z[0] >= 0 and z[-1] < DEPTH
     assert np.all(np.diff(z) >= 1)
-
-
-def test_vit_features_are_cls_mean_amax():
-    torch.manual_seed(0)
-    net = VisionTransformer(size="tiny", img_size=32, patch_size=16)
-    y = net.features(torch.randn(2, 1, 32, 32))
-    assert y.shape == (2, 3 * net.embed_dim)
 
 
 def test_logreg_selects_c_on_val():
@@ -91,19 +72,18 @@ def test_ridge_and_xgboost_use_mean_max():
     assert make_xgboost(False, True, 0).pool == "mean_max"
 
 
-def test_slice_attn_scorer_reads_anatomical_z():
+def test_token_attention_scorer_reads_positions():
     torch.manual_seed(0)
-    m = SliceAttnMLP(8, 4, 1)
+    m = TokenAttnMLP(8, 1)
     x = torch.randn(3, 4, 8)
     mask = torch.ones(3, 4, dtype=torch.bool)
-    z = torch.tensor([[0.0, 40.0, 80.0, 127.0]]).expand(3, -1)
-    out = m(x, mask, z)
+    out = m(x, mask, torch.rand(3, 4, 3))
     assert out.shape == (3, 1) and torch.isfinite(out).all()
-    assert m.score.in_features == 9
+    assert m.score.in_features == 11
 
 
 def test_default_heads_are_linear_probes():
-    common = dict(latent_dim=8, max_slices=4, n_out=1, multilabel=False, seed=0, which=DEFAULT_HEADS.split(","))
+    common = dict(latent_dim=8, n_out=1, multilabel=False, seed=0, which=DEFAULT_HEADS.split(","))
     clf = [h.name for h in build_heads(**common, task_type="binary")]
     reg = [h.name for h in build_heads(**common, task_type="regression")]
     assert clf == ["logreg_pool"]
@@ -112,10 +92,10 @@ def test_default_heads_are_linear_probes():
 
 def test_optional_heads_still_build_when_requested():
     names = [h.name for h in build_heads(
-        latent_dim=8, max_slices=4, n_out=1, multilabel=False, seed=0,
-        which=["ridge", "xgboost_mean", "slice_attn_mlp"], task_type="regression",
+        latent_dim=8, n_out=1, multilabel=False, seed=0,
+        which=["ridge", "xgboost_mean", "token_attn_mlp"], task_type="regression",
     )]
-    assert names == ["ridge", "xgboost_mean", "slice_attn_mlp"]
+    assert names == ["ridge", "xgboost_mean", "token_attn_mlp"]
 
 
 def test_aisd_task_pins_official_test_ids():

@@ -1,8 +1,13 @@
 # Downstream evaluation and the experiment database
 
-Every pretrained checkpoint is scored on one fixed suite of frozen-encoder evaluations. Every evaluation writes an
-**experiment record**, and the records fold into one SQLite database. Results from different models, heads, seeds and
-store versions can then be compared without re-reading logs.
+Every model is scored on one fixed suite of frozen-encoder evaluations. Every evaluation writes an **experiment
+record**, and the records fold into one SQLite database. Results from different models, heads, seeds and store
+versions can then be compared without re-reading logs. The benchmark (`docs/benchmark.md`) is a versioned subset of
+this suite with a leaderboard across our models and published ones.
+
+A model is one of our 3D checkpoints or a `configs/bench/models.yaml` entry (a published encoder or a baseline behind
+an adapter; `brain/downstream/models.py`). Frozen classification and regression tasks take either; segmentation and
+`probe3d` read our encoders' token grids and take checkpoints only.
 
 ## Running the suite
 
@@ -10,14 +15,15 @@ store versions can then be compared without re-reading logs.
 jobs/submit_eval.sh runs/<run>/last.pt                     # all 25 entries as a Slurm array (pi_dbertsim), then ingest
 jobs/submit_eval.sh runs/<run>/last.pt cq500 wmh probe3d   # a subset
 python -m brain.downstream.suite list                      # the entries
-python -m brain.downstream.suite run --task wmh --ckpt runs/<run>/last.pt -- --steps 3000   # one entry, extra args
+python -m brain.downstream.suite run --task wmh --model runs/<run>/last.pt -- --steps 3000  # one entry, extra args
+python -m brain.downstream.suite run --task ixi_age --model regional_stats    # a models.yaml entry
 ```
 
 | Entries | Evaluator | Heads / probes |
 |---|---|---|
 | Classification: `cq500`, `rsna_ich`, `oasis1_cdr`, `oasis2_cdr`, `oasis2_conversion`, `abide_asd`, `msd` | `run_suite` | PCA readouts (`plane_*`, `grid_*`, `pca_global_*`), 3D conv probe `tok_conv`; `--readout raw` gives pooled `logreg_pool` |
 | Regression: `oasis1_age`, `ixi_age`, `pixar_age`, `piop1_age`, `piop2_age`, `id1000_age` | `run_suite` | same, with ridge |
-| Segmentation: `seg_cq500`, `brats2023_{gli,men,ped}`, `brats2024_gli`, `atlas`, `isles22`, `wmh`, `isles24`, `aisd`, `instance` | `seg3d` (3D ckpt) / `run_suite` UNETR (2D ViT) | `tok_unet3d` (`--patch-fcn`: `tok_pfcn`) |
+| Segmentation: `seg_cq500`, `brats2023_{gli,men,ped}`, `brats2024_gli`, `atlas`, `isles22`, `wmh`, `isles24`, `aisd`, `instance` | `seg3d` (3D checkpoints) | `tok_unet3d` (`--patch-fcn`: `tok_pfcn`) |
 | `probe3d` | `probe3d` | dense lesion probe (linear, MLP) per held-out family; fingerprint (modality, dataset); location; pixel and random-init controls |
 
 A random-init baseline (`python -m brain.downstream.random_init --config configs/lejepa3d/small.yaml --out

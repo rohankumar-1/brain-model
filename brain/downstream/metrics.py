@@ -42,22 +42,6 @@ def binary_metrics(y_true: np.ndarray, y_score: np.ndarray, threshold: float = 0
     }
 
 
-def multiclass_metrics(y_true: np.ndarray, y_score: np.ndarray) -> dict:
-    """y_score: (N, C) probabilities; y_true: (N,) int labels."""
-    y_true = np.asarray(y_true).astype(int).ravel()
-    y_score = np.asarray(y_score).astype(float)
-    y_pred = y_score.argmax(axis=1)
-    out = {
-        "task_type": "multiclass",
-        "accuracy": float(accuracy_score(y_true, y_pred)),
-        "auc_ovr_macro": _safe_auc(y_true, y_score, multi_class="ovr", average="macro"),
-        "auc_ovo_macro": _safe_auc(y_true, y_score, multi_class="ovo", average="macro"),
-        "auc_ovr_weighted": _safe_auc(y_true, y_score, multi_class="ovr", average="weighted"),
-        "auc_ovo_weighted": _safe_auc(y_true, y_score, multi_class="ovo", average="weighted"),
-    }
-    return out
-
-
 def multilabel_metrics(
     y_true: np.ndarray,
     y_score: np.ndarray,
@@ -141,51 +125,6 @@ def region_dice(
         "task_type": "segmentation",
         "dice_macro": float(np.mean(vals)) if vals else float("nan"),
         "dice_per_class": per,
-    }
-
-
-def dice_score(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    *,
-    eps: float = 1e-6,
-    ignore_background: bool = True,
-) -> dict:
-    """Soft/hard Dice for segmentation. y_* shape (N, ...) or (N, C, ...).
-
-    If channels exist and ignore_background, channel 0 is skipped.
-    """
-    yt = np.asarray(y_true).astype(np.float64)
-    yp = np.asarray(y_pred).astype(np.float64)
-    if yt.shape != yp.shape:
-        raise ValueError(f"shape mismatch {yt.shape} vs {yp.shape}")
-
-    if yt.ndim >= 2 and yt.shape[1] > 1 and ignore_background:
-        # treat axis 1 as class
-        dice_per = []
-        names = []
-        for c in range(1, yt.shape[1]):
-            t = yt[:, c].reshape(len(yt), -1)
-            p = yp[:, c].reshape(len(yp), -1)
-            inter = 2.0 * (t * p).sum(axis=1)
-            denom = t.sum(axis=1) + p.sum(axis=1)
-            dice_per.append(float(np.mean((inter + eps) / (denom + eps))))
-            names.append(f"class_{c}")
-        return {
-            "task_type": "segmentation",
-            "dice_macro": float(np.mean(dice_per)) if dice_per else float("nan"),
-            "dice_per_class": dict(zip(names, dice_per)),
-        }
-
-    t = yt.reshape(len(yt), -1)
-    p = yp.reshape(len(yp), -1)
-    inter = 2.0 * (t * p).sum(axis=1)
-    denom = t.sum(axis=1) + p.sum(axis=1)
-    d = (inter + eps) / (denom + eps)
-    return {
-        "task_type": "segmentation",
-        "dice_mean": float(np.mean(d)),
-        "dice_std": float(np.std(d)),
     }
 
 

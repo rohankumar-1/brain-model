@@ -1,7 +1,8 @@
 #!/bin/bash
-# Downstream evaluation of one checkpoint as ONE job: the suite entries in SUITE_TASKS run one after another on a
-# single GPU (a failing entry is logged and skipped), then the records are ingested into results/experiments.sqlite.
-# No array and no separate ingest job, so it queues as a single small job. Submitted by jobs/submit_eval.sh.
+# Downstream evaluation of one model as ONE job: the suite entries in SUITE_TASKS run one after another on a single GPU
+# (a failing entry is logged and skipped), then the records are ingested into results/experiments.sqlite. No array and
+# no separate ingest job, so it queues as a single small job. Submitted by jobs/submit_eval.sh and brain.bench run.
+# CKPT is a checkpoint or a configs/bench/models.yaml name.
 #
 #   sbatch --export=ALL,CKPT=runs/x/last.pt,SUITE_TASKS="cq500 ixi_age" jobs/eval_run.sbatch
 #   EXTRA="--steps 3000" adds evaluator arguments (spaces, no commas: sbatch --export splits on commas).

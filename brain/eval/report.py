@@ -5,11 +5,10 @@
 
 * **In-domain**: the model's own heads on the trained tasks' test splits (``brain.multitask.test_eval`` per-scan
   predictions), grouped by registry task group, on the tasks both models trained.
-* **Transfer**: the frozen encoder on the core downstream tasks (``configs/eval/core.yaml``; per-scan predictions of
+* **Transfer**: the frozen encoder on the benchmark tasks (``configs/bench/benchmark.yaml``; per-scan predictions of
   the frozen suite, ``brain.downstream.suite``). One head per task for every model, fixed on validation (the encoder
-  readout with the best mean validation score across all evaluated models); the multitask models' own outputs and
-  slots (``taskout`` / ``slots`` / ``general`` readouts) are not transfer and never count. A task whose labels a model
-  trained on (``core.yaml: seen``) is left out of that model's comparisons.
+  readout with the best mean validation score across all evaluated models). A task whose labels a model trained on
+  (``benchmark.yaml: seen``) is left out of that model's comparisons.
 * **Adaptation**: few-shot on the held-out tasks at one k (``brain.multitask.fewshot``), paired seed by seed.
 
 Every metric is on the skill scale (``brain.eval.skill``: 0 = chance, 1 = perfect). A headline is the mean over groups
@@ -34,9 +33,10 @@ import yaml
 from brain.common.paths import REPO_ROOT, resolve
 from brain.eval.skill import skill
 
-CORE = REPO_ROOT / "configs" / "eval" / "core.yaml"
+CORE = REPO_ROOT / "configs" / "bench" / "benchmark.yaml"
 HEADS_PREDS = REPO_ROOT / "runs" / "eval" / "heads_all" / "test_eval_preds.parquet"
-SUPERVISED_READOUTS = ("slots", "taskout", "general")       # the multitask model's own outputs, not its encoder
+# readouts of a multitask model's own outputs, not its encoder (records from before 2026-10-27 still have them)
+SUPERVISED_READOUTS = ("slots", "taskout", "general")
 PARTS = {"in_domain": "In-domain (heads)", "transfer": "Transfer (frozen)", "adaptation": "Adaptation (few-shot)"}
 
 
@@ -225,7 +225,9 @@ def suite_heads() -> pd.DataFrame:
                                                                           keep="last")
     t = t[~t.model_id.str.contains("+", regex=False)].copy()
     t["fp"] = t.model_id.map(fingerprint)
-    t["pred"] = [json.loads(a).get(h) if isinstance(a, str) and a else None for a, h in zip(t.artifacts, t["head"])]
+    # segmentation heads store per-volume Dice (``<head>_volumes``), the others per-scan predictions (``<head>``)
+    t["pred"] = [(json.loads(a).get(h) or json.loads(a).get(f"{h}_volumes")) if isinstance(a, str) and a else None
+                 for a, h in zip(t.artifacts, t["head"])]
     t["cv"] = [bool((json.loads(p) if isinstance(p, str) and p else {}).get("cv")) for p in t.protocol]
     t["encoder"] = ~t["head"].astype(str).str.startswith(SUPERVISED_READOUTS)
     return t
@@ -239,8 +241,13 @@ def fixed_heads(t: pd.DataFrame) -> dict[str, str]:
 
 
 def _suite_preds(row) -> tuple[list[str], np.ndarray, np.ndarray] | None:
+    """(volume ids, targets, scores) of one suite result. Segmentation: per-volume macro Dice as the score (the Dice
+    metric averages scores), with unit targets."""
     if not row.pred or not Path(row.pred).exists():
         return None
+    if str(row.pred).endswith(".csv"):
+        d = pd.read_csv(row.pred)
+        return [str(v) for v in d.volume_id], np.ones(len(d)), d["dice_macro"].to_numpy(float)
     z = np.load(row.pred, allow_pickle=False)
     return [str(v) for v in z["volume_ids"]], np.asarray(z["y_true"]), np.asarray(z["y_score"])
 

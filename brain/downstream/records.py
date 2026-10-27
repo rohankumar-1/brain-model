@@ -37,7 +37,11 @@ from brain.common.paths import REPO_ROOT
 
 RECORD_VERSION = 1
 RESULTS_ROOT = Path(os.environ.get("BRAIN_RESULTS", REPO_ROOT / "results"))
-ENV_FLAGS = ("BRAIN_FINE_POOL", "BRAIN_FINE_GRID", "BRAIN_EMBED_BATCH", "BRAIN_STRIPPED", "OMP_NUM_THREADS")
+# environment settings that change what an evaluation computes (recorded with every result; the encoding ones are also
+# part of the embedding cache name, ``embeddings.cache_tag``)
+ENV_FLAGS = ("BRAIN_FINE_POOL", "BRAIN_FINE_GRID", "BRAIN_EVAL_TILE", "BRAIN_EVAL_TAPS", "BRAIN_EVAL_TAPS_ONLY",
+             "BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_EMBED_BATCH",
+             "BRAIN_STRIPPED", "OMP_NUM_THREADS")
 
 
 def now_utc() -> str:
@@ -233,9 +237,9 @@ def record_run(run_dir: Path, config: dict, all_metrics: dict[str, dict], *, sui
     data = provenance(Path(store_root) if store_root else None, Path(index) if index else None) | {
         k: config.get(k) for k in ("n_train", "n_val", "n_test", "pretrain_overlap")}
     ckpt = config.get("ckpt")
-    model = model_info(ckpt) if ckpt else model_info(None, name=config.get("model_name"))
+    model = config.get("model_info") or (model_info(ckpt) if ckpt else model_info(None, name=config.get("model_name")))
     protocol = {k: v for k, v in config.items() if k not in ("time_utc", "started_utc", "n_train", "n_val", "n_test",
-                                                              "pretrain_overlap")}
+                                                              "pretrain_overlap", "model_info")}
     out = []
     for head, m in all_metrics.items():
         art = {"run_dir": str(run_dir)}

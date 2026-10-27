@@ -336,16 +336,27 @@ def test_frozen_suite_is_clf_plus_age():
     assert not set(SEGMENTATION_TASKS) & set(FROZEN_TASKS)
 
 
-def test_suite_runs_every_task_and_the_probes_with_the_right_evaluator():
+def test_suite_runs_every_task_and_the_probes_with_the_right_evaluator(tmp_path):
+    import pytest
+    import torch
+
     from brain.downstream.suite import SUITE, command
+    from brain.train.defaults import default_config, smoke_config
+    from brain.train.lejepa3d import build_encoder
 
     assert set(FROZEN_TASKS) | set(SEGMENTATION_TASKS) | {"probe3d"} == set(SUITE)
-    ck = Path("/x/run/last.pt")
-    assert "brain.downstream.seg3d" in command("atlas", ck, [], brain3d=True)
-    assert "brain.downstream.run_suite" in command("atlas", ck, [], brain3d=False)   # 2D ViT: UNETR decoder
-    assert "brain.downstream.run_suite" in command("cq500", ck, ["--seed", "1"], brain3d=True)[:5]
-    probe = command("probe3d", ck, [], brain3d=True)
+    cfg = smoke_config(default_config("lejepa3d"))
+    ck = tmp_path / "run" / "last.pt"
+    ck.parent.mkdir()
+    torch.save({"model": build_encoder(cfg, torch.device("cpu")).state_dict(), "config": cfg, "step": 1}, ck)
+    assert "brain.downstream.seg3d" in command("atlas", str(ck), [])
+    assert "brain.downstream.run_suite" in command("cq500", str(ck), ["--seed", "1"])[:5]
+    probe = command("probe3d", str(ck), [])
     assert "brain.downstream.probe3d" in probe and "--pixel" in probe and "--random-init" in probe
+    # a registry model: frozen tasks through run_suite; segmentation and probe3d read our encoders' token grids only
+    assert command("cq500", "regional_stats", [])[-1] == "regional_stats"
+    with pytest.raises(SystemExit):
+        command("atlas", "regional_stats", [])
 
 
 if __name__ == "__main__":

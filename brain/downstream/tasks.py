@@ -1,8 +1,8 @@
 """Labeled brain.downstream tasks.
 
-Classification and regression use the frozen-embedding heads. Segmentation
-tasks point at the mask zip beside each volume; ``brain.downstream.seg_train``
-trains a skip-connected decoder on a frozen ViT and scores per-volume Dice.
+Classification and regression use the frozen-embedding heads (``brain.downstream.run_suite``). Segmentation
+tasks point at the mask zip beside each volume; ``brain.downstream.seg3d`` trains a decoder on frozen 3D tokens
+and scores per-volume Dice.
 
 Splits are the ones stored in ``volumes.csv``.
 """
@@ -20,8 +20,6 @@ import pandas as pd
 from brain.common.paths import DATASETS, PROCESSED_ROOT, SCRATCH
 
 DEFAULT_VOLUMES = PROCESSED_ROOT / "volumes.csv"
-# Extra tables for stores not yet copied into slices_zarr. AISD / INSTANCE live in the main store.
-EXTRA_VOLUME_TABLES = ()
 
 # CQ500 findings. EDH is omitted (about 1.6% positive).
 CQ500_LABELS = [
@@ -116,8 +114,6 @@ SEGMENTATION_TASKS = (
 CQ500_FINDING_TASKS = {"cq500_chronic_bleed": "ChronicBleed", "cq500_edh": "EDH", "cq500_other_fracture": "OtherFracture"}
 # Frozen clf/reg suite (segmentation is ``seg3d`` / ``run_suite`` separately).
 FROZEN_TASKS = CLASSIFICATION_TASKS + REGRESSION_TASKS
-# Fast frozen-head tasks for a first smoke (both modalities, small n).
-SMOKE_TASKS = ("oasis1_age", "oasis1_cdr", "cq500")
 LESION_REGIONS = {"lesion": (1,)}
 # AISD: remote=1, clear acute=2, blurred acute=3, invisible=4, infarct=5. Dice on {1,2,3,5}.
 AISD_REGIONS = {"infarct": (1, 2, 3, 5)}
@@ -125,9 +121,6 @@ WMH_REGIONS = {"WMH": (1,)}
 # MS3SEG staged label map (brain.prep.stage_new): 1 ventricles, 2 normal WMH, 3 MS lesion.
 MS3SEG_REGIONS = {"MS_lesion": (3,), "normal_WMH": (2,), "ventricles": (1,)}
 TASK_NAMES = CLASSIFICATION_TASKS + REGRESSION_TASKS + SEGMENTATION_TASKS
-# Focal pathology: sample a finer axial grid so a 1–3 slice finding is not skipped.
-FOCAL_SLICE_TASKS = frozenset((*SEGMENTATION_TASKS, "cq500", "rsna_ich", "msd"))
-FOCAL_SLICES = 64
 
 
 @dataclass
@@ -147,17 +140,12 @@ class TaskBundle:
 
 
 def load_volumes(path: Path | None = None) -> pd.DataFrame:
+    """The store index. An id listed twice keeps its last row: since the 2026-10-26 re-index, 48 CQ500 studies have
+    both a ``cq500`` (DICOM) and a ``seg_cq500`` row under one id, and the ``cq500`` row comes last."""
     path = Path(path or DEFAULT_VOLUMES)
-    frames = []
-    if path.exists():
-        frames.append(pd.read_csv(path, low_memory=False))
-    for extra in EXTRA_VOLUME_TABLES:
-        extra = Path(extra)
-        if extra.exists() and extra.resolve() != path.resolve():
-            frames.append(pd.read_csv(extra, low_memory=False))
-    if not frames:
+    if not path.exists():
         raise FileNotFoundError(f"Missing volume table {path}")
-    return pd.concat(frames, ignore_index=True).drop_duplicates("volume_id", keep="last")
+    return pd.read_csv(path, low_memory=False).drop_duplicates("volume_id", keep="last")
 
 
 def _case_name(volume_id: str) -> str:

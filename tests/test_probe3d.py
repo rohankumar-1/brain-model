@@ -50,16 +50,6 @@ def test_pixel_provider_matches_gate_and_shape():
     assert feat[fg][:, 0].mean() > feat[~fg][:, 0].mean()  # brain is brighter than background
 
 
-def test_slice2d_provider_lands_on_the_3d_grid():
-    from brain.models.vit2d import VisionTransformer
-
-    class _Enc:
-        model = VisionTransformer(size="tiny", img_size=256, patch_size=16).eval()
-
-    feat, fg = P.Slice2D(_Enc(), "x", batch=64).tokens(_vol(), "mri")
-    assert feat.shape == (N_TOK, _Enc.model.embed_dim) and fg.shape == (N_TOK,)
-
-
 def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path):
     from pathlib import Path
 
@@ -258,9 +248,35 @@ def test_cls_embedding_reaches_the_embedding_cache_and_comes_back_from_it(tmp_pa
         vol[2:14, 0, 4:28, 4:28] = np.random.default_rng(i).normal(1.0, 0.5, (12, 24, 24))
         store.write(d / "store" / "x" / f"v{i}.zip", "image", vol)
         paths[f"mri:v{i}"] = f"x/v{i}.zip"
-    kw = dict(ckpt=ck, slices_root=d / "store", image_paths=paths, volume_ids=list(paths),
+    kw = dict(model=ck, slices_root=d / "store", image_paths=paths, volume_ids=list(paths),
               cache_dir=d / "cache", task="t", window="canonical", modalities={v: "mri" for v in paths})
     built = load_or_build_embeddings(**kw)
     again = load_or_build_embeddings(**kw)
     assert built["cls"] is not None and built["cls"].shape[0] == 3 and np.isfinite(built["cls"]).all()
     assert np.allclose(again["cls"], built["cls"]) and again["mus"].shape == built["mus"].shape
+
+
+def test_a_registry_baseline_goes_through_the_same_embedding_cache(tmp_path):
+    """A models.yaml entry (the regional-statistics baseline) encodes stored volumes behind the suite's encoder
+    interface: one global token plus its CLS bank, cached under its own key and reused while its fingerprint holds."""
+    import numpy as np
+
+    from brain.downstream.embeddings import load_or_build_embeddings
+    from brain.downstream.models import resolve_model
+    from brain.prep import store
+
+    paths = {}
+    for i in range(3):
+        vol = np.full((16, 1, 32, 32), -6.0, np.float16)
+        vol[2:14, 0, 4:28, 4:28] = np.random.default_rng(i).normal(1.0 + i, 0.5, (12, 24, 24))
+        store.write(tmp_path / "store" / "x" / f"v{i}.zip", "image", vol)
+        paths[f"mri:v{i}"] = f"x/v{i}.zip"
+    model = resolve_model("regional_stats")
+    assert model.training_class == "baseline" and not model.is_checkpoint
+    kw = dict(model=model, slices_root=tmp_path / "store", image_paths=paths, volume_ids=list(paths),
+              cache_dir=tmp_path / "cache", task="t", modalities={v: "mri" for v in paths})
+    built = load_or_build_embeddings(**kw)
+    again = load_or_build_embeddings(**kw)
+    assert built["mus"].shape[:2] == (3, 1) and built["cls"].shape[0] == 3
+    assert np.isfinite(built["cls"]).all() and not np.allclose(built["cls"][0], built["cls"][2])
+    assert np.allclose(again["cls"], built["cls"]) and "ext_regional_stats" in str(built["cache_path"])

@@ -9,7 +9,7 @@ from pathlib import Path
 CELLS = [
 ("md", """# Run report
 
-Every model against one reference run, on three questions (`brain/eval/report.py`, task lists in `configs/eval/core.yaml`):
+Every model against one reference run, on three questions (`brain/eval/report.py`, task lists in `configs/bench/benchmark.yaml`):
 
 | Headline | Question | Source |
 |---|---|---|

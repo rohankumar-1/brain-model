@@ -49,8 +49,8 @@ def test_attn_ensemble_trains_a_large_grid_from_host_memory():
     y = (np.arange(n) % 2).astype(np.float32).reshape(-1, 1)
     m = np.ones((n, t), bool)
     z = np.zeros((n, t, 3), np.float32)
-    head = AttnEnsemble(d, 0, 1, False, 0, n_seeds=1, epochs=2, patience=2, batch_size=2,
-                        spatial=True, half=True, model_factory=_Pool)
+    head = AttnEnsemble(d, 1, False, 0, n_seeds=1, epochs=2, patience=2, batch_size=2, half=True,
+                        model_factory=_Pool)
     head.fit(x, y, m, x, y, m, z=z, z_val=z)
     scores = head.predict_scores(x, m, z=z)
     assert scores.shape == (n,) and np.isfinite(scores).all()
@@ -82,7 +82,7 @@ def test_probes_learn_a_simple_signal_through_the_shared_training_path():
     xe, ye, me, ze = _data(32, seed=2)
     for name, build in (("attn", lambda: AttnProbe(16, 1, width=32, heads=2, queries=2)),
                         ("conv", lambda: ConvProbe(16, 1, width=16))):
-        head = AttnEnsemble(16, 0, 1, False, 0, n_seeds=1, epochs=40, patience=40, lr=3e-3, batch_size=8, spatial=True,
+        head = AttnEnsemble(16, 1, False, 0, n_seeds=1, epochs=40, patience=40, lr=3e-3, batch_size=8,
                             model_factory=build, half=True)
         head.fit(xt, yt, mt, xv, yv, mv, z=zt, z_val=zv)
         auc = _auc(ye, head.predict_scores(xe, me, z=ze))

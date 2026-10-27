@@ -5,9 +5,9 @@ map (one 16 x 16 x 8 patch each) is cached. A small 3D conv decoder, trained on 
 upsamples the map to one logit per voxel. Nothing but the final tokens reaches the decoder: no raw
 voxels and no intermediate blocks, so the decoder sees exactly the resolution the encoder hands over.
 
-The 2D UNETR reference (``brain.downstream.seg_train``) scores per-volume Dice over every second axial slice
-(slices 1, 3, ... of the volume). Dice here is scored on the same slices (``dice_*``) and on the whole volume
-(``dice_full_*``). Several sequences (BraTS) are encoded one at a time and their tokens are concatenated.
+Dice is scored on 64 bin-centre axial slices (``dice_*``, the slices the retired 2D reference decoder used) and on
+the whole volume (``dice_full_*``). Several sequences (BraTS) are encoded one at a time and their tokens are
+concatenated.
 
     python -m brain.downstream.seg3d --task wmh --ckpt runs/snap/predict_8k.pt
 """
@@ -33,20 +33,55 @@ from brain.downstream.embed3d import FrozenEncoder3D, read_volume_xyz
 from brain.downstream.embeddings import _fp, cache_fresh, load_frozen_encoder, resolve_path
 from brain.downstream.metrics import bootstrap_ci
 from brain.downstream.results import eval_banner, finalize_run, format_rows, new_run_dir, write_json
-from brain.downstream.seg_data import sequence_paths
-from brain.downstream.seg_model import region_seg_loss
 from brain.downstream.tasks import DEFAULT_VOLUMES, TaskBundle, load_task, load_volumes
 from brain.common.optim import lr_at
 from brain.common.windowing import windows_for
 from brain.common.grid import DEPTH
 from brain.common.paths import REPO_ROOT
 from brain.prep.store import FORMAT_VERSION
-from brain.downstream.embeddings import uniform_slice_indices
 from brain.models.conv3d import Res, group_norm, up3
 
 VOX = (DEPTH, 256, 256)  # voxels (Z, Y, X)
 PATCH = (16, 16, 8)  # the encoder's native patch (x, y, z)
 TILE = ((128, 128, 64), (64, 64, 32))  # window and stride in voxels (x, y, z): the training crop size
+
+
+BRATS_SEQUENCES = ("t1n", "t1c", "t2w", "t2f")
+
+
+def uniform_slice_indices(depth: int, n: int) -> np.ndarray:
+    """Increasing z indices, one at the centre of each of ``n`` equal bins."""
+    depth, n = int(depth), int(n)
+    if depth <= 0 or n <= 0:
+        return np.zeros((0,), dtype=np.int64)
+    if n >= depth:
+        return np.arange(depth, dtype=np.int64)
+    return ((np.arange(n, dtype=np.float64) + 0.5) * depth / n).astype(np.int64)
+
+
+def sequence_paths(rel: str, all_sequences: bool) -> list[str]:
+    """Image zips of one case: the four BraTS sequences, or just ``rel``."""
+    if all_sequences and rel.endswith("-t1n.zip"):
+        return [rel.replace("-t1n.zip", f"-{s}.zip") for s in BRATS_SEQUENCES]
+    return [rel]
+
+
+def region_seg_loss(logits: torch.Tensor, target: torch.Tensor, regions: dict[str, tuple[int, ...]]) -> torch.Tensor:
+    """Cross-entropy on the label map plus soft Dice per named region (fp32).
+
+    Labels outside the head's classes are ignored instead of crashing CE.
+    """
+    logits, target = logits.float(), target.long()
+    target = target.masked_fill((target < 0) | (target >= logits.shape[1]), 255)
+    ce = F.cross_entropy(logits, target, ignore_index=255)
+    probs = logits.softmax(dim=1)
+    dice = []
+    for ids in regions.values():
+        idx = [i for i in ids if i < probs.shape[1]]
+        pred = probs[:, idx].sum(1)
+        gt = torch.isin(target, torch.tensor(idx, device=target.device)).float()
+        dice.append(1 - (2 * (pred * gt).sum() + 1) / (pred.sum() + gt.sum() + 1))
+    return ce + torch.stack(dice).mean()
 
 
 def grid_for(patch_xyz) -> tuple[int, int, int]:

@@ -126,7 +126,7 @@ class FrozenEncoder3D:
         if fine_pool is None and getattr(self, "force_fine_pool", False):
             use_pool = True
         if use_grid and window_xyz is None:
-            return self._embed_fine_native(vol_xyz, c, w, modality)
+            return self._embed_fine_tiled(vol_xyz, c, w, modality)
         if use_pool and window_xyz is None:
             return self._embed_fine_pooled(vol_xyz, c, w, modality)
         native = vol_xyz.float()
@@ -153,9 +153,6 @@ class FrozenEncoder3D:
             )
         finally:
             self.patch_xyz = coarse
-
-    def _embed_fine_native(self, vol_xyz, c, w, modality):
-        return self._embed_fine_tiled(vol_xyz, c, w, modality)
 
     def _embed_fine_pooled(self, vol_xyz, c, w, modality):
         coarse = self.patch_xyz
@@ -279,6 +276,22 @@ class FrozenEncoder3D:
         xyz = (coords[0] - lo) / (hi - lo).clamp_min(1e-6)
         return toks, xyz, fg
 
+    @torch.no_grad()
+    def encode_volume(self, path: Path, volume_id: str, modality: str, window: str):
+        """The suite's encoder interface (``brain.downstream.models``): one stored volume under the ``window`` asinh
+        windows, tokens concatenated over windows. ``BRAIN_EVAL_TILE=1`` encodes overlapping training-size windows
+        (128 x 128 x 64 mm, half overlap) instead of the whole volume at once."""
+        from brain.downstream.models import VolumeEmbedding
+
+        x = torch.from_numpy(np.ascontiguousarray(read_volume_xyz(path))).to(next(self.model.parameters()).device)
+        self.meta = volume_meta().get(str(volume_id)) if getattr(self.model, "meta_emb", None) is not None else None
+        tile = os.environ.get("BRAIN_EVAL_TILE", "") == "1"
+        seqs, xyz, fg = self.embed_windows(x, windows_for(window, modality), modality=modality,
+                                           **({"window_xyz": (128, 128, 64), "stride_xyz": (64, 64, 32)} if tile else {}))
+        return VolumeEmbedding(tokens=torch.cat(list(seqs), dim=-1), xyz=xyz, keep=fg,
+                               cls=None if self.last_cls is None else self.last_cls.reshape(-1),
+                               registers=None if self.last_reg is None else self.last_reg.reshape(-1))
+
     def _encode_tiled(self, x, start, size, fg, window_xyz, stride_xyz, patch_only: bool = False):
         px, py, pz = self.patch_xyz
         grid = (size[0] // px, size[1] // py, size[2] // pz)  # (nx, ny, nz) tokens
@@ -391,68 +404,43 @@ def _crop_coords(device, start, size, spacing_mm, patch_xyz):
 
 
 @torch.no_grad()
-def extract_volume_embeddings_3d(
-    enc: FrozenEncoder3D,
-    image_paths: dict[str, str],
-    volume_ids: list[str],
-    slices_root: Path,
-    device: torch.device,
-    max_slices: int,
-    modalities: dict[str, str] | None = None,
-    window: str = "canonical",
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def extract_volume_embeddings(
+    enc, image_paths: dict[str, str], volume_ids: list[str], slices_root: Path,
+    modalities: dict[str, str] | None = None, window: str = "canonical",
+) -> dict:
+    """Every volume through ``enc.encode_volume``: tokens (N, T, D), foreground mask (N, T), positions (N, T, 3), and
+    the global banks ``cls`` (N, D') / ``registers`` (N, R') when the encoder has them."""
     from brain.downstream.embeddings import resolve_path
 
-    del max_slices  # token count comes from the volume grid, not the 2D slice budget
     modalities = modalities or {}
     sample_mod = modalities.get(volume_ids[0], "mri") if volume_ids else "mri"
-    embs = coords = mask = None
-    cls_bank = reg_bank = slot_bank = taskout_bank = general_bank = None
+    embs = coords = mask = cls_bank = reg_bank = None
+    n = len(volume_ids)
     for i, vid in enumerate(volume_ids):
-        vol = read_volume_xyz(resolve_path(slices_root, image_paths[vid]))
-        x = torch.from_numpy(np.ascontiguousarray(vol)).to(device)
-        mod = modalities.get(vid, sample_mod)
-        wins = windows_for(window, mod)
-        enc.meta = volume_meta().get(str(vid)) if getattr(enc.model, "meta_emb", None) is not None else None
-        # BRAIN_EVAL_TILE=1: encode as overlapping training-size windows (128 x 128 x 64 mm, half overlap) instead of
-        # the whole volume at once, so attention sees the context size the encoder was trained on
-        tile = os.environ.get("BRAIN_EVAL_TILE", "") == "1"
-        seqs, xyz, fg = enc.embed_windows(x, wins, modality=mod,
-                                          **({"window_xyz": (128, 128, 64), "stride_xyz": (64, 64, 32)} if tile else {}))
-        feat = torch.cat(list(seqs), dim=-1)
+        e = enc.encode_volume(resolve_path(slices_root, image_paths[vid]), str(vid), modalities.get(vid, sample_mod),
+                              window)
+        feat = e.tokens
         if embs is None:
-            n, t, d = len(volume_ids), feat.shape[0], feat.shape[1]
+            t, d = feat.shape
             # float16 for the fine grid or a large task (RSNA: 25k x 5120 x 384 would be ~200 GB as float32)
             dtype = np.float16 if t > 8192 or n * t * d * 4 > 16 * 2**30 else np.float32
             embs = np.zeros((n, t, d), dtype=dtype)
             coords = np.zeros((n, t, 3), dtype=np.float32)
             mask = np.ones((n, t), dtype=bool)
-        embs[i] = feat.detach().cpu().numpy()
-        if enc.last_cls is not None:                        # CLS models: one global vector per volume (windows concatenated)
-            c = enc.last_cls.reshape(-1).float().cpu().numpy()
-            if cls_bank is None:
-                cls_bank = np.zeros((len(volume_ids), c.shape[0]), dtype=np.float32)
-            cls_bank[i] = c
-        if enc.last_reg is not None:                        # register models: all registers, windows concatenated
-            r = enc.last_reg.reshape(-1).float().cpu().numpy()
-            if reg_bank is None:
-                reg_bank = np.zeros((len(volume_ids), r.shape[0]), dtype=np.float32)
-            reg_bank[i] = r
-        if getattr(enc, "slot_features", None) is not None:  # multitask checkpoints: task slots and outputs
-            sl, to, ge = enc.slot_features(x, mod)
-            if slot_bank is None:
-                slot_bank = np.zeros((len(volume_ids), sl.shape[0]), dtype=np.float32)
-                taskout_bank = np.zeros((len(volume_ids), to.shape[0]), dtype=np.float32)
-                general_bank = np.zeros((len(volume_ids), ge.shape[0]), dtype=np.float32) if ge.size else None
-            slot_bank[i], taskout_bank[i] = sl, to
-            if general_bank is not None:
-                general_bank[i] = ge
-        coords[i] = xyz.detach().cpu().numpy()
-        if fg is not None:
-            mask[i] = fg.detach().cpu().numpy()
-        if i == 0 or (i + 1) % 50 == 0 or i + 1 == len(volume_ids):
-            print(f"[embed3d] {i + 1}/{len(volume_ids)} volumes window={window} n_win={len(wins)} "
-                  f"tokens={feat.shape[0]} patch={enc.patch_xyz} native={tuple(vol.shape)}")
-    enc.cls_bank, enc.reg_bank = cls_bank, reg_bank
-    enc.slot_bank, enc.taskout_bank, enc.general_bank = slot_bank, taskout_bank, general_bank
-    return embs, mask, coords
+        embs[i] = feat.detach().float().cpu().numpy()
+        coords[i] = e.xyz.detach().float().cpu().numpy()
+        mask[i] = e.keep.detach().cpu().numpy()
+        for bank, vec in (("cls", e.cls), ("reg", e.registers)):
+            if vec is None:
+                continue
+            v = vec.reshape(-1).float().cpu().numpy()
+            if bank == "cls":
+                cls_bank = np.zeros((n, v.shape[0]), dtype=np.float32) if cls_bank is None else cls_bank
+                cls_bank[i] = v
+            else:
+                reg_bank = np.zeros((n, v.shape[0]), dtype=np.float32) if reg_bank is None else reg_bank
+                reg_bank[i] = v
+        if i == 0 or (i + 1) % 50 == 0 or i + 1 == n:
+            print(f"[embed] {i + 1}/{n} volumes window={window} tokens={feat.shape[0]} dim={feat.shape[1]} "
+                  f"encoder={getattr(enc, 'kind', '?')}")
+    return {"mus": embs, "mask": mask, "z": coords, "cls": cls_bank, "registers": reg_bank}

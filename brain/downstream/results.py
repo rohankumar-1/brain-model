@@ -13,10 +13,11 @@ import pandas as pd
 from brain.downstream.metrics import HEADLINE, summarize_for_table
 
 
-def new_run_dir(root: Path, task: str, ckpt: Path, run_name: str | None = None) -> Path:
+def new_run_dir(root: Path, task: str, model: Path | str, run_name: str | None = None) -> Path:
+    """``runs/downstream/<task>/<model key>/<run>``: ``model`` is a model's cache key or a checkpoint path."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     name = run_name or stamp
-    ckpt_tag = f"{ckpt.parent.name}_{ckpt.stem}"
+    ckpt_tag = f"{model.parent.name}_{model.stem}" if isinstance(model, Path) else str(model)
     out = root / task / ckpt_tag / name
     out.mkdir(parents=True, exist_ok=True)
     (out / "heads").mkdir(exist_ok=True)

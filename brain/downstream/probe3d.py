@@ -143,28 +143,6 @@ class Brain3D(Provider):
         return torch.cat(list(seqs), -1), fg
 
 
-class Slice2D(Provider):
-    """2D ViT patch tokens per axial slice, averaged over the 8 slices of each 3D patch."""
-
-    def __init__(self, enc, name: str, batch: int = 64):
-        self.model, self.name, self.batch = enc.model, name, batch
-
-    @torch.no_grad()
-    def tokens(self, vol, modality):
-        zyx = vol.permute(2, 1, 0)[:, None]  # (Z, 1, Y, X)
-        fg = token_gate(_crop_to_patch(vol.float(), PATCH_XYZ)[0], modality, PATCH_XYZ)
-        feats = []
-        for c, w in windows_for("canonical", modality):
-            x, outs = asinh_window(zyx, c, w), []
-            for i in range(0, x.shape[0], self.batch):
-                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=x.is_cuda):
-                    outs.append(self.model.forward_features(x[i:i + self.batch])[1].float())
-            p = torch.cat(outs)  # (Z, Y*X patches, C)
-            z, n, ch = p.shape
-            feats.append(p.view(GRID[0], z // GRID[0], n, ch).mean(1).reshape(N_TOK, ch))
-        return torch.cat(feats, -1), fg
-
-
 class Pixel(Provider):
     """Control: mean, std, min, max of the windowed intensity inside each patch."""
 
@@ -197,17 +175,16 @@ def build_providers(ckpts, device, *, pixel: bool, random_init: bool, tiled: boo
         enc = load_frozen_encoder(Path(path), device)
         name = f"{Path(path).parent.name}/{Path(path).stem}"
         start = len(out)
-        if isinstance(enc, FrozenEncoder3D):
-            out.append(Brain3D(enc, name, fine_pool=False, fine_grid=False))
-            if fine:
-                out.append(Brain3D(enc, name + "@fine", fine_pool=True, fine_grid=False))
-            if fine_grid:
-                out.append(Brain3D(enc, name + "@finegrid", fine_pool=False, fine_grid=True))
-            if tiled:
-                out.append(Brain3D(enc, name + "@tiled", TILE_WINDOW, TILE_STRIDE, fine_pool=False, fine_grid=False))
-            first3d = first3d or Path(path)
-        else:
-            out.append(Slice2D(enc, name))
+        if not isinstance(enc, FrozenEncoder3D):
+            raise SystemExit(f"{path}: probe3d reads our 3D encoders' token grids")
+        out.append(Brain3D(enc, name, fine_pool=False, fine_grid=False))
+        if fine:
+            out.append(Brain3D(enc, name + "@fine", fine_pool=True, fine_grid=False))
+        if fine_grid:
+            out.append(Brain3D(enc, name + "@finegrid", fine_pool=False, fine_grid=True))
+        if tiled:
+            out.append(Brain3D(enc, name + "@tiled", TILE_WINDOW, TILE_STRIDE, fine_pool=False, fine_grid=False))
+        first3d = first3d or Path(path)
         for prov in out[start:]:
             prov.ckpt, prov.variant = Path(path), (prov.name.split("@", 1)[1] if "@" in prov.name else None)
     if random_init and first3d is not None:

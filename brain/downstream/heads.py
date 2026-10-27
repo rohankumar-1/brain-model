@@ -1,7 +1,7 @@
-"""Volume-level heads on frozen slice embeddings (N volumes, S slices, D dims).
+"""Volume-level heads on frozen token embeddings (N volumes, T tokens, D dims).
 
-Default probes are linear (mean+max logreg / ridge, C or alpha on val).
-``xgboost_mean`` and ``slice_attn_mlp`` remain available via ``--heads``.
+Default probes are linear (mean+max logreg / ridge, C or alpha on val). ``xgboost_mean`` and ``token_attn_mlp`` (an
+attention pool over the tokens and their positions) remain available via ``--heads``.
 """
 
 from __future__ import annotations
@@ -20,14 +20,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from brain.common.optim import lr_at
-from brain.common.grid import DEPTH
 
 DEFAULT_HEADS = "logreg_pool"
 LOGREG_CS = np.logspace(-2, 2, 9)
 RIDGE_ALPHAS = np.logspace(-1, 4, 12)
 _XGB = dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.9,
             colsample_bytree=0.9, n_jobs=4, tree_method="hist")
-VOLUME_DEPTH = DEPTH
 
 
 def mean_pool(x: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -142,29 +140,6 @@ def make_xgboost(multilabel: bool, regression: bool, seed: int) -> SklearnHead:
                        "mean_max", multilabel)
 
 
-class SliceAttnMLP(nn.Module):
-    """LayerNorm, learned slot pos, anatomical z in the scorer, attention pool, MLP."""
-
-    def __init__(self, dim: int, n_slices: int, n_out: int, hidden: int = 256, dropout: float = 0.3):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.pos = nn.Parameter(torch.zeros(n_slices, dim))
-        self.score = nn.Linear(dim + 1, 1)
-        self.mlp = nn.Sequential(
-            nn.Dropout(dropout), nn.Linear(dim, hidden), nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, n_out)
-        )
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
-        h = self.norm(x) + self.pos[: x.size(1)]
-        if z is None:
-            z = torch.linspace(0, 1, x.size(1), device=x.device, dtype=h.dtype).expand(x.size(0), -1)
-        else:
-            z = z.to(dtype=h.dtype) / (VOLUME_DEPTH - 1)
-        w = self.score(torch.cat([h, z.unsqueeze(-1)], dim=-1)).squeeze(-1)
-        w = w.masked_fill(~mask, -1e9).softmax(dim=1)
-        return self.mlp((w.unsqueeze(-1) * h).sum(1))
-
-
 class TokenAttnMLP(nn.Module):
     """Attention pool over a 3D token grid. Position is the normalized token center."""
 
@@ -184,20 +159,15 @@ class TokenAttnMLP(nn.Module):
 
 
 class AttnEnsemble:
-    """``n_seeds`` attention pools, each early-stopped on val; scores are averaged.
+    """``n_seeds`` token probes (``TokenAttnMLP``, or ``model_factory``'s), each early-stopped on val; scores are
+    averaged. Probes take ``(tokens, mask, xyz)``: native 3D tokens with their normalised centres."""
 
-    ``spatial=False`` is the 2D slice head. ``spatial=True`` scores native 3D tokens
-    with their (x, y, z) centers.
-    """
-
-    def __init__(self, dim: int, n_slices: int, n_out: int, multilabel: bool, seed: int,
+    def __init__(self, dim: int, n_out: int, multilabel: bool, seed: int,
                  n_seeds: int = 5, epochs: int = 100, patience: int = 15, lr: float = 1e-3,
-                 batch_size: int = 32, regression: bool = False, spatial: bool = False,
-                 model_factory=None, half: bool = False):
+                 batch_size: int = 32, regression: bool = False, model_factory=None, half: bool = False):
         self.model_factory, self.half = model_factory, bool(half)
-        self.spatial = bool(spatial)
-        self.name = "token_attn_mlp" if self.spatial else "slice_attn_mlp"
-        self.args = (dim, n_out) if self.spatial else (dim, n_slices, n_out)
+        self.name = "token_attn_mlp"
+        self.args = (dim, n_out)
         self.multilabel, self.regression = multilabel, regression
         self.seed, self.n_seeds = seed, n_seeds
         self.epochs, self.patience, self.lr, self.bs = epochs, patience, lr, batch_size
@@ -206,7 +176,7 @@ class AttnEnsemble:
 
     def _host_tokens(self, n_tok: int) -> bool:
         """32^3 grids are too large to pin in GPU memory; only minibatches move over."""
-        return bool(self.spatial) and int(n_tok) > 8192
+        return int(n_tok) > 8192
 
     def _t(self, a, dtype=torch.float32, device=None):
         device = self.device if device is None else device
@@ -223,13 +193,8 @@ class AttnEnsemble:
         return t if t.device == device else t.to(device)
 
     def _z(self, z, n: int, s: int, device=None) -> torch.Tensor:
-        if self.spatial:
-            if z is None or np.asarray(z).ndim != 3:
-                raise ValueError("token attention needs (N, T, 3) coordinates")
-            return self._t(z, device=device)
-        if z is None:
-            from brain.downstream.embeddings import slot_z
-            z = slot_z(n, s)
+        if z is None or np.asarray(z).ndim != 3:
+            raise ValueError("token attention needs (N, T, 3) coordinates")
         return self._t(z, device=device)
 
     def _gpu_batch(self, t: torch.Tensor, idx) -> torch.Tensor:
@@ -250,8 +215,7 @@ class AttnEnsemble:
 
     def _fit_one(self, seed, x, y, m, z, xv, yv, mv, zv) -> nn.Module:
         torch.manual_seed(seed)
-        cls = TokenAttnMLP if self.spatial else SliceAttnMLP
-        model = (self.model_factory() if self.model_factory else cls(*self.args)).to(self.device)
+        model = (self.model_factory() if self.model_factory else TokenAttnMLP(*self.args)).to(self.device)
         opt = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=1e-2)
         loss_fn = nn.MSELoss() if self.regression else nn.BCEWithLogitsLoss()
         n, steps = len(y), self.epochs * -(-len(y) // self.bs)
@@ -302,18 +266,13 @@ class AttnEnsemble:
         return p.ravel() if self.regression or (not self.multilabel and p.shape[1] == 1) else p
 
 
-def build_heads(*, latent_dim: int, max_slices: int, n_out: int, multilabel: bool, seed: int,
-                which: list[str], task_type: str, spatial: bool = False) -> list:
+def build_heads(*, latent_dim: int, n_out: int, multilabel: bool, seed: int, which: list[str],
+                task_type: str) -> list:
     """Heads valid for the task type, in the order requested."""
     reg = task_type == "regression"
     makers = {
         "logreg_pool": lambda: make_logreg_pool(multilabel, seed),
-        "slice_attn_mlp": lambda: AttnEnsemble(
-            latent_dim, max_slices, n_out, multilabel, seed, regression=reg, spatial=spatial,
-        ),
-        "token_attn_mlp": lambda: AttnEnsemble(
-            latent_dim, max_slices, n_out, multilabel, seed, regression=reg, spatial=True,
-        ),
+        "token_attn_mlp": lambda: AttnEnsemble(latent_dim, n_out, multilabel, seed, regression=reg),
         "xgboost_mean": lambda: make_xgboost(multilabel, reg, seed),
         "ridge": make_ridge,
     }
