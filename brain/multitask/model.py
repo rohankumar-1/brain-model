@@ -1,22 +1,18 @@
 """Task-conditioned multitask model on a 3D BrainEncoder.
 
-    tokens = encoder(volume)                                  (B, N, D) + CLS
-    slot_k = task_emb[task_k] + type_emb[type_k]              one query per requested task
-    slots  = L x [cross-attend to tokens -> self-attend across slots -> MLP]
-    output = typed head(slot_k)                               shared per output type, conditioned only by the slot
+    token_t = task_emb[t] + type_emb[type_t]                  one token per trained task, in the encoder's sequence
+    tokens  = encoder([CLS | task tokens | patches])          task tokens see the patches and themselves, never each
+                                                              other; patches read them (OMNI, arXiv 2610.12574)
+    output  = typed head(proj(token_t))                       shared per output type, conditioned only by the token
 
 Heads are shared by every task of a type (binary logit, standardised regression value, survival hazards, the
-segmentation decoder via FiLM; multiclass scores the slot against learned per-(task, class) vectors), so any number
-of tasks of any types can be asked at once, and a new task is a new embedding row (few-shot: fit only that row).
+segmentation decoder via FiLM; multiclass scores the token against learned per-(task, class) vectors). Every trained
+task's token is always in the sequence, so an answer never depends on which other tasks were asked; a held-out task
+gets a read-only token (it reads the scan, nothing reads it), so few-shot fits only its embedding row.
+``moe.blocks`` turns the encoder's top blocks' MLPs into mixtures of experts.
 
-``slot.embedding``: ``learned`` (a task embedding table) or ``text`` (a projection of frozen description
-embeddings, ``brain.multitask.text``; an ablation). ``slot.mode``: ``slots`` (above) or ``shared`` (no per-task
-attention: one pooled vector, concatenated with the task embedding, goes to the heads). ``slot.cross_task: false``
-blocks attention between slots. ``slot.width`` narrows the slot before the heads (bottleneck ablation).
-
-``task_tokens.enabled`` (OMNI-style, arXiv 2610.12574) replaces the slot layers: every trained task has a token in the
-encoder's own sequence from the first block (isolated from the other task tokens, read by the patch tokens), and the
-heads read its output. ``moe.blocks`` turns the encoder's top blocks' MLPs into mixtures of experts.
+``task_tokens.enabled: false`` is the earlier readout (runs up to 2026-10-26, e.g. run 6 and A1), kept so those
+checkpoints load: slot queries cross-attend to the finished encoding through ``slot.layers`` slot layers.
 """
 
 from __future__ import annotations
@@ -128,14 +124,18 @@ class SegDecoder(nn.Module):
 
 
 class MultitaskModel(nn.Module):
-    def __init__(self, backbone: BrainEncoder, reg: Registry, cfg: dict, text_emb: torch.Tensor | None = None):
+    def __init__(self, backbone: BrainEncoder, reg: Registry, cfg: dict):
         super().__init__()
         s = cfg.get("slot") or {}
         self.backbone = backbone
         self.reg = reg
         d_enc, dim = backbone.embed_dim, int(s.get("dim", 256))
-        width = int(s.get("width") or dim)
-        self.mode, self.embedding = str(s.get("mode", "slots")), str(s.get("embedding", "learned"))
+        for key, plain in (("mode", "slots"), ("embedding", "learned")):
+            if str(s.get(key, plain)) != plain:          # ablations retired on 2026-10-27 (text / shared readouts)
+                raise ValueError(f"slot.{key}={s[key]} is no longer supported")
+        if s.get("width") or (cfg.get("general") or {}).get("enabled"):
+            raise ValueError("slot.width and model.general are no longer supported")
+        self.mode = "slots"
         self.taps = tuple(int(t) for t in cfg.get("taps", (3, 7)) if int(t) < backbone.depth - 1)
         n_tasks, n_cls = len(reg), reg.max_classes()
         # ``task_tokens.enabled``: OMNI-style (arXiv 2610.12574) task tokens inside the encoder instead of slot layers
@@ -148,14 +148,8 @@ class MultitaskModel(nn.Module):
             self.register_buffer("tt_write", torch.zeros(n_tasks, dtype=torch.bool))
         qdim = d_enc if self.tokens else dim
         # task identity
-        if self.embedding == "text":
-            if text_emb is None:
-                raise ValueError("slot.embedding=text needs the description embeddings")
-            self.register_buffer("text_emb", text_emb.float(), persistent=False)    # (n_tasks, E)
-            self.task_proj = mlp(text_emb.shape[1], dim, qdim)
-        else:
-            self.task_emb = nn.Embedding(n_tasks, qdim)
-            nn.init.normal_(self.task_emb.weight, std=0.02)
+        self.task_emb = nn.Embedding(n_tasks, qdim)
+        nn.init.normal_(self.task_emb.weight, std=0.02)
         self.type_emb = nn.Embedding(len(TYPE_ID), qdim)
         nn.init.normal_(self.type_emb.weight, std=0.02)
         # ``moe``: mixture-of-experts MLPs in the encoder's last ``blocks`` blocks, experts copied from the trained MLP
@@ -164,43 +158,37 @@ class MultitaskModel(nn.Module):
             backbone.enable_moe(int(moe["blocks"]), int(moe.get("experts", 5)), int(moe.get("top_k", 2)))
         self.register_buffer("task_type", torch.tensor([TYPE_ID[t.type] for t in reg.tasks]), persistent=False)
         self.register_buffer("n_classes", torch.tensor([len(t.classes) for t in reg.tasks]), persistent=False)
-        # tokens -> keys / values (with an absolute position code: RoPE leaves tokens position-relative)
-        self.kv_norm = nn.LayerNorm(d_enc)
-        self.kv = nn.Linear(d_enc, dim)
-        self.pos = mlp(3, dim, dim)
-        self.cls_pos = nn.Parameter(torch.zeros(1, 1, dim))
-        n_layers = int(s.get("layers", 3))
-        if self.mode == "slots":
-            self.layers = nn.ModuleList(SlotLayer(dim, int(s.get("heads", 8)), bool(s.get("cross_task", True)))
-                                        for _ in range(n_layers))
-        elif self.mode == "shared":
-            self.shared = mlp(d_enc + dim, 2 * dim, dim)
-        elif self.mode == "tokens":
+        if self.tokens:
             self.tt_proj = nn.Linear(d_enc, dim)                # a task token's output -> the heads' input
+            self._register_load_state_dict_pre_hook(self._unused_slot_keys)
         else:
-            raise ValueError(f"slot.mode {self.mode}")
+            # slot readout (checkpoints before task tokens): tokens -> keys / values with an absolute position code
+            # (RoPE leaves tokens position-relative), then the slot layers
+            self.kv_norm = nn.LayerNorm(d_enc)
+            self.kv = nn.Linear(d_enc, dim)
+            self.pos = mlp(3, dim, dim)
+            self.cls_pos = nn.Parameter(torch.zeros(1, 1, dim))
+            self.layers = nn.ModuleList(SlotLayer(dim, int(s.get("heads", 8)), bool(s.get("cross_task", True)))
+                                        for _ in range(int(s.get("layers", 3))))
         self.out_norm = nn.LayerNorm(dim)
-        self.bottleneck = nn.Linear(dim, width) if width != dim else nn.Identity()
         # typed heads, shared across tasks
-        self.binary = mlp(width, width, 1)
-        self.regress = mlp(width, width, 1)
-        self.cls_query = nn.Linear(width, dim)
+        self.binary = mlp(dim, dim, 1)
+        self.regress = mlp(dim, dim, 1)
+        self.cls_query = nn.Linear(dim, dim)
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
         n_bins = max([len(t.survival_bins) for t in reg.tasks] + [1])
-        self.survival = mlp(width, width, n_bins)
-        # general embedding: one task-agnostic query over the same tokens, trained with LeJEPA (loss.general); its
-        # slot is computed on its own so it never depends on which tasks a row asks
-        gen = cfg.get("general") or {}
-        self.has_general = bool(gen.get("enabled", False))
-        if self.has_general and self.tokens:
-            raise ValueError("model.general needs the slot layers (slot mode), not task_tokens")
-        if self.has_general:
-            self.general_q = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
-            self.general_proj = mlp(width, width, int(gen.get("proj_dim", 128)))
+        self.survival = mlp(dim, dim, n_bins)
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
-        self.seg = SegDecoder(d_enc * (len(self.taps) + 1), width, patch_zyx,
+        self.seg = SegDecoder(d_enc * (len(self.taps) + 1), dim, patch_zyx,
                               tuple(seg_cfg.get("widths", (128, 64, 32, 16))))
+
+    @staticmethod
+    def _unused_slot_keys(state, prefix, *_):
+        """Task-token checkpoints from 2026-10-26 also carry the slot readout's (never used) key / value projection."""
+        for k in [k for k in state if k.startswith(prefix) and
+                  k[len(prefix):].startswith(("kv_norm.", "kv.", "pos.", "cls_pos"))]:
+            state.pop(k)
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):
@@ -246,13 +234,12 @@ class MultitaskModel(nn.Module):
             raise ValueError("task tokens: a requested task has no token in this encoding (encode with task=...)")
         tok = enc["task_tokens"]                                            # (B, T, D)
         z = torch.gather(tok, 1, pos.clamp_min(0).unsqueeze(-1).expand(-1, -1, tok.shape[-1]))
-        return self.bottleneck(self.out_norm(self.tt_proj(z)))
+        return self.out_norm(self.tt_proj(z))
 
     # -- slots -----------------------------------------------------------------------------------------
     def task_queries(self, task: torch.Tensor) -> torch.Tensor:
         t = task.clamp_min(0)
-        base = self.task_proj(self.text_emb[t]) if self.embedding == "text" else self.task_emb(t)
-        return base + self.type_emb(self.task_type[t])
+        return self.task_emb(t) + self.type_emb(self.task_type[t])
 
     def _kv(self, enc: dict, keep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if "_kv" not in enc:
@@ -266,35 +253,21 @@ class MultitaskModel(nn.Module):
             enc["_kv"] = (kv, pad)
         return enc["_kv"]
 
-    def general(self, enc: dict, keep: torch.Tensor) -> torch.Tensor:
-        """(B, width) task-agnostic embedding: the general query alone through the slot layers."""
-        if self.mode == "shared":
-            raise ValueError("the general embedding needs slot.mode=slots")
-        kv, pad = self._kv(enc, keep)
-        q = self.general_q.expand(kv.shape[0], -1, -1)
-        none = torch.zeros(kv.shape[0], 1, dtype=torch.bool, device=kv.device)
-        for layer in self.layers:
-            q = layer(q, none, kv, pad)
-        return self.bottleneck(self.out_norm(q))[:, 0]
-
     def slots(self, enc: dict, task: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
         if self.tokens:
             return self.token_slots(enc, task)
         q = self.task_queries(task)                                         # (B, K, dim)
-        if self.mode == "shared":
-            pooled = enc["pooled"].unsqueeze(1).expand(-1, q.shape[1], -1)
-            return self.bottleneck(self.out_norm(self.shared(torch.cat([pooled, q], -1))))
         kv, pad = self._kv(enc, keep)
         slot_pad = task < 0
         slot_pad = slot_pad & ~(slot_pad.all(1, keepdim=True) & (torch.arange(task.shape[1], device=task.device) == 0))
         for layer in self.layers:
             q = layer(q, slot_pad, kv, pad)
-        return self.bottleneck(self.out_norm(q))
+        return self.out_norm(q)
 
     def slots_alone(self, enc: dict, task: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
         """``slots`` with every task asked on its own (no slot attends to another), as at deployment; the scan is
         encoded once and its keys/values shared by the per-task queries."""
-        if self.mode in ("shared", "tokens"):                 # already independent of the other asked tasks
+        if self.tokens:                                       # already independent of the other asked tasks
             return self.slots(enc, task, keep)
         b, k = task.shape
         kv, pad = self._kv(enc, keep)
@@ -310,12 +283,12 @@ class MultitaskModel(nn.Module):
 
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
                 encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None) -> dict:
-        with torch.set_grad_enabled(encoder_grad and torch.is_grad_enabled()):
+        # task tokens live inside the encoder, so their gradient has to pass through it even when the encoder is frozen
+        # (few-shot fitting: its weights have requires_grad off and get none)
+        with torch.set_grad_enabled(torch.is_grad_enabled() and (encoder_grad or self.tokens)):
             enc = self.encode(x, keep, meta, task)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         out = self.heads(z, task)
-        if self.has_general:
-            out["general"] = self.general_proj(self.general(enc, keep))
         out["seg"] = None
         if len(seg_pair):
             b = x.shape[0]
@@ -325,4 +298,45 @@ class MultitaskModel(nn.Module):
             feats = torch.cat([*taps, enc["tokens"]], -1)                    # (B, N, D * (taps + 1))
             grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g)
             out["seg"] = self.seg(grid, x, seg_pair[:, 0], z[seg_pair[:, 0], seg_pair[:, 1]])
+        return out
+
+
+class TokenTraining:
+    """What a trainer does for task tokens and MoE blocks, shared by the multitask and joint trainers.
+
+    * registers the trained tasks as the always-present (written) tokens;
+    * ``at_step``: the patch tokens' attention to the task tokens starts damped by ``write_bias`` logits and opens
+      linearly over ``write_ramp_steps`` from ``start`` (a warm-started encoder: undamped, random task tokens shift its
+      features ~40% before any training);
+    * ``moe_loss``: the MoE load-balancing term of the last forward, weighted by ``moe.aux_weight`` (0 without MoE),
+      averaged for the log as ``moe`` (1 = even routing; it rises towards the expert count as routing collapses).
+    A model without task tokens or MoE makes every call a no-op."""
+
+    def __init__(self, model: MultitaskModel, cfg_model: dict, trained: list[int], device: torch.device):
+        self.model = model
+        tt = cfg_model.get("task_tokens") or {}
+        self.bias0, self.ramp = float(tt.get("write_bias", 10.0)), int(tt.get("write_ramp_steps", 2000))
+        if model.tokens:
+            model.set_token_tasks(trained)
+        self.moe_w = float((cfg_model.get("moe") or {}).get("aux_weight", 0.05)) if model.backbone.moe_blocks else 0.0
+        self.moe_sum, self.moe_cnt = torch.zeros((), device=device), 0
+
+    def at_step(self, step: int, start: int = 0) -> None:
+        if self.model.tokens:
+            self.model.backbone.task_write_bias = self.bias0 * max(0.0, 1.0 - (step - start) / max(self.ramp, 1))
+
+    def moe_loss(self) -> torch.Tensor | float:
+        if not self.moe_w:
+            return 0.0
+        aux = self.model.backbone.moe_aux()
+        self.moe_sum += aux.detach()
+        self.moe_cnt += 1
+        return self.moe_w * aux
+
+    def log_extras(self) -> dict[str, str]:
+        if not self.moe_w:
+            return {}
+        out = {"moe": f"{(self.moe_sum / max(self.moe_cnt, 1)).item():.3f}"}
+        self.moe_sum.zero_()
+        self.moe_cnt = 0
         return out

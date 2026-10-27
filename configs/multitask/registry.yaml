@@ -15,8 +15,6 @@
 # (held-out families never), and training reads only their split == train rows. Downstream-suite tasks that share
 # training labels (rsna_ich, brats* segmentation) become *seen* tasks in the frozen suite: report them separately.
 
-text_encoder: NeuML/pubmedbert-base-embeddings
-
 tasks:
   # ---------------------------------------------------------------- demographics (FOMO participants tables)
   - id: age

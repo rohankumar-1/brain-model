@@ -1,12 +1,13 @@
 """Task-conditioned multitask post-training of an SSL encoder (brain.multitask) on whole volumes.
 
-    python -m brain.train multitask --config configs/multitask/v3_init.yaml
+    python -m brain.train multitask --config configs/multitask/tokens.yaml
     python -m brain.train multitask --synthetic --max-steps 4          # CPU smoke run on phantoms
 
 The encoder starts from ``model.init_from`` (its architecture and token grid are copied into this run's config, so
-frozen evaluation loads these checkpoints like any 3D encoder: ``model`` is the encoder). For ``optim.freeze_steps``
-only the slots and heads train; then the encoder joins at ``enc_lr_mult`` x the LR with layer-wise decay.
-Checkpoints also hold ``multitask`` (slots, task embeddings, heads, decoder) and ``tasks`` (registry order).
+frozen evaluation loads these checkpoints like any 3D encoder: ``model`` is the encoder) and trains at ``enc_lr_mult``
+x the LR with layer-wise decay. The tasks enter as task tokens inside the encoder (``model.task_tokens``, the default);
+checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``tasks`` (registry order). Runs with the
+older slot readout (``task_tokens.enabled: false``) may freeze the encoder for ``optim.freeze_steps`` first.
 """
 
 from __future__ import annotations
@@ -16,12 +17,11 @@ import torch
 from brain.common.optim import NO_DECAY_SUFFIXES, NO_DECAY_TABLES, POST_BLOCKS
 from brain.common.paths import resolve
 from brain.data.volumes import n_meta
-from brain.multitask.data import prepare, protected_tasks, ssl_view, task_loaders
+from brain.multitask.data import prepare, protected_tasks, task_loaders
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
-from brain.multitask.model import MultitaskModel
+from brain.multitask.model import MultitaskModel, TokenTraining
 from brain.multitask.registry import load_registry
-from brain.objectives.sigreg import SIGReg, gather_batch, lejepa_loss
 from brain.train import engine
 
 # log column per task group: the raw (unbalanced) mean loss of the group's tasks, averaged over the steps of the
@@ -105,23 +105,11 @@ class Trainer(engine.Trainer):
             raise SystemExit(f"tasks {tk} selects no trained task (groups: {self.reg.groups})")
         enc = build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
-        text = None
-        if (cfg["model"].get("slot") or {}).get("embedding") == "text":
-            from brain.multitask.text import load_embeddings
-
-            text = load_embeddings([t.descriptions[0] for t in self.reg.tasks], self.reg.text_encoder)
-        self.raw = MultitaskModel(enc, self.reg, cfg["model"], text).to(dev)
-        if self.raw.tokens:
+        self.raw = MultitaskModel(enc, self.reg, cfg["model"]).to(dev)
+        if self.raw.tokens and self.freeze_steps:
             # task tokens live inside the encoder: a no-grad encoder (freeze) would leave them untrained
-            if self.freeze_steps:
-                raise SystemExit("model.task_tokens needs optim.freeze_steps=0")
-            self.raw.set_token_tasks([self.reg.index[t] for t in self.train_ids])
-        # the patch tokens' attention to the new task tokens starts damped by ``write_bias`` logits and opens linearly
-        # over ``write_ramp_steps`` (warm start: undamped, random task tokens shift the encoder's features ~40%)
-        tt = cfg["model"].get("task_tokens") or {}
-        self.tt_bias0, self.tt_ramp = float(tt.get("write_bias", 10.0)), int(tt.get("write_ramp_steps", 2000))
-        self.moe_w = float((cfg["model"].get("moe") or {}).get("aux_weight", 0.05)) if enc.moe_blocks else 0.0
-        self.moe_sum, self.moe_cnt = torch.zeros((), device=dev), 0
+            raise SystemExit("model.task_tokens needs optim.freeze_steps=0")
+        self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids], dev)
         groups = self.reg.groups
         gw = tk.get("group_weights") or {}
         self.balancer = Balancer(len(self.reg), cfg["loss"].get("balance", "ema"),
@@ -136,11 +124,6 @@ class Trainer(engine.Trainer):
         self.g_sum = torch.zeros(len(groups), device=dev)
         self.g_cnt = torch.zeros(len(groups), device=dev)
         self.fov_unsafe, self.aug_unsafe = (t.to(dev) for t in protected_tasks(self.reg))
-        # general embedding (LeJEPA on a task-agnostic slot, two global views): model.general.enabled + loss.general
-        self.gen = cfg["loss"].get("general") or {}
-        self.gen_w = float(self.gen.get("weight", 0.0)) if (cfg["model"].get("general") or {}).get("enabled") else 0.0
-        self.sigreg = SIGReg(n_proj=int(self.gen.get("n_proj", 256))).to(dev)
-        self.gen_sum, self.gen_cnt = torch.zeros(2, device=dev), 0
         seed = int(cfg["seed"]) + rt.rank
         self.loader, self.val_loader, self.stats, n_train = task_loaders(
             cfg, self.reg, self.train_ids, batch=self.batch, workers=int(d.get("num_workers", 10)), seed=seed + int(step),
@@ -179,44 +162,18 @@ class Trainer(engine.Trainer):
             self.iter = iter(self.loader)
             return next(self.iter)
 
-    def _with_general_views(self, raw: dict, b: dict) -> tuple[dict, torch.Tensor]:
-        """Append a second view of the first ``loss.general.frac`` rows (asking no task) to the batch, so both views
-        go through the encoder in one pass. Returns the widened batch and the rows that have a second view."""
-        n = b["x"].shape[0]
-        rows = torch.arange(max(2, round(n * float(self.gen.get("frac", 0.5)))), device=b["x"].device)
-        x2, keep2 = ssl_view(raw, rows, self.cfg, self.rt.device, self.patch)
-        pad = lambda t, v: torch.cat([t, torch.full((len(rows), *t.shape[1:]), v, dtype=t.dtype, device=t.device)])  # noqa: E731
-        return {**b, "x": torch.cat([b["x"], x2]), "keep": torch.cat([b["keep"], keep2]),
-                "task": pad(b["task"], -1), "y": pad(b["y"], 0),
-                "meta": torch.cat([b["meta"], b["meta"][rows]]) if b.get("meta") is not None else None}, rows
-
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
-        if self.raw.tokens:
-            self.raw.backbone.task_write_bias = self.tt_bias0 * max(0.0, 1.0 - step / max(self.tt_ramp, 1))
+        self.tokens.at_step(step)
         raw = self._next()
         b = prepare(raw, self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe,
                     aug_unsafe=self.aug_unsafe)
-        n = b["x"].shape[0]
-        if self.gen_w > 0:
-            b, rows = self._with_general_views(raw, b)
         self.opt.zero_grad(set_to_none=True)
         with torch.autocast(**self.amp):
             out = self.net(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=step >= self.freeze_steps,
                            meta=b["meta"])
         loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride)
         total, per_task = self.balancer(loss, has, b["task"])
-        if self.moe_w:
-            aux = self.raw.backbone.moe_aux()
-            total = total + self.moe_w * aux
-            self.moe_sum += aux.detach()
-            self.moe_cnt += 1
-        if self.gen_w > 0:
-            g = out["general"].float()
-            views = torch.stack([g[rows], g[n:]])                                      # (2, R, D)
-            gen, inv, reg = lejepa_loss(gather_batch(views), self.sigreg, float(self.gen.get("lamb", 0.02)))
-            total = total + self.gen_w * gen
-            self.gen_sum += torch.stack([inv.detach(), reg.detach()])
-            self.gen_cnt += 1
+        total = total + self.tokens.moe_loss()
         total.backward()
         self.balancer.sync_grads()
         torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
@@ -239,16 +196,7 @@ class Trainer(engine.Trainer):
         self.g_sum.zero_()
         self.g_cnt.zero_()
         out = {name: (f"{mean[i]:.4f}" if cnt[i] else "-") for i, name in self.log_groups}
-        if self.gen_w > 0:
-            inv, reg = (self.gen_sum / max(self.gen_cnt, 1)).tolist()
-            out.update(gen_inv=f"{inv:.4f}", gen_sig=f"{reg:.3f}")
-            self.gen_sum.zero_()
-            self.gen_cnt = 0
-        if self.moe_w:                                     # load balance: 1 = even routing, -> n_experts = collapse
-            out["moe"] = f"{(self.moe_sum / max(self.moe_cnt, 1)).item():.3f}"
-            self.moe_sum.zero_()
-            self.moe_cnt = 0
-        return out
+        return {**out, **self.tokens.log_extras()}
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:

@@ -1,6 +1,6 @@
 """Joint SSL + multitask training of one encoder from scratch.
 
-  python -m brain.train joint --config configs/joint/small.yaml
+  python -m brain.train joint --config configs/joint/tokens_warm_v3.yaml
   python -m brain.train joint --synthetic --max-steps 6          # CPU smoke run
 
 One encoder serves two branches in a single forward pass: the 3D LeJEPA objective on multi-crop views of the SSL pool
@@ -34,7 +34,7 @@ from brain.multitask.data import protected_tasks, task_loaders
 from brain.multitask.data import prepare as task_prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import Balancer, slot_losses
-from brain.multitask.model import MultitaskModel
+from brain.multitask.model import MultitaskModel, TokenTraining
 from brain.multitask.registry import load_registry
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
@@ -61,6 +61,13 @@ def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
     w_task = smooth((t - warm) / max(ramp, 1e-6)) if t >= warm else 0.0
     w_ssl = 1.0 - (1.0 - floor) * smooth((t - warm) / max(taper_end - warm, 1e-6)) if t >= warm else 1.0
     return w_ssl, w_task
+
+
+def task_start(max_steps: int, j: dict) -> int:
+    """The step the task branch starts (``schedule``'s warm-up end): task tokens open their write path from here."""
+    if j.get("warmup_steps") is not None:
+        return int(j["warmup_steps"])
+    return int(round(float(j.get("warmup_frac", 0.25)) * max_steps))
 
 
 # encoder settings that are not in the weights (RoPE frequencies are rebuilt from them) or that change what the weights
@@ -145,6 +152,8 @@ class Trainer(engine.Trainer):
         self.reg = load_registry(d.get("registry"))
         self.train_ids = self.reg.train_ids(tk)
         mt = MultitaskModel(enc, self.reg, m)
+        self.tokens = TokenTraining(mt, m, [self.reg.index[x] for x in self.train_ids], dev)
+        self.task_start = task_start(self.max_steps, self.j)
         self.raw = JointNet(core, mt).to(dev)
         if rt.world > 1:
             self.raw = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.raw)
@@ -209,6 +218,7 @@ class Trainer(engine.Trainer):
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
         w_ssl, w_task = schedule(step, self.max_steps, self.j)
         self.w = (w_ssl, w_task)
+        self.tokens.at_step(step, self.task_start)
         dev = self.rt.device
         ssl_b = ssl_prepare(next(self.ssl_loader), self.cfg, dev, self.buckets)
         task_b = task_prepare(self._next_task(), self.cfg, dev, self.encoder.patch_xyz, train=True,
@@ -227,8 +237,9 @@ class Trainer(engine.Trainer):
             task_loss, _ = self.balancer(loss, has, task_b["task"])
             # normalised by the magnitude of the data term: uncertainty weighting's total (exp(-s) L + s) crosses zero
             total = total + w_task * self._norm("task", task_loss, self.balancer.data_term)
-            self.t_sum += task_loss.detach()
+            self.t_sum += self.balancer.data_term          # logged: the balanced loss without the (signed) +s terms
             self.t_cnt += 1
+        total = total + self.tokens.moe_loss()
         total.backward()
         self.balancer.sync_grads()
         torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
@@ -251,7 +262,7 @@ class Trainer(engine.Trainer):
         task = f"{(self.t_sum / max(self.t_cnt, 1)).item():.4f}" if self.t_cnt else "-"
         self.t_sum.zero_()
         self.t_cnt = 0
-        return {"w_ssl": f"{self.w[0]:.2f}", "w_task": f"{self.w[1]:.2f}", "task": task}
+        return {"w_ssl": f"{self.w[0]:.2f}", "w_task": f"{self.w[1]:.2f}", "task": task, **self.tokens.log_extras()}
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:

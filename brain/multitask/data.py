@@ -370,34 +370,6 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
             "meta": batch["meta"].to(device) if "meta" in batch else None}
 
 
-def ssl_view(batch: dict, rows: torch.Tensor, cfg: dict, device, patch_xyz) -> tuple[torch.Tensor, torch.Tensor]:
-    """A second global view of batch ``rows`` for the general-embedding LeJEPA loss (``loss.general``): a small
-    rotation / shift and a random box crop (each axis keeps U(``crop_min``, 1) of its extent; the rest becomes
-    background), canonically windowed with no appearance augmentation. Returns (x, keep)."""
-    g = (cfg.get("loss") or {}).get("general") or {}
-    raw = batch["image"][rows.cpu()].to(device, non_blocking=True).float().unsqueeze(1)
-    mod = batch["modality"][rows.cpu()].to(device)
-    n, shape = raw.shape[0], raw.shape[2:]
-    bg = raw.amin(dim=(1, 2, 3, 4), keepdim=True)
-    theta = augment_theta(n, shape, {"p": 1.0, "rot_deg": g.get("rot_deg", [8, 8, 12]),
-                                     "shift_mm": float(g.get("shift_mm", 8.0))}, device)
-    grid = F.affine_grid(theta, list(raw.shape), align_corners=False)
-    raw = F.grid_sample(raw - bg, grid, mode="bilinear", padding_mode="zeros", align_corners=False) + bg
-    lo = float(g.get("crop_min", 0.7))
-    inside = torch.ones_like(raw, dtype=torch.bool)
-    for ax, size in enumerate(shape):
-        keep_len = (torch.empty(n, device=device).uniform_(lo, 1.0) * size).long().clamp_min(1)
-        start = (torch.rand(n, device=device) * (size - keep_len + 1)).long()
-        idx = torch.arange(size, device=device).view(1, -1)
-        m = (idx >= start.view(-1, 1)) & (idx < (start + keep_len).view(-1, 1))           # (n, size)
-        view = [n, 1, 1, 1, 1]
-        view[2 + ax] = size
-        inside &= m.view(view)
-    raw = torch.where(inside, raw, bg)
-    keep = foreground_tokens(raw, mod, patch_xyz, (cfg.get("model") or {}).get("gate"))
-    return canonical_window(raw, mod), keep
-
-
 def pick_val_volumes(labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry, task_ids: list[str],
                      n: int) -> list[str]:
     """The fixed training-time validation set: up to ``n`` split-``val`` scans per task, each later asked all its tasks.

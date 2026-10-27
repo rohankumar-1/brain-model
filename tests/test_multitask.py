@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 
 from brain.multitask.data import MultitaskDataset, SyntheticMultitask, collate, prepare
@@ -27,11 +28,16 @@ def _cfg(**aug):
     return cfg
 
 
-def _model(**slot):
+def _model(tokens: bool = True, **slot):
+    """The default (task-token) model, or with ``tokens=False`` the slot readout older checkpoints use."""
     torch.manual_seed(0)
     cfg = _cfg()
     cfg["model"]["slot"].update(slot)
-    return cfg, MultitaskModel(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
+    cfg["model"]["task_tokens"]["enabled"] = tokens
+    model = MultitaskModel(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
+    if tokens:
+        model.set_token_tasks([REG.index[t] for t in REG.train_ids(cfg["tasks"])])
+    return cfg, model
 
 
 def _raw(n=4):
@@ -68,8 +74,9 @@ def test_collate_pads_slots_and_pairs_segmentation_masks():
     assert len(b["seg"]) == len(b["seg_pair"])
 
 
-def test_forward_gives_every_head_and_one_mask_per_seg_slot():
-    cfg, model = _model()
+@pytest.mark.parametrize("tokens", [True, False])
+def test_forward_gives_every_head_and_one_mask_per_seg_slot(tokens):
+    cfg, model = _model(tokens=tokens)
     b = _prepared(cfg)
     out = model(b["x"], b["keep"], b["task"], b["seg_pair"])
     bk = tuple(b["task"].shape)
@@ -92,7 +99,7 @@ def test_slots_are_permutation_equivariant():
 
 @torch.no_grad()
 def test_cross_task_off_makes_slots_independent():
-    cfg, model = _model(cross_task=False)
+    cfg, model = _model(tokens=False, cross_task=False)
     b = _prepared(cfg)
     n = b["x"].shape[0]
     alone, both = (model(b["x"], b["keep"], torch.tensor([t] * n), NO_SEG)["binary"][:, 0] for t in ([1], [1, 4, 5]))
@@ -211,11 +218,12 @@ def test_fewshot_fits_only_the_held_out_row():
 
 
 def test_trainer_runs_on_phantoms(tmp_path):
-    """Three steps across the encoder freeze boundary, on phantoms (raises on any failure)."""
+    """Three steps of the slot readout across its encoder-freeze boundary, on phantoms (raises on any failure); the
+    task-token trainer has its own test (test_task_tokens)."""
     from brain.train import engine
 
     engine.run(["multitask", "--synthetic", "--max-steps", "3", "--log-every", "1", "--out-dir", str(tmp_path),
-                "--set", "optim.freeze_steps=1"])
+                "--set", "optim.freeze_steps=1", "--set", "model.task_tokens.enabled=false"])
 
 
 def test_registration_qc_only_drops_alignment_dependent_targets():

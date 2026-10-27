@@ -55,7 +55,10 @@ def encode(model, cfg, image_zyx: np.ndarray, modality: str, device) -> tuple[di
 
 def slots_with_attention(model, enc: dict, task: torch.Tensor, keep: torch.Tensor):
     """``model.slots`` replayed with attention weights kept: returns the slot outputs (B, K, W) and per-layer
-    cross-attention (L, B, K, n_kv) averaged over heads (key 0 is the CLS token when the encoder has one)."""
+    cross-attention (L, B, K, n_kv) averaged over heads (key 0 is the CLS token when the encoder has one). Slot-readout
+    checkpoints only: a task-token model has no slot layers to replay."""
+    if model.tokens:
+        raise SystemExit("explain reads slot attention: this checkpoint uses task tokens (no slot layers)")
     enc = dict(enc)
     enc.pop("_kv", None)
     kv, pad = model._kv(enc, keep)
@@ -72,7 +75,7 @@ def slots_with_attention(model, enc: dict, task: torch.Tensor, keep: torch.Tenso
         q = q + layer.self_attn(h, h, h, key_padding_mask=None if mask is not None else slot_pad, attn_mask=mask,
                                 need_weights=False)[0]
         q = q + layer.mlp(layer.n3(q))
-    return model.bottleneck(model.out_norm(q)), torch.stack(attn)
+    return model.out_norm(q), torch.stack(attn)
 
 
 def task_scalar(model, z: torch.Tensor, task: torch.Tensor, kind: str) -> torch.Tensor:

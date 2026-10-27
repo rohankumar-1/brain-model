@@ -65,7 +65,6 @@ TRAINABLE_TYPES = ("binary", "regression", "multiclass", "segmentation")     # t
 @dataclass
 class Registry:
     tasks: list[Task]
-    text_encoder: str
 
     def __post_init__(self):
         self.index = {t.id: i for i, t in enumerate(self.tasks)}
@@ -98,19 +97,12 @@ class Registry:
             raise SystemExit(f"tasks {lossless} have a type with no training loss (trainable: {TRAINABLE_TYPES})")
         return out
 
-    def texts(self) -> list[str]:
-        """Every string the text encoder must embed: descriptions and class names."""
-        out = []
-        for t in self.tasks:
-            out += t.descriptions + t.classes
-        return list(dict.fromkeys(out))
-
     def subset(self, ids: list[str]) -> "Registry":
         """The registry of a checkpoint trained on ``ids`` (its saved task order), from this one's definitions."""
         missing = [i for i in ids if i not in self.index]
         if missing:
             raise SystemExit(f"tasks {missing[:5]} of the checkpoint are no longer in the registry")
-        return Registry([self[i] for i in ids], self.text_encoder)
+        return Registry([self[i] for i in ids])
 
     def max_classes(self) -> int:
         return max([len(t.classes) for t in self.tasks] + [1])
@@ -134,4 +126,4 @@ def load_registry(path: str | Path | None = None) -> Registry:
         if task.type == "multiclass" and len(task.classes) < 2:
             raise ValueError(f"task {task.id}: multiclass needs at least two classes")
         tasks.append(task)
-    return Registry(tasks, str(raw.get("text_encoder", "NeuML/pubmedbert-base-embeddings")))
+    return Registry(tasks)

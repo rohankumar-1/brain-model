@@ -1,0 +1,16 @@
+# Multitask post-training with task tokens (the default model since 2026-10-27), full length on 4 GPUs.
+# Arm B of the 2026-10-26 comparison (configs/archive/multitask/omni_b_tokens.yaml) beat the slot readout on 10 of 25
+# test tasks and lost none at 12k steps of batch 8; this is the same recipe at run 6's exposure (20k steps x 16).
+#   sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/tokens.yaml jobs/train_pi4.sbatch
+# Everything not set here is the multitask default (brain/train/defaults.py).
+data:
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
+
+model:
+  init_from: runs/v3/cls_s42/best.pt      # step 18000
+
+optim:
+  batch_size: 4                           # per GPU, on 4 GPUs: global 16
+
+output:
+  out_dir: runs/multitask/tokens_s42

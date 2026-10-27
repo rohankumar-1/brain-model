@@ -117,42 +117,50 @@ MAE3D: dict[str, Any] = _mae3d_defaults()
 
 
 def _multitask_defaults() -> dict[str, Any]:
-    """Task-conditioned multitask post-training (brain.multitask): an SSL encoder on whole volumes, learned task
-    embeddings as slot queries, typed shared heads. The encoder's architecture comes from ``model.init_from``."""
+    """Task-conditioned multitask post-training (brain.multitask): an SSL encoder on whole volumes, one learned task
+    token per trained task inside the encoder, typed shared heads. The encoder's architecture comes from
+    ``model.init_from``."""
     return {
         "seed": 42,
         "data": {"store_root": "data/processed/slices_zarr", "index_name": "volumes.csv",
                  "labels_dir": "data/processed/slices_zarr/labels/multitask_v2", "registry": None,
                  "volume_size_xyz": list(GRID_XYZ), "default_spacing_mm": [1.0, 1.0, 1.0],
-                 "num_workers": 10, "balance_alpha": 0.5, "balance_groups": None,
+                 "num_workers": 10, "balance_alpha": 0.5,
+                 # the BraTS re-releases count as one family for sampling
+                 "balance_groups": {"brats": ["brats_gli", "brats_men", "brats_ped", "brats_goat"]},
                  "val_per_task": 64, "val_max_seg": 4},
         "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
-                  "slot": {"dim": 256, "layers": 3, "heads": 8, "width": None, "mode": "slots",
-                           "cross_task": True, "embedding": "learned"},
-                  "seg": {"widths": [128, 64, 32, 16]},
-                  # task-agnostic general-embedding slot (trained by loss.general); off keeps old checkpoints loadable
-                  "general": {"enabled": False, "proj_dim": 128}},
+                  # task tokens in the encoder (OMNI); the patches' attention to them opens over write_ramp_steps
+                  # from write_bias logits so a warm-started encoder is not shifted at step 0
+                  "task_tokens": {"enabled": True, "write_bias": 10.0, "write_ramp_steps": 2000},
+                  # MoE MLPs in the top ``blocks`` encoder blocks (0 = off; tried 2026-10-26, no clear gain over tokens)
+                  "moe": {"blocks": 0, "experts": 5, "top_k": 2, "aux_weight": 0.05},
+                  # ``dim``: the heads' width. layers / heads / cross_task: the slot readout of checkpoints before
+                  # task tokens (task_tokens.enabled: false)
+                  "slot": {"dim": 256, "layers": 3, "heads": 8, "cross_task": True},
+                  "seg": {"widths": [128, 64, 32, 16]}},
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5}},
         # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
+        # exclude: small clinical tasks (55-350 training scans) that overfit and never learned (run 6, 2026-10-25);
+        # they stay in the registry as held-out few-shot tasks
         "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None,
-                  "ids": None, "exclude": None},
+                  "ids": None, "exclude": ["mmse", "autism_severity", "adhd", "parkinsons", "glioma_survival_12m",
+                                           "glioma_lower_grade", "glioma_idh"]},
         "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0},
                 # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
-                "appearance": {"bias": {"p": 0.0, "amp": 0.2}, "through_plane": {"p": 0.0, "fwhm_vox": [2.0, 6.0]},
-                               "noise": {"p": 0.0, "kind": "gaussian", "snr": [15.0, 100.0], "sigma": [0.02, 0.1]},
-                               "blur": {"p": 0.0, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.0, "amp": 0.1}},
+                # bias is MRI only and mild (intensity asymmetry is a target); noise is Rician on MRI, Gaussian on CT
+                "appearance": {"bias": {"p": 0.3, "amp": 0.2}, "through_plane": {"p": 0.3, "fwhm_vox": [2.0, 6.0]},
+                               "noise": {"p": 0.5, "kind": "rician", "snr": [15.0, 100.0], "sigma": [0.02, 0.1]},
+                               "blur": {"p": 0.2, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.2, "amp": 0.1}},
                 # blank a random inferior slab (truncated coverage) on rows asking no whole-brain target; p 0 = off
-                "fov_cut": {"p": 0.0, "mm": [10, 40]},
+                "fov_cut": {"p": 0.2, "mm": [10, 40]},
                 # skull-strip skull-on MRI with its SynthStrip mask (never rows asking a needs_skull task): the tumour
                 # and stroke cohorts arrive stripped, so "no skull" would otherwise mean "lesion cohort"
                 "skull_strip": {"p": 0.3}},
-        # general: LeJEPA (prediction + SIGReg, lamb) on the general slot of two global views; the second view of the
-        # first ``frac`` rows is a small rotation / shift plus a box crop (each axis keeps >= crop_min); weight 0 = off
-        "loss": {"balance": "ema", "ema_decay": 0.99, "seg_stride": 2,
-                 "general": {"weight": 0.0, "frac": 0.5, "lamb": 0.02, "n_proj": 256, "crop_min": 0.7,
-                             "rot_deg": [8, 8, 12], "shift_mm": 8.0}},
+        "loss": {"balance": "uncertainty", "ema_decay": 0.99, "seg_stride": 2},
+        # freeze_steps: slot-readout runs only (the encoder trains from step 0 with task tokens inside it)
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
-                  "warmup_steps": 1000, "freeze_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
+                  "warmup_steps": 1000, "freeze_steps": 0, "clip_grad": 1.0, "batch_size": 8},
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
                   "keep_every": 5000, "stop_poll": 20, "best_metric": "score"},   # validation skill (brain.eval.skill)
         "output": {"out_dir": "runs/multitask", "resume_from": None},

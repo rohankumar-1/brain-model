@@ -59,7 +59,7 @@ def attach(enc, ckpt: dict, device: torch.device) -> None:
                    "pooled": e["pooled"].expand(t, -1)}
             z = model.slots(rep, task, keep.expand(t, -1))                # (T, 1, W)
             out = model.heads(z, task)
-            gen = model.general(e, keep)[0].float().cpu().numpy() if model.has_general else np.zeros(0, np.float32)
+            gen = np.zeros(0, np.float32)                     # the general slot was retired on 2026-10-27
         outs = []
         for i, kind in enumerate(kinds):
             if kind == "binary":

@@ -1,25 +1,33 @@
 # Task-conditioned multitask post-training (`brain/multitask/`)
 
-An SSL encoder is post-trained on whole 256 x 256 x 160 volumes to answer any subset of a scan's labelled tasks at
-once. Each requested task is a query slot; slots cross-attend to the encoder's tokens and to each other, and a head
-shared by every task of the slot's output type reads the answer. A new task is a new row of the task-embedding table,
-so held-out tasks are evaluated few-shot by fitting that row alone.
+An SSL encoder is post-trained on whole 256 x 256 x 160 volumes to answer any subset of a scan's labelled tasks. Every
+trained task has a task token inside the encoder's own sequence (OMNI-style, arXiv 2610.12574): task tokens read the
+patch tokens and themselves, never each other, and the patch tokens read them. A head shared by every task of an output
+type reads the task token's output. All trained tasks' tokens are always present, so an answer never depends on which
+other tasks were asked. A new task is a new row of the task-embedding table with a read-only token (it reads the scan,
+nothing reads it), so held-out tasks are evaluated few-shot by fitting that row alone.
 
 ```
-tokens  = encoder(volume)                               (B, N, D) + CLS; v3 LeJEPA ViT-S, 16 x 16 x 8 mm tokens
-slot_k  = task_emb[task_k] + type_emb[type_k]           one query per requested task
-slots   = L x [cross-attend to tokens -> self-attend across slots -> MLP]
-answer  = head[type_k](slot_k)                          binary / regression / multiclass / survival / segmentation
-general = L x [cross-attend to tokens -> MLP](general_q)   optional task-agnostic slot, trained with LeJEPA (below)
+token_t = task_emb[t] + type_emb[type_t]                one token per trained task (encoder width)
+tokens  = encoder([CLS | task tokens | patches])        v3 LeJEPA ViT-S, 16 x 16 x 8 mm patches
+answer  = head[type_t](proj(token_t))                   binary / regression / multiclass / survival / segmentation
 ```
 
-Segmentation slots drive a decoder (token grid + earlier-block taps + an image pyramid for detail below 16 mm),
-FiLM-modulated by the slot, predicting at 2 mm.
+Segmentation tasks drive a decoder (token grid + earlier-block taps + an image pyramid for detail below 16 mm),
+FiLM-modulated by the task's output, predicting at 2 mm. Warm start: the patch tokens' attention to the (new, random)
+task tokens starts at -10 logits and opens linearly over 2k steps (`task_tokens.write_bias` / `write_ramp_steps`);
+undamped, the tokens shift v3's features by ~40% before any training. `moe.blocks` optionally turns the top blocks'
+MLPs into mixtures of experts (experts copied from the MLP; no clear gain over tokens alone at 12k steps).
+
+The 2026-10-26 comparison (12k steps, batch 8, test set, 25 tasks with >= 20 test scans): task tokens beat the earlier
+slot readout (task queries cross-attending to the finished encoding through 3 slot layers) on 10 tasks and lost none,
+with 3M fewer parameters; the gains sit on whole-brain scalar targets (CT density, brain volume, calcification,
+tumour type). Slot-readout checkpoints (runs 1-6, A1) still load (`task_tokens.enabled: false`).
 
 ## Tasks (`configs/multitask/registry.yaml`, `brain/multitask/registry.py`)
 
 A task is semantic, not a dataset (one "whole tumour" task over glioma, meningioma and paediatric cohorts; one "age"
-over every cohort with ages). Each task has a type, descriptions (documentation; embedded only for the text ablation),
+over every cohort with ages). Each task has a type, descriptions (documentation),
 class names (multiclass), a role (`train` or `held_out`), a group and label sources. Groups balance training: sampling
 and loss go over groups first, then over tasks within a group, so the 32 SynthSeg-derived tasks weigh as two groups.
 75 tasks, 65 trained:
@@ -70,12 +78,13 @@ artefacts dropped, everything else `-> 1`.
 
 ## Training (`brain/train/multitask.py`)
 
-    sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/v4_general.yaml jobs/train_pi.sbatch
+    sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/tokens.yaml jobs/train_pi4.sbatch
+    sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/tokens_warm_v3.yaml jobs/train_pi4.sbatch   # with SSL
     python -m brain.train multitask --synthetic --max-steps 4       # CPU smoke run
 
 Each sample asks k of its available tasks (k uniform in 1..min(n, 8), or all of them 20% of the time; group first,
-then task with weight n_task^-0.5; at most 2 segmentation slots). The encoder starts from `model.init_from`, is frozen
-for `freeze_steps`, then trains at `enc_lr_mult` x the LR (0.1 since run 2) with layer-wise decay. Augmentation:
+then task with weight n_task^-0.5; at most 2 segmentation tasks). The encoder starts from `model.init_from` and trains
+at `enc_lr_mult` x the LR (0.25) with layer-wise decay from step 0 (task tokens live in it). Augmentation:
 flips, small rotations / shifts, appearance (bias, through-plane blur, Rician / Gaussian noise, blur, drift) with the
 canonical window pinned, and field-of-view cuts on rows asking no whole-brain target. The loss balancer keeps the
 headline loss near 1, so raw per-group losses are logged (`demo`, `dx`, `ich`, ...) to follow progress. Checkpoints
@@ -86,17 +95,15 @@ keep the encoder under `model`, so the frozen suite loads them like any 3D encod
 | 1 | `v3_init.yaml` | first run: 33 tasks, encoder 0.25 x LR |
 | 2 | `v3_synthseg.yaml` | SynthSeg anatomy, task groups, registration QC, appearance + FOV augmentation, encoder 0.1 x LR, batch 8 |
 | control | `v3_synthseg_nolabels.yaml` | run 2 restricted to label-free groups (derived, anatomy_seg, anatomy_volume) |
-| 3 | `v4_general.yaml` | general-embedding slot; BHSD / HemSeg / small-FOMO data; WMH, hemorrhage segmentation, clinical-score, glioma, infant / ADHD / Parkinson's tasks |
+| 3 | `v4_general.yaml` | general-embedding slot (retired); BHSD / HemSeg / small-FOMO data; WMH, hemorrhage segmentation, clinical-score, glioma, infant / ADHD / Parkinson's tasks |
+| 4 | `v5_enclr.yaml` | encoder 0.5 x LR, layer decay 0.9 |
+| 5 | `v6_nogen_unc.yaml` | no general slot, uncertainty loss balancing |
+| 6 | `v7_nosmall.yaml` | run 5 without the 7 small clinical tasks (now the default exclusion) |
+| A1 | `joint/a1_warm_v3.yaml` | joint SSL + tasks warm from v3, slot readout |
+| arms A / B / C | `omni_*.yaml` | slots vs task tokens vs task tokens + MoE, 12k steps each (B became the default) |
+| next | `multitask/tokens.yaml`, `joint/tokens_warm_v3.yaml` | task tokens at full length; and A1 with task tokens |
 
-### General-embedding slot (`model.general`, `loss.general`)
-
-A task-agnostic query (`general_q`) runs through the slot layers on its own, so its output never depends on which
-tasks a row asks, and a projector feeds LeJEPA (`brain/objectives/sigreg.py`: prediction loss + SIGReg, `lamb` 0.02,
-gathered across GPUs). The two global views: the training view of every row, and a second view of the first `frac`
-of the batch (`brain.multitask.data.ssl_view`: rotation / shift, a box crop keeping >= `crop_min` of each axis, no
-appearance change). Both views go through the encoder in one pass; the second view's rows ask no task. The loss is
-added at `weight` (the task loss is ~1 by construction) and logged as `gen_inv` / `gen_sig`. Off by default: with
-`model.general.enabled: false` the model has no extra parameters, so older checkpoints load unchanged.
+All of these configs are in `configs/archive/` (they use options retired on 2026-10-27).
 
 ## Evaluation
 
@@ -161,8 +168,9 @@ third ventricle's centre; `max_mm` is the larger. On CQ500 (474 scans, 3-reader 
 `midline_healthy_viz.py` (healthy range on RSNA-negative CT and healthy MRI, figure). ~10% of scans get no value (no
 third ventricle or lateral ventricles found). Not yet a training target.
 
-## Ablations (config switches)
+## Config switches
 
-`model.slot.embedding: learned | text`, `model.slot.width` (bottleneck), `model.slot.mode: slots | shared`,
-`model.slot.cross_task: true | false`, `loss.balance: uniform | ema | uncertainty`, `tasks.group_weights`,
-`tasks.groups` (train only some groups), `model.general.enabled` + `loss.general.weight`.
+`model.task_tokens.enabled` (false: the slot readout), `model.moe.blocks`, `loss.balance: uniform | ema | uncertainty`,
+`tasks.group_weights`, `tasks.groups` / `tasks.ids` (train only some groups or tasks), `tasks.exclude`. Retired on
+2026-10-27 after their ablations: the text task embedding, the slot bottleneck width, the shared (slot-free) readout
+and the general-embedding slot.
