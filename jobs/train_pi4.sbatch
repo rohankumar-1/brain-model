@@ -6,6 +6,7 @@
 #   sbatch --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/small.yaml jobs/train_pi4.sbatch
 
 #SBATCH -p pi_dbertsim
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=train-4gpu
 #SBATCH -N 1
 #SBATCH --ntasks=1

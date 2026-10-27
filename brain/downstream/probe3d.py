@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import average_precision_score, balanced_accuracy_score, r2_score, roc_auc_score
+from sklearn.metrics import average_precision_score, r2_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.preprocessing import StandardScaler
 
@@ -39,6 +39,7 @@ from brain.common.paths import PROCESSED_ROOT
 from brain.prep import store
 from brain.downstream.embed3d import _crop_to_patch, read_volume_xyz, token_gate
 from brain.downstream.embeddings import load_frozen_encoder, resolve_path
+from brain.downstream.metrics import balanced_accuracy
 from brain.common.windowing import asinh_window, windows_for
 
 GRID = TOKEN_GRID  # (Z, Y, X) tokens
@@ -316,7 +317,7 @@ def fingerprint_probe(vols: list[Volume], seed: int = 0, view: str = "mean") -> 
             continue
         folds = StratifiedKFold(5, shuffle=True, random_state=seed)
         pred = cross_val_predict(LogisticRegression(max_iter=2000, C=0.1), x[keep], y[keep], cv=folds)
-        out[f"{key}_bal_acc"] = float(balanced_accuracy_score(y[keep], pred))
+        out[f"{key}_bal_acc"] = balanced_accuracy(y[keep], pred)
         out[f"{key}_chance"] = 1.0 / len(np.unique(y[keep]))
         out[f"_{key}_rows"] = (y[keep], pred)
     return out
@@ -390,7 +391,7 @@ def bootstrap_probes(raw: dict, reps: int = 200, seed: int = 0) -> dict[str, np.
         if "_dataset_rows" in raw["fingerprint"]:
             y, p = raw["fingerprint"]["_dataset_rows"]
             i = np.random.default_rng([seed, r, 1, len(y)]).integers(0, len(y), len(y))
-            out["dataset_acc"][r] = balanced_accuracy_score(y[i], p[i])
+            out["dataset_acc"][r] = balanced_accuracy(y[i], p[i])
         vols = raw["location"]["_volumes"]
         i = np.random.default_rng([seed, r, 2, len(vols)]).integers(0, len(vols), len(vols))
         out["loc_r2"][r] = _r2_mean(np.concatenate([vols[k][0] for k in i]), np.concatenate([vols[k][1] for k in i]))

@@ -88,7 +88,7 @@ class VolumeDataset(Dataset):
         self.default_origin_mm = tuple(float(v) for v in default_origin_mm)
         parquet = self.store_root / "brainmodel_index.parquet"
         src = parquet if parquet.exists() else self.store_root / index_name
-        df = pd.read_parquet(src) if src.suffix == ".parquet" else pd.read_csv(src)
+        df = pd.read_parquet(src) if src.suffix == ".parquet" else pd.read_csv(src, low_memory=False)
         df = enrich(df)
         if "split" not in df.columns:
             raise ValueError(f"{src} needs a split column")

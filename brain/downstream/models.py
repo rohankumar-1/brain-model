@@ -203,6 +203,61 @@ class ExternalEncoder:
             return vol_xyz
         return vol_xyz * float(attrs["raw_mad"]) + float(attrs["raw_median"])
 
+    # ---- geometry: the stored grid in world (RAS mm, template space) and back, for models with their own input grid
+    @staticmethod
+    def grid_affine(attrs: dict) -> np.ndarray:
+        """4 x 4 from a stored-grid voxel index (x, y, z) to RAS mm in the template space the store is registered to
+        (``grid_*`` attrs are ITK geometry, i.e. LPS)."""
+        a = np.eye(4)
+        a[:3, :3] = np.asarray(attrs["grid_direction"], float).reshape(3, 3) * np.asarray(attrs["grid_spacing"], float)
+        a[:3, 3] = np.asarray(attrs["grid_origin"], float)
+        return np.diag([-1.0, -1.0, 1.0, 1.0]) @ a
+
+    @staticmethod
+    def sample(src: torch.Tensor, affine: np.ndarray, ras: torch.Tensor, mode: str = "bilinear",
+               fill: float | None = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+        """``src`` (C, A0, A1, A2), whose voxel index maps to RAS mm by ``affine``, sampled (trilinear, or ``nearest``)
+        at the points ``ras`` (P, 3): (C, P) values (``fill`` outside; None: the nearest edge value) and (P,) whether
+        each point lies inside."""
+        inv = torch.as_tensor(np.linalg.inv(affine), dtype=torch.float32, device=src.device)
+        idx = ras.float() @ inv[:3, :3].T + inv[:3, 3]
+        n = torch.tensor(src.shape[1:], dtype=torch.float32, device=src.device)
+        inside = ((idx > -0.5) & (idx < n - 0.5)).all(-1)
+        g = (2 * idx / (n - 1).clamp_min(1) - 1).flip(-1)       # grid_sample reads (A2, A1, A0) as (x, y, z)
+        f = 0.0 if fill is None else float(fill)
+        out = torch.nn.functional.grid_sample((src.float() - f)[None], g.view(1, 1, 1, -1, 3), mode=mode,
+                                              padding_mode="border" if fill is None else "zeros", align_corners=True)
+        return out.view(src.shape[0], -1) + f, inside
+
+    def resample(self, vol_xyz: np.ndarray, attrs: dict, affine: np.ndarray, shape: tuple[int, int, int],
+                 fill: float = 0.0, mode: str = "bilinear") -> torch.Tensor:
+        """The stored volume on another grid (``shape``; voxel index -> RAS mm by ``affine``), on the device."""
+        ax = [torch.arange(s, dtype=torch.float32, device=self.device) for s in shape]
+        idx = torch.stack(torch.meshgrid(*ax, indexing="ij"), -1).view(-1, 3)
+        a = torch.as_tensor(affine, dtype=torch.float32, device=self.device)
+        src = torch.as_tensor(np.ascontiguousarray(vol_xyz), dtype=torch.float32, device=self.device)[None]
+        out, _ = self.sample(src, self.grid_affine(attrs), idx @ a[:3, :3].T + a[:3, 3], mode=mode, fill=fill)
+        return out.view(*shape)
+
+    def to_token_grid(self, fmap: torch.Tensor, affine: np.ndarray, vol_xyz: np.ndarray, modality: str,
+                      attrs: dict) -> dict:
+        """A model's feature map ``fmap`` (C, A0, A1, A2; voxel index -> RAS mm by ``affine``) sampled at our token
+        centres, so its tokens take the same readouts as ours (``tok_conv``, plane / grid / global PCA): ``tokens``
+        (5120, C) in our (Z, Y, X) order, ``xyz`` as our encoder gives them, ``keep`` = our foreground gate and inside
+        the model's field of view."""
+        from brain.common.grid import GRID_XYZ, PATCH_XYZ
+        from brain.downstream.embed3d import _crop_coords, token_gate
+
+        coords, _ = _crop_coords(self.device, (0, 0, 0), GRID_XYZ, (1.0, 1.0, 1.0), PATCH_XYZ)
+        coords = coords[0]                                     # token centres, mm from the grid corner, (x, y, z)
+        g = torch.as_tensor(self.grid_affine(attrs), dtype=torch.float32, device=self.device)
+        feats, inside = self.sample(fmap, affine, (coords - 0.5) @ g[:3, :3].T + g[:3, 3], fill=None)
+        lo, hi = coords.min(0).values, coords.max(0).values
+        fg = token_gate(torch.as_tensor(np.ascontiguousarray(vol_xyz), dtype=torch.float32, device=self.device),
+                        modality, PATCH_XYZ)
+        return {"tokens": feats.T.cpu(), "xyz": ((coords - lo) / (hi - lo).clamp_min(1e-6)).cpu(),
+                "keep": (fg & inside).cpu()}
+
     @torch.no_grad()
     def encode_volume(self, path: Path, volume_id: str, modality: str, window: str) -> VolumeEmbedding:
         from brain.prep import store

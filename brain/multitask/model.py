@@ -299,7 +299,7 @@ class BrainQuery(nn.Module):
             g = (x.shape[2] // pz, x.shape[3] // py, x.shape[4] // px)
             taps = [F.layer_norm(t, t.shape[-1:]) for t in enc["taps"]]       # pre-norm residual stream -> unit scale
             feats = torch.cat([*taps, enc["tokens"]], -1)                    # (B, N, D * (taps + 1))
-            grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g)
+            grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g).contiguous()   # DDP grad layout
             out["seg"] = self.seg(grid, x, seg_pair[:, 0], z[seg_pair[:, 0], seg_pair[:, 1]])
         return out
 

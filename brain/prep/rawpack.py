@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import multiprocessing
 import os
 import shutil
 import tarfile
@@ -231,7 +232,9 @@ def write_zip(folder: Path, files: list[Path], dest: Path, workers: int = 8) -> 
             batch = nifti[start:start + window]
             yield from zip(batch, ex.map(encode_nifti, [str(p) for p in batch]))
 
-    with zipfile.ZipFile(tmp, "w", allowZip64=True) as zf, ProcessPoolExecutor(max(1, workers)) as ex:
+    # forkserver: forking this (multi-threaded: numpy, zipfile) process can deadlock a worker
+    ctx = multiprocessing.get_context("forkserver")
+    with zipfile.ZipFile(tmp, "w", allowZip64=True) as zf, ProcessPoolExecutor(max(1, workers), mp_context=ctx) as ex:
         for p, enc in encoded(ex):
             rel = p.relative_to(folder).as_posix()
             if enc is None:

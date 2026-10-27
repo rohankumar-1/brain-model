@@ -13,8 +13,9 @@ from collections import defaultdict
 
 import numpy as np
 import torch
-from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
+from sklearn.metrics import r2_score, roc_auc_score
 
+from brain.downstream.metrics import balanced_accuracy
 from brain.eval.skill import skill, summarize
 from brain.multitask.data import prepare
 from brain.multitask.losses import seg_target, slot_losses
@@ -80,7 +81,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             res[f"{task.id}_mae"] = float(np.abs(y - p).mean() * sd)
             skills.append((task.group, skill("r2", res[f"{task.id}_r2"])))
         elif task.type == "multiclass":
-            res[f"{task.id}_bacc"] = float(balanced_accuracy_score(y.astype(int), p.astype(int)))
+            res[f"{task.id}_bacc"] = balanced_accuracy(y.astype(int), p.astype(int))
             skills.append((task.group, skill("bacc", res[f"{task.id}_bacc"], len(task.classes))))
         elif task.type == "segmentation":
             res[f"{task.id}_dice"] = float(p.mean())

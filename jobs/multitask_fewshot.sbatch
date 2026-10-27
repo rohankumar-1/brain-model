@@ -5,6 +5,7 @@
 #   sbatch --export=ALL,CKPT=...,EXTRA_ARGS="--shots 16 64 --tasks cq500_hemorrhage dementia" jobs/multitask_fewshot.sbatch
 
 #SBATCH -p pi_dbertsim
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=mt-fewshot
 #SBATCH -N 1
 #SBATCH --ntasks=1

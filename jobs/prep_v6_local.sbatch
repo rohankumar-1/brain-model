@@ -13,6 +13,7 @@
 # REG_BACKEND=torch registers on the GPU in every worker (brain.prep.registration_torch); use MASK_BATCH=4 with it.
 
 #SBATCH -p pi_dbertsim
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=prep-v6-local
 #SBATCH -N 1
 #SBATCH --ntasks=1

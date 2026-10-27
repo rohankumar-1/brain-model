@@ -8,6 +8,7 @@
 #   EXTRA="--steps 3000" adds evaluator arguments (spaces, no commas: sbatch --export splits on commas).
 
 #SBATCH -p pi_dbertsim
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=eval
 #SBATCH -N 1
 #SBATCH --ntasks=1

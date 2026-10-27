@@ -121,8 +121,10 @@ def draw(pool: pd.DataFrame, k: int, seed: int, kind: str) -> list[str]:
 
 def linear_probe(kind: str, xtr, ytr, xte, yte) -> float | None:
     from sklearn.linear_model import LogisticRegression, RidgeCV
-    from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
+    from sklearn.metrics import r2_score, roc_auc_score
     from sklearn.preprocessing import StandardScaler
+
+    from brain.downstream.metrics import balanced_accuracy
 
     s = StandardScaler().fit(xtr)
     xtr, xte = s.transform(xtr), s.transform(xte)
@@ -133,7 +135,7 @@ def linear_probe(kind: str, xtr, ytr, xte, yte) -> float | None:
     clf = LogisticRegression(C=0.1, max_iter=2000).fit(xtr, ytr.astype(int))
     if kind == "binary":
         return float(roc_auc_score(yte, clf.predict_proba(xte)[:, 1])) if len(np.unique(yte)) == 2 else None
-    return float(balanced_accuracy_score(yte.astype(int), clf.predict(xte)))
+    return balanced_accuracy(yte.astype(int), clf.predict(xte))
 
 
 def main() -> None:

@@ -4,6 +4,14 @@ A fixed split leaves small tasks with a handful of test subjects (VALDO EPVS: 4)
 subject is tested once per repeat: folds are grouped by subject (``dedup_key``: all scans of a person stay together)
 and stratified by the label (regression targets by quantile bin). Inside each fold, a random 15% of the training
 subjects is the validation set (head choice / early stopping), so nothing about the test fold is used to fit or pick.
+A class (multilabel: a label's positives) the random pick left with fewer than two validation subjects gets more of its
+training subjects moved there (``_guard_val``; before 2026-10-27 folds without one fitted every head untuned, e.g. 6 of
+15 CQ500 fracture folds); the other folds' splits are unchanged.
+
+Validation is cross-fitted (benchmark v2): ``val_halves`` splits each fold's validation subjects in two, stratified by
+class, and a head is tuned / early-stopped on one half to score the other (``brain.downstream.heads``), so the reported
+validation score, which picks the readout, never comes from the scans a head was tuned on. (Before, tok_conv
+early-stopped on the scans it was then scored on: its CV validation AUROC ran 0.17 above test, the linear heads' 0.03.)
 
 Scores are computed on the pooled out-of-fold predictions of each repeat; the reported value is the mean over repeats,
 with a bootstrap interval over the pooled predictions of the first repeat and the per-repeat values alongside.
@@ -65,10 +73,70 @@ def strata(task: TaskBundle, bins: int) -> np.ndarray:
     return y.astype(int)
 
 
+def _classes(task: TaskBundle) -> np.ndarray | None:
+    """(N, C) bool: volume i is in class c (multilabel: label c positive); None for regression."""
+    if task.task_type == "regression":
+        return None
+    y = np.asarray(task.y)
+    if y.ndim > 1:
+        return y.reshape(len(y), -1) > 0
+    y = y.astype(int)
+    return y[:, None] == np.unique(y)[None, :]
+
+
+def _guard_val(member: np.ndarray | None, groups: np.ndarray, tr: np.ndarray, val_subj: set,
+               rng: np.random.Generator) -> int:
+    """Give each class at least two validation subjects (one per ``val_halves`` half) by moving training subjects into
+    ``val_subj``, never a class's last training subject. Returns how many subjects moved."""
+    if member is None:
+        return 0
+    moved = 0
+    for c in range(member.shape[1]):
+        pool = np.unique(groups[tr][member[tr, c]])
+        have = len(val_subj.intersection(pool))
+        need = min(2, len(pool) - 1) - have
+        if need <= 0:
+            continue
+        take = rng.choice(np.setdiff1d(pool, list(val_subj)), size=need, replace=False)
+        val_subj.update(take)
+        moved += len(take)
+    return moved
+
+
+def val_halves(task: TaskBundle, volumes: pd.DataFrame | None, splits: dict[str, str], seed: int) -> dict[str, int]:
+    """Validation volume -> half (0 / 1), by subject and stratified: subjects sorted into strata (their class; the
+    rarest positive label for multilabel; the target's quintile for regression) and dealt alternately into the halves,
+    so a class with two validation subjects is in both."""
+    groups = subjects(task, volumes)
+    vids = [str(v) for v in task.volume_ids]
+    member = _classes(task)
+    if member is None:
+        stratum = strata(task, 5)
+    else:
+        rare = np.argsort(member.sum(0))                      # classes from the rarest
+        first = np.full(len(vids), len(rare))
+        for rank, c in enumerate(rare):
+            first = np.where(member[:, c] & (first == len(rare)), rank, first)
+        stratum = first
+    subj_stratum: dict[str, int] = {}
+    for i, v in enumerate(vids):
+        if splits.get(v) == "val":
+            subj_stratum[groups[i]] = min(subj_stratum.get(groups[i], 1 << 30), int(stratum[i]))
+    rng = np.random.default_rng([seed, 7])
+    half, turn = {}, 0
+    for s in sorted(set(subj_stratum.values())):
+        for g in rng.permutation(sorted(k for k, v in subj_stratum.items() if v == s)):
+            half[g], turn = turn, 1 - turn
+    return {v: half[groups[i]] for i, v in enumerate(vids) if splits.get(v) == "val"}
+
+
 def make_folds(task: TaskBundle, volumes: pd.DataFrame | None, k: int = 5, repeats: int = 3,
-               seed: int = 42) -> list[tuple[int, int, dict[str, str]]]:
-    """``(repeat, fold, splits)`` with ``splits`` mapping every task volume to train / val / test."""
+               seed: int = 42, report: dict | None = None) -> list[tuple[int, int, dict[str, str]]]:
+    """``(repeat, fold, splits)`` with ``splits`` mapping every task volume to train / val / test. ``report`` (if
+    given) gets ``val_repaired``: the folds whose validation set ``_guard_val`` topped up."""
     groups, labels = subjects(task, volumes), strata(task, k)
+    member = _classes(task)
+    repaired = 0
     vids = [str(v) for v in task.volume_ids]
     n_sub = len(set(groups))
     counts = np.bincount(labels) if labels.size else np.zeros(0, int)
@@ -80,9 +148,13 @@ def make_folds(task: TaskBundle, volumes: pd.DataFrame | None, k: int = 5, repea
         for f, (tr, te) in enumerate(skf.split(np.zeros(len(vids)), labels, groups)):
             tr_subj = np.unique(groups[tr])
             val_subj = set(rng.choice(tr_subj, size=max(1, int(round(VAL_FRAC * len(tr_subj)))), replace=False))
+            # its own stream, so a repair leaves the later folds' draws (and splits) as they were
+            repaired += _guard_val(member, groups, tr, val_subj, np.random.default_rng([seed, r, f])) > 0
             splits = {vids[i]: "test" for i in te}
             splits.update({vids[i]: ("val" if groups[i] in val_subj else "train") for i in tr})
             out.append((r, f, splits))
+    if report is not None:
+        report["val_repaired"] = int(repaired)
     return out
 
 

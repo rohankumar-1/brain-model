@@ -4,6 +4,7 @@
 #   for s in 0 1; do sbatch -J wmh-$s --export=ALL,SHARD=$s,N_SHARDS=2 jobs/wmh.sbatch; done
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=wmh
 #SBATCH -N 1
 #SBATCH --ntasks=1

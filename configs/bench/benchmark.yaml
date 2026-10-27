@@ -5,7 +5,11 @@
 # configs/bench/models.yaml (brain.downstream.models). Results are compared within a training class, or across classes
 # with each model's label overlap removed (brain.downstream.models.TRAINING_CLASSES: ssl / supervised / specialist /
 # baseline); a model is scored only on the tasks of the modalities it takes.
-version: 1
+# v2 (2026-10-27): cross-validated tasks score validation cross-fitted (brain.downstream.cv.val_halves: a head is tuned /
+# early-stopped on one half of each fold's validation subjects and scored on the other), and every validation set holds
+# each class; v1's CV validation scores were inflated for tok_conv (+0.17 over test), which biased the v1 readout pins.
+# Fixed-split tasks are unchanged. v1 results on CV tasks are a different protocol and are left out of v2 comparisons.
+version: 2
 # the store index the splits come from (sha1 of volumes.csv, 2026-10-26 re-index after the CQ500 DICOM re-conversion);
 # results computed on another index are flagged in the leaderboard
 index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
@@ -15,7 +19,7 @@ reference: BQ-R6
 # trained on: one table, one set of splits for every model
 labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
 # the pinned readout per task (written by python -m brain.bench pin)
-readouts: configs/bench/readouts_v1.yaml
+readouts: configs/bench/readouts_v2.yaml
 
 # transfer: frozen-encoder downstream tasks (brain.downstream.suite) that can tell models apart. Chosen 2026-10-25 from
 #   the results of v3, runs 2-6 and the joint pilot, in skill units (brain.eval.skill): 95% interval narrower than 0.65,

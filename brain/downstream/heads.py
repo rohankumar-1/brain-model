@@ -14,12 +14,13 @@ import torch
 import torch.nn as nn
 from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import mean_absolute_error, roc_auc_score
+from sklearn.metrics import mean_absolute_error
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from brain.common.optim import lr_at
+from brain.downstream.metrics import _safe_auc
 
 DEFAULT_HEADS = "logreg_pool"
 LOGREG_CS = np.logspace(-2, 2, 9)
@@ -66,6 +67,7 @@ class SklearnHead:
     grid_param: str = ""
     grid_higher_better: bool = True
     chosen_: float | None = field(default=None, init=False, repr=False)
+    cross_: tuple | None = field(default=None, init=False, repr=False)   # per val half: the fit tuned on the other
 
     def inputs(self, x: np.ndarray, mask: np.ndarray) -> np.ndarray:
         if self.pool == "mean_max":
@@ -77,37 +79,60 @@ class SklearnHead:
     def _val_score(self, pipe, xv: np.ndarray, yv: np.ndarray) -> float:
         if self.regression:
             return float(mean_absolute_error(yv, pipe.predict(xv)))
-        try:
-            return float(roc_auc_score(yv, _predict_proba(pipe, xv, self.multilabel)))
-        except ValueError:
-            return float("nan")
+        return _safe_auc(yv, _predict_proba(pipe, xv, self.multilabel))
 
-    def fit(self, x, y, mask, x_val=None, y_val=None, mask_val=None, z=None, z_val=None) -> None:
-        xt = self.inputs(x, mask)
-        if self.grid is None or x_val is None or mask_val is None or len(x_val) == 0:
-            self.pipeline.fit(xt, y)
-            return
-        xv = self.inputs(x_val, mask_val)
+    def _pick(self, fitted: list, xv: np.ndarray, yv: np.ndarray) -> tuple[float | None, Any]:
         best, best_p, best_pipe = None, None, None
-        for p in self.grid:
-            pipe = clone(self.pipeline)
-            pipe.set_params(**{self.grid_param: float(p)})
-            pipe.fit(xt, y)
-            s = self._val_score(pipe, xv, y_val)
+        for p, pipe in fitted:
+            s = self._val_score(pipe, xv, yv)
             if not np.isfinite(s):
                 continue
             if best is None or (s > best if self.grid_higher_better else s < best):
-                best, best_p, best_pipe = s, float(p), pipe
-        if best_pipe is None:
+                best, best_p, best_pipe = s, p, pipe
+        return best_p, best_pipe
+
+    def fit(self, x, y, mask, x_val=None, y_val=None, mask_val=None, z=None, z_val=None, val_half=None) -> None:
+        """Fit every grid value on train and keep the best on validation (what predicts test). With ``val_half``
+        (0 / 1 per validation volume) also the best on each half, which ``predict_val`` scores the other half with."""
+        xt = self.inputs(x, mask)
+        self.cross_ = None
+        if self.grid is None or x_val is None or mask_val is None or len(x_val) == 0:
             self.pipeline.fit(xt, y)
             return
+        xv, yv = self.inputs(x_val, mask_val), np.asarray(y_val)
+        fitted = []
+        for p in self.grid:
+            pipe = clone(self.pipeline)
+            pipe.set_params(**{self.grid_param: float(p)})
+            fitted.append((float(p), pipe.fit(xt, y)))
+        best_p, best_pipe = self._pick(fitted, xv, yv)
+        if best_pipe is None:
+            best_pipe = self.pipeline.fit(xt, y)
+        if val_half is not None:
+            h = np.asarray(val_half)
+            self.cross_ = tuple(self._pick(fitted, xv[h != k], yv[h != k])[1] or best_pipe for k in (0, 1))
         self.pipeline, self.chosen_ = best_pipe, best_p
 
-    def predict_scores(self, x, mask, z=None) -> np.ndarray:
-        zt = self.inputs(x, mask)
+    def _scores(self, pipe, zt: np.ndarray) -> np.ndarray:
         if self.regression:
-            return np.asarray(self.pipeline.predict(zt), dtype=np.float64).ravel()
-        return _predict_proba(self.pipeline, zt, self.multilabel)
+            return np.asarray(pipe.predict(zt), dtype=np.float64).ravel()
+        return _predict_proba(pipe, zt, self.multilabel)
+
+    def predict_scores(self, x, mask, z=None) -> np.ndarray:
+        return self._scores(self.pipeline, self.inputs(x, mask))
+
+    def predict_val(self, x, mask, val_half, z=None) -> np.ndarray:
+        """Validation scores none of which comes from a fit tuned on that volume (``fit`` with ``val_half``)."""
+        if self.cross_ is None:
+            return self.predict_scores(x, mask, z)
+        zt, h = self.inputs(x, mask), np.asarray(val_half)
+        out = None
+        for k, pipe in enumerate(self.cross_):
+            if (h == k).any():
+                s = self._scores(pipe, zt[h == k])
+                out = np.zeros((len(h), *s.shape[1:]), dtype=np.float64) if out is None else out
+                out[h == k] = s
+        return out
 
 
 def make_logreg_pool(multilabel: bool, seed: int) -> SklearnHead:
@@ -124,7 +149,7 @@ def make_logreg_pool(multilabel: bool, seed: int) -> SklearnHead:
 
 def make_ridge() -> SklearnHead:
     return SklearnHead(
-        "ridge", _pipe(Ridge()), "mean_max", regression=True,
+        "ridge", _pipe(Ridge(solver="svd")), "mean_max", regression=True,
         grid=RIDGE_ALPHAS, grid_param="model__alpha", grid_higher_better=False,
     )
 
@@ -173,6 +198,7 @@ class AttnEnsemble:
         self.epochs, self.patience, self.lr, self.bs = epochs, patience, lr, batch_size
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.models: list[nn.Module] = []
+        self.stop_half_: list[int] | None = None
 
     def _host_tokens(self, n_tok: int) -> bool:
         """32^3 grids are too large to pin in GPU memory; only minibatches move over."""
@@ -243,7 +269,9 @@ class AttnEnsemble:
         model.load_state_dict(best_state)
         return model.eval()
 
-    def fit(self, x, y, mask, x_val, y_val, mask_val, z=None, z_val=None) -> None:
+    def fit(self, x, y, mask, x_val, y_val, mask_val, z=None, z_val=None, val_half=None) -> None:
+        """``n_seeds`` probes early-stopped on validation; with ``val_half`` (0 / 1 per validation volume) seed i
+        stops on half i % 2 only, so ``predict_val`` can score each half with the seeds that never saw it."""
         y, y_val = (np.asarray(a, dtype=np.float32).reshape(len(a), -1) for a in (y, y_val))
         host = torch.device("cpu") if self._host_tokens(x.shape[1]) else self.device
         data = (
@@ -252,18 +280,40 @@ class AttnEnsemble:
             self._t(x_val, torch.float16 if self.half else torch.float32, device=host), self._t(y_val, device=host),
             self._t(mask_val, torch.bool, device=host), self._z(z_val, len(x_val), x_val.shape[1], device=host),
         )
-        self.models = [self._fit_one(self.seed + i, *data) for i in range(self.n_seeds)]
+        self.stop_half_ = None
+        h = None if val_half is None else np.asarray(val_half)
+        if h is None or self.n_seeds < 2 or len(np.unique(h)) < 2:
+            self.models = [self._fit_one(self.seed + i, *data) for i in range(self.n_seeds)]
+            return
+        self.stop_half_ = [i % 2 for i in range(self.n_seeds)]
+        sel = [torch.as_tensor(h == k, device=data[4].device) for k in (0, 1)]
+        self.models = [self._fit_one(self.seed + i, *data[:4], *(t[sel[k]] for t in data[4:]))
+                       for i, k in enumerate(self.stop_half_)]
 
     @torch.no_grad()
-    def predict_scores(self, x, mask, z=None) -> np.ndarray:
+    def _all_logits(self, x, mask, z) -> torch.Tensor:
+        """(models, N, out) logits."""
         host = torch.device("cpu") if self._host_tokens(x.shape[1]) else self.device
         xt = self._t(x, torch.float16 if self.half else torch.float32, device=host)
         mt = self._t(mask, torch.bool, device=host)
         zt = self._z(z, len(x), x.shape[1], device=host)
-        logits = torch.stack([self._logits(m, xt, mt, zt) for m in self.models]).mean(0)
-        p = logits if self.regression else logits.sigmoid()
-        p = p.cpu().numpy()
+        return torch.stack([self._logits(m, xt, mt, zt) for m in self.models])
+
+    def _to_scores(self, logits: torch.Tensor) -> np.ndarray:
+        p = (logits if self.regression else logits.sigmoid()).cpu().numpy()
         return p.ravel() if self.regression or (not self.multilabel and p.shape[1] == 1) else p
+
+    def predict_scores(self, x, mask, z=None) -> np.ndarray:
+        return self._to_scores(self._all_logits(x, mask, z).mean(0))
+
+    def predict_val(self, x, mask, val_half, z=None) -> np.ndarray:
+        """Each validation volume scored by the seeds that early-stopped on the other half."""
+        if self.stop_half_ is None:
+            return self.predict_scores(x, mask, z)
+        lg, h = self._all_logits(x, mask, z), torch.as_tensor(np.asarray(val_half))
+        own = torch.as_tensor(self.stop_half_)
+        w = (own[:, None] != h[None, :]).to(lg.dtype).to(lg.device)               # (models, N): seeds blind to it
+        return self._to_scores((lg * w[..., None]).sum(0) / w.sum(0)[:, None])
 
 
 def build_heads(*, latent_dim: int, n_out: int, multilabel: bool, seed: int, which: list[str],

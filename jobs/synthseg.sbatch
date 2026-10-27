@@ -6,6 +6,7 @@
 #   N_SHARDS=1 EXTRA_ARGS="--redo-families fomo_infant" sbatch --export=ALL jobs/synthseg.sbatch      # re-prepped family
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=synthseg
 #SBATCH -N 1
 #SBATCH --ntasks=1

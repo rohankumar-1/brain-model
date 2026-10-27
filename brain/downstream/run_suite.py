@@ -81,14 +81,24 @@ def require_stores(task: TaskBundle, slices_root: Path) -> None:
     print(f"[data] {len(task.volume_ids)} volumes on disk")
 
 
-def fit_and_score(head, task: TaskBundle, packs: dict) -> tuple[dict, np.ndarray]:
+def val_scores(head, va: dict, halves: dict[str, int] | None) -> np.ndarray:
+    """The head's validation scores: cross-fitted (each half scored by fits tuned on the other) given ``halves``."""
+    if halves is None or not hasattr(head, "predict_val"):
+        return head.predict_scores(va["mus"], va["mask"], z=va.get("z"))
+    return head.predict_val(va["mus"], va["mask"], [halves[str(v)] for v in va["volume_ids"]], z=va.get("z"))
+
+
+def fit_and_score(head, task: TaskBundle, packs: dict,
+                  halves: dict[str, int] | None = None) -> tuple[dict, np.ndarray]:
+    """Fit on train (tuned / early-stopped on val), score test. ``halves`` (validation volume -> 0 / 1): cross-fit."""
     tr, va, te = packs["train"], packs["val"], packs["test"]
+    kw = {} if halves is None else {"val_half": [halves[str(v)] for v in va["volume_ids"]]}
     head.fit(tr["mus"], tr["y"], tr["mask"], va["mus"], va["y"], va["mask"],
-             z=tr.get("z"), z_val=va.get("z"))
+             z=tr.get("z"), z_val=va.get("z"), **kw)
     scores = head.predict_scores(te["mus"], te["mask"], z=te.get("z"))
     metrics = score(task, te["y"], scores)
     if len(va["volume_ids"]):                        # val numbers let a report pick heads without peeking at test
-        metrics["val"] = score(task, va["y"], head.predict_scores(va["mus"], va["mask"], z=va.get("z")))
+        metrics["val"] = score(task, va["y"], val_scores(head, va, halves))
     key = HEADLINE[task.task_type]
     y = te["y"]
     lo, hi = bootstrap_ci(lambda i: score(task, y[i], scores[i]).get(key, float("nan")), len(y))
@@ -239,10 +249,12 @@ def main() -> None:
         split_sizes = {f"n_{s}": len(p["volume_ids"]) for s, p in packs.items()}
         cv_info = None
     else:
-        folds = cv.make_folds(task, volumes, args.cv_folds, args.cv_repeats, args.seed)
+        fold_info: dict = {}
+        folds = cv.make_folds(task, volumes, args.cv_folds, args.cv_repeats, args.seed, report=fold_info)
         n_folds = len({f for _, f, _ in folds})
         print(f"[cv] {len(np.unique(cv.subjects(task, volumes)))} subjects, {n_folds} folds x "
-              f"{args.cv_repeats} repeats (pretrain overlap {overlap})")
+              f"{args.cv_repeats} repeats (pretrain overlap {overlap}; validation completed in "
+              f"{fold_info['val_repaired']} folds)")
         preds: dict[str, list] = {}
         vals: dict[str, list] = {}
         views_of: dict[str, str] = {}
@@ -250,14 +262,14 @@ def main() -> None:
         for r, f, splits in folds:
             task_f = replace(task, splits=splits)
             packs_f = split_xy(task_f, emb)
+            halves = cv.val_halves(task, volumes, splits, args.seed + 1000 * r + f)
             for view_name, view_packs, heads in head_sets_for(task_f, packs_f):
                 for head in heads:
-                    m, scores = fit_and_score(head, task_f, view_packs)
+                    m, scores = fit_and_score(head, task_f, view_packs, halves)
                     preds.setdefault(head.name, []).append((r, view_packs["test"]["volume_ids"], scores))
                     va = view_packs["val"]
-                    if len(va["volume_ids"]):          # val predictions, pooled over folds to choose heads stably
-                        vals.setdefault(head.name, []).append(
-                            (va["y"], head.predict_scores(va["mus"], va["mask"], z=va.get("z"))))
+                    if len(va["volume_ids"]):          # cross-fitted val predictions, pooled over folds
+                        vals.setdefault(head.name, []).append((va["y"], val_scores(head, va, halves)))
                     sizes.setdefault(head.name, []).append((m["n_train"], m["n_val"]))
                     views_of[head.name] = view_name
             print(f"[cv] repeat {r + 1} fold {f + 1}/{n_folds} done")
@@ -279,7 +291,7 @@ def main() -> None:
             n_tr = [a for a, _ in sizes[name]]
             metrics.update(head=name, view=views_of[name], n_train=int(np.mean(n_tr)),
                            n_val=int(np.mean([b for _, b in sizes[name]])), n_test=len(ids0),
-                           cv={"folds": n_folds, "repeats": args.cv_repeats})
+                           cv={"folds": n_folds, "repeats": args.cv_repeats, "val": "cross_fitted", **fold_info})
             save_head_result(run_dir, name, metrics, y_true=y0, y_score=s0, volume_ids=ids0,
                              repeats=[reps[r] for r in sorted(reps) if r != min(reps)])
             all_metrics[name] = metrics
@@ -288,7 +300,8 @@ def main() -> None:
             print(f"  {name}: " + headline(task, metrics) + f"  (repeats {[round(x, 3) for x in metrics[f'{key}_repeats']]})")
         split_sizes = {"n_train": int(np.mean([m["n_train"] for m in all_metrics.values()])),
                        "n_test": len(task.volume_ids)}
-        cv_info = {"folds": n_folds, "repeats": args.cv_repeats, "val_frac": cv.VAL_FRAC, "grouped_by": "dedup_key"}
+        cv_info = {"folds": n_folds, "repeats": args.cv_repeats, "val_frac": cv.VAL_FRAC, "grouped_by": "dedup_key",
+                   "val": "cross_fitted", **fold_info}
     print_head_table(task.name, task.task_type, scored)
     config = {"task": task.name, "task_type": task.task_type, "label_names": task.label_names,
               "regions": {k: list(v) for k, v in task.regions.items()}, "model": args.model,

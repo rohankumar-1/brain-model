@@ -15,3 +15,4 @@ results/
 # LaTeX build products (docs/Makefile writes aux files here)
 docs/build/
 notebooks/inspect_out/
+weights

@@ -23,9 +23,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
+from sklearn.metrics import r2_score, roc_auc_score
 
 from brain.common.paths import resolve
+from brain.downstream.metrics import balanced_accuracy
 from brain.multitask.data import checkpoint_stats, load_labels, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.fewshot import _loader, linear_probe, load_model
@@ -43,7 +44,7 @@ def score(kind: str, y: np.ndarray, p: np.ndarray) -> float:
     if kind == "regression":
         return float(r2_score(y, p))
     if kind == "multiclass":
-        return float(balanced_accuracy_score(y.astype(int), p.astype(int)))
+        return balanced_accuracy(y.astype(int), p.astype(int))
     return float(np.mean(p))                                          # segmentation rows hold per-scan Dice
 
 

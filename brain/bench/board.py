@@ -20,6 +20,13 @@ CLASS_ORDER = {"specialist": 0, "supervised": 1, "ssl": 2, "baseline": 3}
 OUT = REPO_ROOT / "runs" / "bench"
 
 
+def current_results(t: pd.DataFrame, b) -> pd.Series:
+    """Rows computed under this benchmark version: on its store index and, for cross-validated tasks, with
+    cross-fitted validation (v2; v1 CV results are left out and counted as stale)."""
+    ok = t.index_sha1 == b.index_sha1 if b.index_sha1 else pd.Series(True, index=t.index)
+    return ok & (t.cv != "cv") if b.version >= 2 else ok
+
+
 def discover(t: pd.DataFrame, tasks: list[str], min_tasks: int = 5) -> list[str]:
     """Models with results on at least ``min_tasks`` benchmark tasks: their checkpoint path, or registry name."""
     from brain.downstream import db
@@ -61,7 +68,7 @@ def pairs(model, ref, b, t: pd.DataFrame, heads: dict, tasks: list[str]) -> tupl
             notes.append({"task": task, "why": "no result for " + ("model" if a is None else "reference")})
             continue
         if a.cv != r.cv:
-            notes.append({"task": task, "why": "protocols differ (CV vs fixed split)"})
+            notes.append({"task": task, "why": f"protocols differ ({a.cv or 'fixed'} vs {r.cv or 'fixed'})"})
             continue
         pa, pr = _suite_preds(a), _suite_preds(r)
         if pa is None or pr is None:
@@ -86,7 +93,7 @@ def board(models: list[str] | None = None, ref: str | None = None, with_seg: boo
     tasks = b.tasks + (b.seg_tasks if with_seg else [])
     t_all = suite_heads()
     t_all = t_all[t_all.task.isin(tasks)]
-    current = t_all.index_sha1 == b.index_sha1 if b.index_sha1 else pd.Series(True, index=t_all.index)
+    current = current_results(t_all, b)
     t = t_all[current]
     heads = b.readouts() or fixed_heads(t)
     refm = resolve_model(ref or b.reference)
@@ -118,13 +125,47 @@ def board(models: list[str] | None = None, ref: str | None = None, with_seg: boo
     stem = out / f"board_v{b.version}"
     tab.to_csv(stem.with_suffix(".csv"), index=False)
     if per_task:
-        pd.concat(per_task, ignore_index=True).to_csv(stem.with_name(stem.name + "_tasks.csv"), index=False)
+        per = pd.concat(per_task, ignore_index=True)
+        per.to_csv(stem.with_name(stem.name + "_tasks.csv"), index=False)
+        wide, md = render_tasks(per, tab, b)
+        wide.to_csv(stem.with_name(stem.name + "_all_tasks.csv"))
+        stem.with_name(stem.name + "_all_tasks.md").write_text(md)
     if notes:
         pd.DataFrame(notes).to_csv(stem.with_name(stem.name + "_left_out.csv"), index=False)
     stem.with_suffix(".md").write_text(render(tab, refm, b))
     print(render(tab, refm, b))
-    print(f"[board] -> {stem}.md / .csv / _tasks.csv" + (" / _left_out.csv" if notes else ""))
+    print(f"[board] -> {stem}.md / .csv / _tasks.csv / _all_tasks.md" + (" / _left_out.csv" if notes else ""))
     return tab
+
+
+def render_tasks(per: pd.DataFrame, tab: pd.DataFrame, b) -> tuple[pd.DataFrame, str]:
+    """Every task x every model: the skill each model gets on it (paired scans with the reference, its readout), per
+    modality in the leaderboard's model order, the best per task in bold. Returns the wide table and its markdown."""
+    order = {(m, mod): i for i, (m, mod) in enumerate(zip(tab.model, tab.modality))}
+    rank = {t: i for i, t in enumerate(b.tasks)}
+    lines = [f"# Benchmark v{b.version}: every task", "",
+             "Skill per task (0 = chance, 1 = perfect) on the scans each model shares with the reference; the "
+             "headline row is the leaderboard's (mean over groups of the mean over tasks). Readout: the pinned head "
+             "(a model without it uses its own best on validation). Bold: the best on the task. -: not scored "
+             "(another modality, labels seen in training, or no result yet).", ""]
+    wides = []
+    for mod, g in per.groupby("modality", sort=True):
+        models = sorted(g.model.unique(), key=lambda m: order.get((m, mod), 1e9))
+        w = g.pivot_table(index=["group", "task"], columns="model", values="run", aggfunc="last")[models]
+        w = w.reindex(sorted(w.index, key=lambda gt: rank.get(gt[1], 1e9)))
+        info = g.groupby("task").agg(metric=("metric", "first"), n=("n", "max"),
+                                     head=("head", lambda h: h.mode().iat[0]))
+        lines += [f"## {mod.upper()}", "", "| Group | Task | Metric | Readout | n | " + " | ".join(models) + " |",
+                  "|---|---|---|---|---:|" + "---:|" * len(models)]
+        for (grp, task), row in w.iterrows():
+            best = row.max()
+            cells = ["-" if not np.isfinite(v) else (f"**{v:.3f}**" if v == best else f"{v:.3f}") for v in row]
+            i = info.loc[task]
+            lines.append(f"| {grp} | {task} | {i.metric} | {i['head']} | {int(i.n)} | " + " | ".join(cells) + " |")
+        head = tab[tab.modality == mod].set_index("model").skill
+        lines += ["| | **headline** | | | | " + " | ".join(f"{head.get(m, np.nan):.3f}" for m in models) + " |", ""]
+        wides.append(w.assign(modality=mod).set_index("modality", append=True))
+    return pd.concat(wides), "\n".join(lines)
 
 
 def render(tab: pd.DataFrame, ref, b) -> str:
@@ -147,7 +188,8 @@ def render(tab: pd.DataFrame, ref, b) -> str:
                          f"{r.stale_results} |")
         lines.append("")
     lines += ["`*`: the interval excludes 0. Left out: tasks dropped for that model (seen labels, missing results, "
-              "protocol mismatch; see `_left_out.csv`). Stale: results on another store index, not used. "
+              "protocol mismatch; see `_left_out.csv`). Stale: results on another store index, or cross-validated "
+              "without cross-fitted validation (before v2), not used. "
               "(partial): results missing on some of its tasks, so its numbers are not yet comparable.", ""]
     return "\n".join(lines)
 
@@ -169,7 +211,7 @@ def pin(models: list[str] | None = None) -> dict[str, str]:
         raise SystemExit("the spec has no readouts file")
     t = suite_heads()
     t = t[t.task.isin(b.tasks + b.seg_tasks)]
-    t = t[t.index_sha1 == b.index_sha1] if b.index_sha1 else t
+    t = t[current_results(t, b)]
     refs = [resolve_model(x) for x in (models or discover(t, b.tasks))]
     complete = []
     for m in refs:

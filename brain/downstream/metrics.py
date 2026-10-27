@@ -28,6 +28,15 @@ def _safe_auc(y_true: np.ndarray, y_score: np.ndarray, **kwargs: Any) -> float:
         return float("nan")
 
 
+def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean recall over the classes present in ``y_true``: sklearn's ``balanced_accuracy_score``, without its warning
+    when a prediction names a class absent from ``y_true`` (a small test set of a multiclass task)."""
+    y_true, y_pred = np.asarray(y_true).ravel(), np.asarray(y_pred).ravel()
+    if not len(y_true):
+        return float("nan")
+    return float(np.mean([(y_pred[y_true == c] == c).mean() for c in np.unique(y_true)]))
+
+
 def binary_metrics(y_true: np.ndarray, y_score: np.ndarray, threshold: float = 0.5) -> dict:
     y_true = np.asarray(y_true).astype(int).ravel()
     y_score = np.asarray(y_score).astype(float).ravel()
@@ -95,7 +104,7 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     return {
         "task_type": "regression",
         "mae": float(mean_absolute_error(yt, yp)),
-        "r2": float(r2_score(yt, yp)),
+        "r2": float(r2_score(yt, yp)) if len(yt) >= 2 else float("nan"),
         "pearson": corr,
         "n": int(len(yt)),
     }

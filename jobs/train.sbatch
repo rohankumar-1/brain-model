@@ -8,6 +8,7 @@
 # METHOD: lejepa3d | mae3d | multitask | joint. NO_RESUME=1 starts fresh. EXPECT_GPUS aborts if the allocation differs.
 
 #SBATCH -p mit_normal_gpu
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=train
 #SBATCH -N 1
 #SBATCH -c 8

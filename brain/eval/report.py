@@ -228,6 +228,16 @@ def heads_pairs(preds: pd.DataFrame, run: str, ref: str, tasks: set[str]) -> lis
     return out
 
 
+def cv_protocol(protocol: str | None) -> str:
+    """'' for a fixed split; 'cv-xf' for cross-validation with cross-fitted validation (benchmark v2: a head's
+    validation score never comes from the scans it was tuned on); 'cv' for the earlier CV, whose validation scores
+    were not cross-fitted (and on some tasks had folds without a class)."""
+    c = (json.loads(protocol) if isinstance(protocol, str) and protocol else {}).get("cv")
+    if not c:
+        return ""
+    return "cv-xf" if isinstance(c, dict) and c.get("val") == "cross_fitted" else "cv"
+
+
 @lru_cache(maxsize=1)
 def suite_heads() -> pd.DataFrame:
     """Every (model, task, head) of the frozen suite with its val / test score, protocol and prediction file."""
@@ -243,7 +253,7 @@ def suite_heads() -> pd.DataFrame:
     # segmentation heads store per-volume Dice (``<head>_volumes``), the others per-scan predictions (``<head>``)
     t["pred"] = [(json.loads(a).get(h) or json.loads(a).get(f"{h}_volumes")) if isinstance(a, str) and a else None
                  for a, h in zip(t.artifacts, t["head"])]
-    t["cv"] = [bool((json.loads(p) if isinstance(p, str) and p else {}).get("cv")) for p in t.protocol]
+    t["cv"] = [cv_protocol(p) for p in t.protocol]
     t["encoder"] = ~t["head"].astype(str).str.startswith(SUPERVISED_READOUTS)
     return t
 
@@ -309,7 +319,8 @@ def transfer_pairs(run_ck: Path, ref_ck: Path, groups: dict[str, list[str]], see
                 notes.append({"task": task, "why": "no result for " + ("run" if picked[0] is None else "ref")})
                 continue
             if picked[0].cv != picked[1].cv:
-                notes.append({"task": task, "why": "protocols differ (CV vs fixed split)"})
+                pa, pb = picked[0].cv or "fixed", picked[1].cv or "fixed"
+                notes.append({"task": task, "why": f"protocols differ ({pa} vs {pb})"})
                 continue
             a, b = _suite_preds(picked[0]), _suite_preds(picked[1])
             if a is None or b is None:

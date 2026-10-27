@@ -94,3 +94,18 @@ if __name__ == "__main__":
         if k.startswith("test_") and callable(v):
             v()
             print("ok", k)
+
+
+def test_cross_fitted_validation_scores_each_half_with_seeds_blind_to_it():
+    """With ``val_half``, seed i early-stops on half i % 2, and a validation volume is scored only by the seeds that
+    stopped on the other half; test scores still average every seed."""
+    x, y, m, z = _data(24)
+    xv, yv, mv, zv = _data(8, seed=1)
+    half = np.array([0, 1] * 4)
+    h = AttnEnsemble(16, 1, False, 0, n_seeds=3, epochs=2, patience=1, model_factory=lambda: ConvProbe(16, 1))
+    h.fit(x, y, m, xv, yv, mv, z=z, z_val=zv, val_half=half)
+    assert h.stop_half_ == [0, 1, 0]
+    lg = h._all_logits(xv, mv, zv)                              # (3, 8, 1)
+    want = torch.where(torch.as_tensor(half == 0)[:, None], lg[1], (lg[0] + lg[2]) / 2).sigmoid().numpy().ravel()
+    assert np.allclose(h.predict_val(xv, mv, half, z=zv), want, atol=1e-6)
+    assert np.allclose(h.predict_scores(xv, mv, z=zv), lg.mean(0).sigmoid().numpy().ravel(), atol=1e-6)

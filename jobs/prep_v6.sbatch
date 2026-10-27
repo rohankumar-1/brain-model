@@ -15,6 +15,7 @@
 # 12 CPUs + 1 L40S + 96 GB per task: pi_dbertsim allows at most 12 CPUs per GPU (48 CPUs, 4 GPUs per node).
 
 #SBATCH -p pi_dbertsim,mit_preemptable
+#SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
 #SBATCH --job-name=prep-v6
 #SBATCH -N 1
 #SBATCH --ntasks=1

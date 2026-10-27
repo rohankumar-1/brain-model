@@ -14,8 +14,12 @@ import sys
 
 from brain.common.paths import REPO_ROOT
 
-# the suite jobs: an L40S on either GPU partition (node3006 has a broken CUDA install)
+# the suite jobs: an L40S on either GPU partition (node3006 has a broken CUDA install); mit_normal_gpu caps jobs at 6 h
 SBATCH_GPU = ["-p", "pi_dbertsim,mit_normal_gpu", "--gres=gpu:l40s:1", "--exclude=node3006"]
+
+
+def sbatch_gpu(hours: int) -> list[str]:
+    return SBATCH_GPU if hours <= 6 else ["-p", "pi_dbertsim", *SBATCH_GPU[2:]]
 HEADS_DIR = REPO_ROOT / "runs" / "bench" / "heads"
 
 
@@ -65,11 +69,13 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
     dep = [f"--dependency={dependency}", "--kill-on-invalid-dep=no"] if dependency else []
     if submit:
         jobs = []
+        # the jobs run this checkout's code (jobs/_env.sh defaults to the main checkout)
+        base_env = {**os.environ, "BRAIN_REPO": str(REPO_ROOT)}
         if todo:
             hours = min(24, 1 + len(todo) // 3 + (3 * sum(t in b.seg_tasks for t in todo)) + 2 * ("probe3d" in todo))
-            env = {**os.environ, "CKPT": model, "SUITE_TASKS": " ".join(todo), "EXTRA": " ".join(extra or [])}
+            env = {**base_env, "CKPT": model, "SUITE_TASKS": " ".join(todo), "EXTRA": " ".join(extra or [])}
             cmd = ["sbatch", "--parsable", "--export=ALL", "-t", f"{hours:02d}:00:00",
-                   "-J", f"bench-{ref_model.cache_key[:20]}", *SBATCH_GPU, *dep,
+                   "-J", f"bench-{ref_model.cache_key[:20]}", *sbatch_gpu(hours), *dep,
                    str(REPO_ROOT / "jobs" / "eval_run.sbatch")]
             jobs.append(("suite", subprocess.run(cmd, env=env, cwd=REPO_ROOT, check=True, capture_output=True,
                                                  text=True).stdout.strip()))
@@ -77,7 +83,7 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
             wrap = "source jobs/_env.sh; " + " ".join(f'"{a}"' if " " in a else a for a in argv)
             cmd = ["sbatch", "--parsable", "-c", "12", "--mem=96G", "-t", "03:00:00", "-J", f"bench-{name}",
                    "-o", str(REPO_ROOT / "logs" / f"bench_{name}_%j.out"), *SBATCH_GPU, *dep, "--wrap", wrap]
-            jobs.append((name, subprocess.run(cmd, cwd=REPO_ROOT, check=True, capture_output=True,
+            jobs.append((name, subprocess.run(cmd, env=base_env, cwd=REPO_ROOT, check=True, capture_output=True,
                                               text=True).stdout.strip()))
         print("[bench] submitted " + ", ".join(f"{n} {j}" for n, j in jobs) + "; then: python -m brain.bench card "
               f"--model {model}")
