@@ -107,7 +107,7 @@ All of these configs are in `configs/archive/` (they use options retired on 2026
 
 ## Evaluation
 
-### The run report (`brain/eval/`, `configs/eval/core.yaml`)
+### The run report (`brain/eval/`, `configs/bench/benchmark.yaml`)
 
 One report per run against a reference run: `jobs/submit_report.sh RUN_CKPT REF_CKPT` runs the three evaluations and
 then `python -m brain.eval.report RUN --ref REF`, which writes `runs/eval/<run>/report.md` (three headline numbers,
@@ -116,14 +116,15 @@ then group scores) and `report_tasks.csv` (per task).
 | Headline | Question | Source |
 |---|---|---|
 | In-domain | Does it do the trained tasks? | Its heads on the test splits (`test_eval`), paired with the reference |
-| Transfer | Is the encoder a good foundation? | Frozen suite on the core tasks (`core.yaml`: 21 tasks in 5 groups) |
+| Transfer | Is the encoder a good foundation? | Frozen suite on the benchmark tasks (`benchmark.yaml`: 22 tasks in 5 groups) |
 | Adaptation | Can it learn a new task from few labels? | Few-shot on the held-out tasks at k = 64 |
 
 Every metric is on one skill scale (`brain/eval/skill.py`): 0 = chance, 1 = perfect (AUROC `(auc - 0.5) / 0.5`,
 balanced accuracy rescaled from chance, R2 clipped at 0, Dice as is). A headline is the mean over groups of the mean
 over tasks, on tasks both models have, so a group with many tasks counts once; its interval combines the per-task
 intervals assuming independence (approximate). The core transfer set keeps tasks that can tell runs apart (rule in
-`core.yaml`); the rest of the suite still runs on request and lands in the per-task CSV.
+`benchmark.yaml`); the rest of the suite still runs on request and lands in the per-task CSV. In-domain skips tasks
+with fewer than 20 test scans (the SynthSeg tasks have ~4). Comparisons with published models: `docs/benchmark.md`.
 
 Validation during training uses the same skill scale: `run_eval` logs `val_score` (and `val_group_<g>`), and
 `train.best_metric: score` (the multitask and joint default) keeps the checkpoint with the highest score rather than
@@ -133,9 +134,8 @@ asked all of a scan's tasks in one query, so slots attended to each other and va
 
 ### Individual evaluations
 
-- Frozen suite: as for any encoder, plus global views for multitask checkpoints (`brain/multitask/slots.py`):
-  `slots` (every trained task asked on its own, slot vectors concatenated), `taskout` (the model's own answers) and,
-  with a general slot, `general` (its pre-projector embedding).
+- Frozen suite: as for any encoder (its CLS and patch tokens; the model's own task outputs are in-domain, not
+  transfer, and are scored by `test_eval`).
 - Few-shot and transfer: `jobs/multitask_fewshot.sbatch CKPT=...` (`brain/multitask/fewshot.py`). Held-out tasks fit
   their embedding row on k = 16 / 64 / 256 training scans, against a linear probe on the frozen pooled embedding;
   trained tasks are asked directly on unseen cohorts (age on OASIS / IXI / MS3SEG, whole tumour on MSD).

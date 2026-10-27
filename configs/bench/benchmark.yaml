@@ -1,12 +1,27 @@
-# The run report (python -m brain.eval.report): which tasks make up each headline number.
+# The benchmark: one fixed, versioned protocol every model is scored on (python -m brain.bench; the per-run report
+# python -m brain.eval.report reads the same file).
 #
-# transfer: frozen-encoder downstream tasks (brain.downstream.suite) that can tell runs apart. Chosen 2026-10-25 from
+# Any model the suite can encode with is eligible: our checkpoints, and the published encoders and baselines of
+# configs/bench/models.yaml (brain.downstream.models). Results are compared within a training class, or across classes
+# with each model's label overlap removed (brain.downstream.models.TRAINING_CLASSES: ssl / supervised / specialist /
+# baseline); a model is scored only on the tasks of the modalities it takes.
+version: 1
+# the store index the splits come from (sha1 of volumes.csv, 2026-10-26 re-index after the CQ500 DICOM re-conversion);
+# results computed on another index are flagged in the leaderboard
+index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
+# the model every other one is paired against (a checkpoint or a models.yaml name)
+reference: runs/multitask/v7nosmall_s42/best.pt
+
+# transfer: frozen-encoder downstream tasks (brain.downstream.suite) that can tell models apart. Chosen 2026-10-25 from
 #   the results of v3, runs 2-6 and the joint pilot, in skill units (brain.eval.skill): 95% interval narrower than 0.65,
 #   best model >= 0.15 (learnable from these scans), not saturated (best >= 0.93 with spread < 0.02 across models).
 #   Out by that rule: abide_ados, isles24_nihss(_discharge), piop1/2_age, id1000_age (no model above 0.15);
 #   oasis2_conversion, cq500_chronic_bleed, gli_idh, gli_lgg, gli_survival_12m (intervals 0.66-1.5: too few scans);
 #   atlas_lesion_side, oasis1_age (saturated). They still run in the full suite and land in the per-task CSV.
-# segmentation transfer is costly (decoder training, large caches): only with --with-seg, at milestones.
+#   One readout per task for every model: the head with the best mean validation score over the evaluated models
+#   (brain.eval.report.fixed_heads), never chosen on test.
+# segmentation transfer is costly (decoder training, large caches): only with --with-seg, at milestones, and for our
+# 3D encoders only (brain.downstream.seg3d reads their token grids).
 transfer:
   # CQ500 re-converted from the original DICOM on 2026-10-26 (one plain soft-tissue series per study): the image side
   # of a one-sided bleed matches the reads in 89% of 87 studies (runs/diagnostics/cq500_side_verify.py)
@@ -15,22 +30,30 @@ transfer:
   neuro_psych: [oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd]
   age: [ixi_age, pixar_age, ms3seg_age]
   lesion_tumor: [msd, ms3seg_lesion_load, valdo_epvs]
+transfer_seg:
+  segmentation: [brats2023_gli, brats2023_men, wmh, atlas]
+
+# the scans each task is on (the task loaders' modality): a model is scored on the tasks of the modalities it takes
+modality:
+  ct: [rsna_ich, cq500, cq500_edh, cq500_other_fracture, cq500_bleed_side, aisd_remote_infarct, isles24_lvo_side,
+       isles24_mrs, isles24_mrs_discharge]
+  mri: [atlas_lesion_volume, atlas_days_post_stroke, oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd,
+        ixi_age, pixar_age, ms3seg_age, msd, ms3seg_lesion_load, valdo_epvs, brats2023_gli, brats2023_men, wmh, atlas]
 
 # a downstream task whose labels a model trained on (same cohort, registry task listed here) is in-domain for it, not
-# transfer: left out of comparisons involving that model
+# transfer: left out of comparisons involving that model. Registry models list theirs in models.yaml (seen_tasks).
 seen:
   oasis1_mmse: [mmse]
   oasis2_mmse: [mmse]
   dementia: [mmse]          # held-out few-shot task built from OASIS-1 CDR: not held out for runs that trained MMSE
-transfer_seg:
-  segmentation: [brats2023_gli, brats2023_men, wmh, atlas]
 
 # adaptation: few-shot on the held-out tasks (brain.multitask.fewshot), task embedding fitted on k labelled scans.
+# Multitask / joint checkpoints only (the run report).
 adaptation:
   k: 64
 
 # in_domain: the model's own heads on the trained tasks' test splits (brain.multitask.test_eval), grouped by the
-#   registry's task groups; scored on the tasks both the run and the reference trained.
+#   registry's task groups; scored on the tasks both the run and the reference trained (the run report).
 in_domain:
   max_test: 400
   max_seg: 100

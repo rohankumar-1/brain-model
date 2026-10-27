@@ -1,0 +1,33 @@
+# Models the benchmark can evaluate besides our own checkpoints (python -m brain.bench run --model <name>).
+#
+# An entry:
+#   adapter:            module:Class, a brain.downstream.models.ExternalEncoder subclass (brain/downstream/adapters/)
+#   class:              what it learned from: ssl | supervised | specialist | baseline (brain.downstream.models)
+#   modalities:         [ct], [mri] or [ct, mri]: it is scored only on benchmark tasks of these modalities
+#   weights:            path to its weights (fingerprinted: a changed file is a new model id); omit when it has none
+#   pretrain_datasets:  dataset families of our index it pretrained on (volumes.csv dataset_family): the pretraining
+#                       overlap of each task; omit when unknown (the leaderboard then flags it)
+#   seen_tasks:         benchmark tasks whose labels it trained on: left out of its comparisons
+#   reference:          where it comes from (paper, repository, licence)
+#   kwargs:             adapter options
+models:
+  regional_stats:
+    adapter: brain.downstream.adapters.baselines:RegionalStats
+    class: baseline
+    modalities: [ct, mri]
+    pretrain_datasets: []
+    reference: "hand-crafted: brain-mask intensity statistics, whole brain and 32 mm blocks (no training)"
+    kwargs: {block_mm: 32}
+
+# Planned (adapter and weights still to do; 2026-10-27 survey, check each licence before use):
+#   brainiac     ssl, [mri]   SimCLR 3D, ~32k MRI; github.com/AIM-KannLab/BrainIAC (non-commercial); Nature Neuroscience
+#   brain2vec    ssl, [mri]   3D, 74k T1; github.com/CBICA/Brain2Vec; arXiv 2610.28411
+#   ct_fm        ssl, [ct]    SegResNet, 148k CT (IDC); aim.hms.harvard.edu/ct-fm (HuggingFace weights)
+#   headct_fm    ssl, [ct]    3D ViT, 361k head CT; github.com/NYUMedML/headCT_foundation (check weight access)
+#   dinov2_2d    ssl, [ct, mri]  DINOv2 on axial slices, tokens pooled to our grid: the natural-image baseline
+#   sfcn         supervised, [mri]  age / sex on UK Biobank; github.com/ha-ha-ha-han/UKBiobank_deep_pretrain
+#                (seen_tasks: none of ours, but its age head makes the age tasks in-domain: list ixi_age etc.)
+#   brainfm      supervised, [ct, mri]  SynthSeg-style multitask UNet; github.com/jhuldr/BrainFM; arXiv 2509.00549
+# An adapter: subclass ExternalEncoder, set ``dim`` (and ``needs_brain`` for skull stripping), implement ``encode``
+# (resample / crop / normalise the stored 1 mm volume as the model expects, run it, return ``pooled`` and optionally
+# ``tokens`` + ``xyz`` + ``keep``); then add the entry above with its weights path.
