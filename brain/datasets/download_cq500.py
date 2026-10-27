@@ -19,6 +19,7 @@ import tempfile
 import time
 import urllib.request
 import zipfile
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,11 +30,13 @@ N_STUDIES = 491
 SOFT_NAMES = ("SOFT", "STANDARD", "STND", "BRAIN", "UB", "FC2")
 SHARP_NAMES = ("BONE", "LUNG", "SHARP", "EDGE", "DETAIL", "FC3", "FC8")
 CONTRAST = ("CC", "CONTRAST", "CTA", "ANGIO", "POST", "+C", "C+", "ENHANC")       # "4cc sec 150cc": an injection
+NON_CONTRAST = ("PRECONTRAST", "NONCONTRAST", "NON-CONTRAST", "WITHOUTCONTRAST", "PLAIN")   # "CT PRE CONTRAST THIN"
 
 
-def _kernel_class(kernel: str) -> str:
+def _kernel_class(kernel: str, window_width: float | None = None) -> str:
     """soft / bone / other from the reconstruction kernel name. Letter + number kernels (Siemens B30f / H31s / J40,
-    Philips-style codes): below 60 is soft tissue, 60 and above sharp."""
+    Philips-style codes): below 60 is soft tissue, 60 and above sharp. Unknown names (CQ500's "SA" / "SB", header
+    manufacturer stripped) fall back to the stored display window: brain (width <= 400) or bone (>= 1000)."""
     import re
 
     k = str(kernel or "").upper().replace(" ", "")
@@ -46,13 +49,29 @@ def _kernel_class(kernel: str) -> str:
     m = re.match(r"^[A-Z]{1,2}(\d{2})", k)
     if m:
         return "bone" if int(m.group(1)) >= 60 else "soft"
+    if window_width is not None and window_width == window_width:
+        return "soft" if window_width <= 400 else "bone" if window_width >= 1000 else "other"
     return "other"
+
+
+def _is_contrast(description: str) -> bool:
+    d = str(description).upper().replace(" ", "")
+    for p in NON_CONTRAST:
+        d = d.replace(p, "")
+    return any(c in d for c in CONTRAST)
+
+
+def _first(v) -> float | None:
+    """A DICOM number that may be multi-valued (WindowWidth "80\\2000"): its first value, None if absent."""
+    try:
+        return float(v[0] if isinstance(v, Sequence) and not isinstance(v, str) else v)
+    except (TypeError, ValueError, IndexError):
+        return None
 
 
 def choose(series: pd.DataFrame) -> str | None:
     """The plain (non-contrast) soft-tissue series, thinnest first (ties: most slices); None if there is none."""
-    desc = series["description"].astype(str).str.upper()
-    plain = ~desc.apply(lambda d: any(c in d.replace(" ", "") for c in CONTRAST))
+    plain = ~series["description"].map(_is_contrast)
     ok = series[plain & (series["kernel_class"] == "soft") & (series["n"] >= 20)]
     if ok.empty:
         return None
@@ -71,9 +90,9 @@ def headers(zf: zipfile.ZipFile) -> pd.DataFrame:
         ds = pydicom.dcmread(io.BytesIO(zf.read(names[0])), stop_before_pixels=True)
         rows.append({"folder": folder, "n": len(names), "description": str(ds.get("SeriesDescription", "")),
                      "kernel": str(ds.get("ConvolutionKernel", "")), "thickness": float(ds.get("SliceThickness", 0) or 0),
-                     "patient_id": str(ds.get("PatientID", ""))})
+                     "window_width": _first(ds.get("WindowWidth")), "patient_id": str(ds.get("PatientID", ""))})
     out = pd.DataFrame(rows)
-    out["kernel_class"] = out["kernel"].map(_kernel_class)
+    out["kernel_class"] = [_kernel_class(k, w) for k, w in zip(out["kernel"], out["window_width"])]
     return out
 
 
@@ -85,10 +104,14 @@ def fetch(i: int, dest: Path, tmp: Path) -> list[dict]:
     for attempt in range(4):
         try:
             urllib.request.urlretrieve(URL.format(i), src)
+            with zipfile.ZipFile(src) as zf:                 # a truncated or error-page download: fetch again
+                if zf.testzip() is not None:
+                    raise zipfile.BadZipFile("CRC")
             break
-        except Exception:                                    # noqa: BLE001  transient network errors
+        except Exception as e:                               # noqa: BLE001  transient network errors
             if attempt == 3:
-                return [{"study": f"CQ500-CT-{i}", "error": "download failed"}]
+                src.unlink(missing_ok=True)
+                return [{"study": f"CQ500-CT-{i}", "error": f"download failed: {type(e).__name__}"}]
             time.sleep(10 * (attempt + 1))
     try:
         with zipfile.ZipFile(src) as zf:
@@ -106,6 +129,14 @@ def fetch(i: int, dest: Path, tmp: Path) -> list[dict]:
     return [{**r, "study": f"CQ500-CT-{i}", "chosen": r["folder"] == pick} for r in s.to_dict("records")]
 
 
+def fetch_safe(i: int, dest: Path, tmp: Path) -> list[dict]:
+    """``fetch``, with any failure recorded in series.csv instead of ending the run (one bad study ended the first)."""
+    try:
+        return fetch(i, dest, tmp)
+    except Exception as e:                                   # noqa: BLE001
+        return [{"study": f"CQ500-CT-{i}", "error": f"{type(e).__name__}: {e}"[:200]}]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dest", type=Path, required=True)
@@ -115,7 +146,7 @@ def main() -> None:
     lo, hi = map(int, a.studies.split("-"))
     a.dest.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR", "/tmp")) as t, ThreadPoolExecutor(a.workers) as ex:
-        rows = [r for rs in ex.map(lambda i: fetch(i, a.dest, Path(t)), range(lo, hi + 1)) for r in rs]
+        rows = [r for rs in ex.map(lambda i: fetch_safe(i, a.dest, Path(t)), range(lo, hi + 1)) for r in rs]
     if rows:
         f = a.dest / "series.csv"
         old = pd.read_csv(f) if f.exists() else pd.DataFrame()

@@ -8,9 +8,9 @@
 #   atlas_lesion_side, oasis1_age (saturated). They still run in the full suite and land in the per-task CSV.
 # segmentation transfer is costly (decoder training, large caches): only with --with-seg, at milestones.
 transfer:
-  # cq500_bleed_side out until CQ500 is re-converted from DICOM: the pre-converted NIfTIs are mirrored for some
-  # studies (bleed side disagrees with unanimous reads in 20 of 34 lateralised bleeds, both ways; 2026-10-26)
-  ct: [rsna_ich, cq500, cq500_edh, cq500_other_fracture, aisd_remote_infarct]
+  # CQ500 re-converted from the original DICOM on 2026-10-26 (one plain soft-tissue series per study): the image side
+  # of a one-sided bleed matches the reads in 89% of 87 studies (runs/diagnostics/cq500_side_verify.py)
+  ct: [rsna_ich, cq500, cq500_edh, cq500_other_fracture, cq500_bleed_side, aisd_remote_infarct]
   stroke: [isles24_lvo_side, isles24_mrs, isles24_mrs_discharge, atlas_lesion_volume, atlas_days_post_stroke]
   neuro_psych: [oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd]
   age: [ixi_age, pixar_age, ms3seg_age]
