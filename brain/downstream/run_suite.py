@@ -27,6 +27,7 @@ import numpy as np
 from brain.common.paths import REPO_ROOT as ROOT
 from brain.prep.store import FORMAT_VERSION
 from brain.downstream.embeddings import load_or_build_embeddings, resolve_path
+from brain.downstream.embeddings import cache_tag
 from brain.downstream.heads import DEFAULT_HEADS, build_heads, make_logreg_pool, make_ridge
 from brain.downstream.token_probes import make_token_heads
 from brain.downstream.token_readout import token_grid_zyx, token_readout_views
@@ -309,7 +310,8 @@ def main() -> None:
               "representation": emb["representation"], "slices_root": str(args.slices_root),
               "latent_dim": emb["latent_dim"], "heads": head_names,
               "readout": "axial" if use_readout else "raw",
-              "seed": args.seed, "window": args.window, "time_utc": datetime.now(timezone.utc).isoformat(),
+              "seed": args.seed, "window": args.window, "encoding": cache_tag() if model.is_checkpoint else "",
+              "time_utc": datetime.now(timezone.utc).isoformat(),
               "started_utc": started, "volumes_csv": str(args.volumes_csv or DEFAULT_VOLUMES),
               "token_heads": args.token_heads, "msd_target": args.msd_target if task.name == "msd" else None,
               "pretrain_overlap": overlap,

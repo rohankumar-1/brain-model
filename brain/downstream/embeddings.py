@@ -56,7 +56,8 @@ def _readable(path: Path) -> bool:
 
 def cache_tag() -> str:
     """Encoding variants of our 3D encoders set by environment (``BRAIN_FINE_GRID`` / ``FINE_POOL`` / ``EVAL_TILE`` /
-    ``EVAL_TAPS``): part of the cache name, and recorded with every result (``records.ENV_FLAGS``)."""
+    ``REFINE`` / ``EVAL_TAPS``): part of the cache name, and recorded with every result (``records.ENV_FLAGS``, and the
+    protocol's ``encoding``, which keeps a variant's results apart from the plain encoder's)."""
     tag = ""
     if os.environ.get("BRAIN_FINE_GRID", "") == "1":
         tag += "_finegrid"
@@ -64,6 +65,9 @@ def cache_tag() -> str:
         tag += "_finepool"
     if os.environ.get("BRAIN_EVAL_TILE", "") == "1":
         tag += "_tiled"
+    refine = os.environ.get("BRAIN_REFINE", "").strip()        # e.g. "0.15": that share of cells as 8 half-size tokens
+    if refine and float(refine) > 0:
+        tag += f"_ref{refine}"
     taps = os.environ.get("BRAIN_EVAL_TAPS", "").strip()       # e.g. "3": block 4's output (0-based index)
     if taps:
         tag += f"_tap{taps.replace(',', '-')}" + ("only" if os.environ.get("BRAIN_EVAL_TAPS_ONLY", "") == "1" else "")

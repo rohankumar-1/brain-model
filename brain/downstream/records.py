@@ -39,8 +39,8 @@ RECORD_VERSION = 1
 RESULTS_ROOT = Path(os.environ.get("BRAIN_RESULTS", REPO_ROOT / "results"))
 # environment settings that change what an evaluation computes (recorded with every result; the encoding ones are also
 # part of the embedding cache name, ``embeddings.cache_tag``)
-ENV_FLAGS = ("BRAIN_FINE_POOL", "BRAIN_FINE_GRID", "BRAIN_EVAL_TILE", "BRAIN_EVAL_TAPS", "BRAIN_EVAL_TAPS_ONLY",
-             "BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_EMBED_BATCH",
+ENV_FLAGS = ("BRAIN_FINE_POOL", "BRAIN_FINE_GRID", "BRAIN_EVAL_TILE", "BRAIN_REFINE", "BRAIN_EVAL_TAPS",
+             "BRAIN_EVAL_TAPS_ONLY", "BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_EMBED_BATCH",
              "BRAIN_STRIPPED", "OMP_NUM_THREADS")
 
 

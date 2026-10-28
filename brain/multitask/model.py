@@ -68,7 +68,7 @@ class SegDecoder(nn.Module):
     (x * (1 + gamma) + beta, zero-initialised so training starts from the unconditioned decoder).
     """
 
-    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16)):
+    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1):
         super().__init__()
         pz, py, px = patch_zyx
         n_z, n_xy = int(math.log2(pz)) - 1, int(math.log2(py)) - 1  # upsamplings to stride 2 per axis
@@ -80,7 +80,7 @@ class SegDecoder(nn.Module):
         self.stem = nn.Sequential(nn.Conv3d(in_dim, widths[0], 1, bias=False), group_norm(widths[0]), nn.GELU(),
                                   Res(widths[0], widths[0]))
         # image pyramid, finest first: stride 2 then the decoder's steps in reverse
-        pyr, cin = [], 1
+        pyr, cin = [], int(in_chans)                                  # the encoder's input channels
         for i in range(n_up):
             stride = (2, 2, 2) if i == 0 else self.steps[n_up - i]
             pyr.append(nn.Sequential(conv3(cin, widths[n_up - i], stride), conv3(widths[n_up - i], widths[n_up - i])))
@@ -111,7 +111,7 @@ class SegDecoder(nn.Module):
         return x * (1 + g.view(*g.shape, 1, 1, 1)) + b.view(*b.shape, 1, 1, 1)
 
     def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor):
-        """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, 1, Z, Y, X); ``rows`` (P,) the volume of each
+        """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, in_chans, Z, Y, X); ``rows`` (P,) the volume of each
         segmentation slot, ``cond`` (P, cond_dim) its slot. Returns (P, 1, Z/2, Y/2, X/2) logits."""
         x = self.stem(grid)
         feats, h = [], image
@@ -184,7 +184,8 @@ class BrainQuery(nn.Module):
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
         self.seg = SegDecoder(d_enc * (len(self.taps) + 1), dim, patch_zyx,
-                              tuple(seg_cfg.get("widths", (128, 64, 32, 16))))
+                              tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
+                              in_chans=backbone.patch_embed.proj.in_channels)
 
     @staticmethod
     def _unused_slot_keys(state, prefix, *_):

@@ -31,6 +31,11 @@ FLOOR = {"ct": -1024.0, "mri": -6.0}
 # Derived foreground: CT air/tissue split, MRI sentinel is -6.
 FG_THRESH = {"ct": -500.0, "mri": -5.5}
 MOD_CT, MOD_MRI = 0, 1
+# Three input channels by role, aligned across modalities so a channel means the same thing for CT and MRI:
+# 1 narrow tissue contrast (each modality's canonical window), 2 a wider pathology range (CT subdural; MRI from CSF to
+# lesions), 3 the bright extreme (CT bone; MRI hyperintensities: enhancement, FLAIR lesions, fat). MRI values are robust
+# z-scores, CT Hounsfield units.
+ROLES = {"ct": [(40.0, 40.0), (75.0, 100.0), (500.0, 400.0)], "mri": [(0.5, 1.5), (2.0, 4.0), (4.0, 2.0)]}
 
 _CT_CW = torch.tensor([
     [40.0, 40.0], [75.0, 100.0], [32.0, 20.0], [40.0, 200.0], [500.0, 400.0],
@@ -156,3 +161,17 @@ def sample_windows(mod: torch.Tensor, mode: str = "random", mix: str = "v4", gen
     c = torch.where(is_ct, c_ct, c_mri)
     w = torch.where(is_ct, w_ct, w_mri).clamp_min(1e-3)
     return c.view(b, 1, 1, 1), w.view(b, 1, 1, 1)
+
+
+def role_windows(x: torch.Tensor, modality: torch.Tensor, jitter: float = 0.0) -> torch.Tensor:
+    """Native-unit volumes ``x`` (B, 1, ...) -> the three role channels (B, 3, ...) (``ROLES``), asinh-windowed per row
+    by its modality. ``jitter`` > 0 moves each channel's centre by N(0, jitter) widths and scales its width by
+    exp(N(0, jitter)), independently per row and channel (training)."""
+    b = x.shape[0]
+    cw = torch.tensor([ROLES["ct"], ROLES["mri"]], device=x.device, dtype=torch.float32)[modality.reshape(b).long()]
+    c, w = cw[..., 0], cw[..., 1]                                  # (B, 3)
+    if jitter > 0:
+        c = c + w * jitter * torch.randn_like(c)
+        w = w * torch.exp(jitter * torch.randn_like(w))
+    shape = (b, 3) + (1,) * (x.dim() - 2)
+    return asinh_window(x.float().expand(b, 3, *x.shape[2:]), c.view(shape), w.view(shape))

@@ -270,6 +270,19 @@ class Predictor(nn.Module):
         return self.latent(h), (self.pixel(h) if self.pixel is not None else None)
 
 
+def widen_patch_embed(state: dict, in_chans: int) -> dict:
+    """A checkpoint's state for an encoder with ``in_chans`` inputs: a one-channel patch embedding is copied into
+    channel 1 and the new channels start at zero, so the widened encoder computes exactly what the checkpoint did on
+    channel 1 (``windowing.ROLES``: the canonical window) until training uses the others."""
+    key = next((k for k in state if k.endswith("patch_embed.proj.weight")), None)
+    if key is None or state[key].shape[1] == in_chans:
+        return state
+    w = state[key]
+    wide = w.new_zeros(w.shape[0], in_chans, *w.shape[2:])
+    wide[:, :w.shape[1]] = w
+    return {**state, key: wide}
+
+
 class BrainEncoder(nn.Module):
     """3D encoder. Attention runs on the foreground tokens only."""
 
@@ -394,13 +407,53 @@ class BrainEncoder(nn.Module):
         b, n, _ = tokens.shape
         if coords_mm.shape[:2] != (b, n) or coords_mm.size(-1) != 3:
             raise ValueError(f"coords_mm {tuple(coords_mm.shape)} does not match tokens {(b, n, 3)}")
+        return self._add_scale_meta(tokens, patch_size_mm, meta), grid
+
+    def _add_scale_meta(self, tokens: torch.Tensor, patch_size_mm: torch.Tensor, meta: torch.Tensor | None):
         scale = self.scale_embed(patch_size_mm)
         if self.fp32_residual:
             tokens, scale = tokens.float(), scale.float()
         tokens = tokens + (scale.unsqueeze(1) if patch_size_mm.ndim == 2 else scale)
         if self.meta_emb is not None and meta is not None:
             tokens = tokens + self.meta_emb(meta.to(tokens.device).long()).unsqueeze(1).to(tokens.dtype)
-        return tokens, grid
+        return tokens
+
+    def _refined(self, view, coords_mm, patch_size_mm, patch_xyz, keep, refine, zyx, meta=None):
+        """The mixed sequence of a view whose ``refine`` cells (R, N) are split into 8 half-size tokens: tokens
+        (R, 9N, D) laid out [coarse | 8 children per coarse cell], their coords and keep mask (a refined cell's
+        coarse token is dropped, its children kept), and the coarse grid. ``brain.models.refine``."""
+        from brain.models.refine import axis_signs, child_index
+
+        coarse, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx, meta)
+        if patch_size_mm.ndim != 2:
+            raise ValueError("refinement needs one patch size per row, (R, 3)")
+        px, py, pz = self.patch_xyz if patch_xyz is None else (int(v) for v in patch_xyz)
+        if px % 2 or py % 2 or pz % 2:
+            raise ValueError(f"patch {(px, py, pz)} cannot be halved")
+        fine, _ = self.patch_embed(view, (px // 2, py // 2, pz // 2), zyx=zyx)
+        fine = self._add_scale_meta(fine, patch_size_mm / 2, meta)
+        r, n, d = coarse.shape
+        idx, off = child_index(grid, coarse.device)                                     # (N, 8), (8, 3)
+        children = fine[:, idx.reshape(-1)]                                             # (R, 8N, D), parent-major
+        step = (patch_size_mm.float() / 4) * axis_signs(coords_mm, grid)                # (R, 3): a quarter patch
+        child_coords = coords_mm.unsqueeze(2) + off.view(1, 1, 8, 3) * step.view(r, 1, 1, 3)
+        tokens = torch.cat([coarse, children.to(coarse.dtype)], 1)
+        coords = torch.cat([coords_mm, child_coords.reshape(r, 8 * n, 3).to(coords_mm.dtype)], 1)
+        keep_all = torch.cat([keep & ~refine, (keep & refine).repeat_interleave(8, dim=1)], 1)
+        return tokens, coords, keep_all, grid
+
+    @staticmethod
+    def _to_coarse(x_all: torch.Tensor, refine: torch.Tensor) -> torch.Tensor:
+        """(R, 9N, D) outputs of a mixed sequence -> (R, N, D) on the coarse grid: a refined cell is its children's
+        mean."""
+        r, m, d = x_all.shape
+        n = m // 9
+        children = x_all[:, n:].reshape(r, n, 8, d).mean(2)
+        return torch.where(refine.unsqueeze(-1), children, x_all[:, :n])
+
+    def _pool_coarse(self, prefix: torch.Tensor | None, coarse: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
+        """``_pool`` for a refined view: the CLS, else the mean over kept coarse cells (each cell once)."""
+        return prefix[:, 0] if self.n_cls else _masked_mean(coarse, keep)
 
     def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor, taps: Sequence[int] = (),
              task_tokens: torch.Tensor | None = None, task_write: torch.Tensor | None = None,
@@ -447,14 +500,19 @@ class BrainEncoder(nn.Module):
         meta: torch.Tensor | None = None,
         task_tokens: torch.Tensor | None = None,
         task_write: torch.Tensor | None = None,
+        refine: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Dense token features for evaluation. ``view`` is (B, C, X, Y, Z). Dropped tokens are zero.
+        """Dense token features for evaluation. ``view`` is (B, C, X, Y, Z). Dropped tokens are zero. ``refine``
+        (B, N): cells encoded as 8 half-size tokens (``_refined``); outputs stay on the coarse grid.
 
         ``taps`` are block indices whose (pre-norm) outputs are also returned, as ``out["taps"]``. ``meta`` (B,) are
         ``META`` ids (ignored by an encoder without ``n_meta``). ``task_tokens`` (T, D) join the sequence after the
         prefix (OMNI-style, ``_task_mask``; ``task_write`` (T,) False = read-only) and come back as
         ``out["task_tokens"]`` (B, T, D).
         """
+        if refine is not None and bool(refine.any()):
+            return self._forward_refined(view, coords_mm, patch_size_mm, patch_xyz, keep, taps, meta, task_tokens,
+                                         task_write, refine)
         tokens, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=False, meta=meta)
         b, n, _ = tokens.shape
         if keep is None:
@@ -475,6 +533,30 @@ class BrainEncoder(nn.Module):
             "grid_zyx": torch.tensor(grid, device=view.device),
         }
 
+    def _forward_refined(self, view, coords_mm, patch_size_mm, patch_xyz, keep, taps, meta, task_tokens, task_write,
+                         refine) -> dict[str, torch.Tensor]:
+        if keep is None:
+            keep = torch.ones_like(refine)
+        tokens, coords, keep_all, grid = self._refined(view, coords_mm, patch_size_mm, patch_xyz, keep, refine,
+                                                       zyx=False, meta=meta)
+        seq, seq_coords, pad, _ = pack_kept(tokens, coords, keep_all)
+        prefix, x, tapped, task_out = self._run(seq, seq_coords, pad, taps, task_tokens, task_write)
+        coarse = self._to_coarse(scatter_kept(x, keep_all), refine)
+        patch = self._to_coarse(tokens * keep_all.unsqueeze(-1).to(tokens.dtype), refine)
+        return {
+            "task_tokens": task_out,
+            "tokens": coarse * keep.unsqueeze(-1).to(coarse.dtype),
+            "cls": prefix[:, 0] if self.n_cls else None,
+            "registers": prefix[:, self.n_cls:] if self.n_registers else None,
+            "pooled": self._pool_coarse(prefix, coarse, keep),
+            "patch": patch,
+            "taps": [self._to_coarse(scatter_kept(t, keep_all), refine) * keep.unsqueeze(-1).to(t.dtype)
+                     for t in tapped],
+            "coords_mm": coords_mm,
+            "grid_zyx": torch.tensor(grid, device=view.device),
+            "n_refined": refine.sum(1),
+        }
+
     def encode_rows(
         self,
         view: torch.Tensor,
@@ -485,23 +567,39 @@ class BrainEncoder(nn.Module):
         patch_xyz: Sequence[int] | None = None,
         tokens: bool = False,
         meta: torch.Tensor | None = None,
+        refine: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Pooled embedding of each row, and optionally its dense tokens, in input order.
+        """Pooled embedding of each row, and optionally its dense tokens, in input order. ``refine`` (R, N): cells
+        encoded as 8 half-size tokens (``_refined``); dense tokens stay on the coarse grid.
 
         ``view`` is (R, C, Z, Y, X). Pooled is the CLS output, or without a CLS the mean over kept tokens, (R, D). Dense tokens are
         (R, N, D) with dropped tokens zero. ``plan`` is (order, sizes, longest): rows are sorted by kept
         count and cut into buckets, so a row is padded to its bucket's longest row, not the batch's. Rows
         never interact, so this changes cost, not values. ``longest`` comes from the CPU: no GPU sync.
         """
-        emb, _ = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True, meta=meta)
+        refined = refine is not None and bool(refine.any())
+        if refined:
+            emb, coords_mm, keep_all, _ = self._refined(view, coords_mm, patch_size_mm, patch_xyz, keep, refine,
+                                                        zyx=True, meta=meta)
+        else:
+            emb, _ = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True, meta=meta)
+            keep_all = keep
         order, sizes, longest = plan
         order = order.to(emb.device, non_blocking=True)
         pooled, dense, start = [], [], 0
         for size, m in zip(sizes, longest):
             idx = order[start:start + size]
             start += size
-            seq, seq_coords, pad, _ = pack_kept(emb[idx], coords_mm[idx], keep[idx], max_keep=m)
+            if refined:                       # the plan's lengths are coarse counts: one sync for the mixed ones
+                m = int(keep_all[idx].sum(1).max())
+            seq, seq_coords, pad, _ = pack_kept(emb[idx], coords_mm[idx], keep_all[idx], max_keep=m)
             prefix, x, _, _ = self._run(seq, seq_coords, pad)
+            if refined:
+                coarse = self._to_coarse(scatter_kept(x, keep_all[idx]), refine[idx])
+                pooled.append(self._pool_coarse(prefix, coarse, keep[idx]))
+                if tokens:
+                    dense.append(coarse * keep[idx].unsqueeze(-1).to(coarse.dtype))
+                continue
             pooled.append(self._pool(prefix, x, pad))
             if tokens:
                 dense.append(scatter_kept(x, keep[idx]))

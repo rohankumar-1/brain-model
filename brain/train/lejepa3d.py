@@ -18,7 +18,7 @@ from brain.data.crops3d import raw_views
 from brain.data.volumes import collate_volumes, crop_microbatch, make_loader, make_synthetic_volume
 from brain.models.viewnet3d import ViewNet, batch_meta
 from brain.data.volumes import n_meta
-from brain.models.vit3d import BrainEncoder
+from brain.models.vit3d import BrainEncoder, widen_patch_embed
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
 from brain.train import engine
@@ -177,7 +177,7 @@ class Trainer(engine.Trainer):
         self.raw, self.module = raw, raw
         self.core = ViewNet(raw, local_pooled=bool(lc.get("local_pooled", False)), dense=self.dense_on,
                             predict=predict_on, predict_fine=fine_pred_on,
-                            cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
+                            cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))), refine=m.get("refine"))
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
         self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"])), lr=float(o["lr"]),
                                      betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
@@ -200,7 +200,8 @@ class Trainer(engine.Trainer):
     def _init_from(self, path) -> None:
         """Weights only: a fresh optimizer and schedule. Heads the source never had (the predictor) start random."""
         src = load_ckpt(path, self.rt.device)
-        res = self.raw.load_state_dict(strip_module_prefix(src["model"]), strict=False)
+        state = widen_patch_embed(strip_module_prefix(src["model"]), self.raw.patch_embed.proj.in_channels)
+        res = self.raw.load_state_dict(state, strict=False)
         if res.unexpected_keys or any(not k.startswith("predictor.") for k in res.missing_keys):
             raise SystemExit(f"[init_from] mismatch: missing={res.missing_keys[:4]} unexpected={res.unexpected_keys[:4]}")
         self.rt.log(f"[init] weights from {path} (step {src.get('step')}); new: {len(res.missing_keys)} tensors")

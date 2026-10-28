@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from brain.common.windowing import asinh_window, canonical_c_w, floors
+from brain.common.windowing import asinh_window, canonical_c_w, floors, role_windows
 from brain.data.augment import appearance
 from brain.data.gate import token_keep
 from brain.data.volumes import FamilySampler, _worker_threads, meta_id
@@ -285,10 +285,16 @@ def canonical_window(raw: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
     return asinh_window(raw, cw[:, 0].view(-1, 1, 1, 1, 1), cw[:, 1].view(-1, 1, 1, 1, 1))
 
 
-def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None):
-    """Native-unit volumes ``raw`` (B, 1, Z, Y, X) -> the canonically windowed encoder input and the foreground
-    token mask (B, N) gated on the raw values."""
-    return canonical_window(raw, mod), foreground_tokens(raw, mod, patch_xyz, gate)
+def encoder_window(raw: torch.Tensor, mod: torch.Tensor, in_chans: int = 1) -> torch.Tensor:
+    """The unaugmented encoder input: the canonical window, or for a three-channel encoder the three role windows
+    (``windowing.ROLES``, the first of them the canonical one)."""
+    return role_windows(raw, mod) if int(in_chans) == 3 else canonical_window(raw, mod)
+
+
+def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None, in_chans: int = 1):
+    """Native-unit volumes ``raw`` (B, 1, Z, Y, X) -> the windowed encoder input (``encoder_window``) and the
+    foreground token mask (B, N) gated on the raw values."""
+    return encoder_window(raw, mod, in_chans), foreground_tokens(raw, mod, patch_xyz, gate)
 
 
 def fov_cut(raw: torch.Tensor, seg: torch.Tensor, rows: torch.Tensor, mod: torch.Tensor, allowed: torch.Tensor,
@@ -323,14 +329,16 @@ def protected_tasks(reg) -> tuple[torch.Tensor, torch.Tensor]:
 
 def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None,
             aug_unsafe: torch.Tensor | None = None) -> dict:
-    """Raw batch -> encoder input (B, 1, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
+    """Raw batch -> encoder input (B, C, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
     moved with their image. Training: flip, rotation / shift (not on rows asking a task in ``aug_unsafe``), a
     field-of-view cut on rows asking no task in ``fov_unsafe`` (n_tasks bool: targets that need the whole brain in
     view; see ``protected_tasks``; None = every row is unsafe, no cut), then appearance augmentation
     (``aug.appearance``: bias / through-plane blur / noise / blur / drift, ``brain.data.augment``) with the window
     pinned to each modality's canonical one (frozen evaluation's; CT density targets live in it). The foreground
     gate is taken before appearance augmentation, so noise cannot flip background tokens. ``aug_unsafe`` rows also
-    get no bias field or drift."""
+    get no bias field or drift. A three-channel encoder (``model.in_chans`` 3) gets the three role windows, unjittered,
+    with every appearance augmentation in native units (``augment``'s roles path: no drift)."""
+    in_chans = int((cfg.get("model") or {}).get("in_chans", 1))
     aug = (cfg.get("aug") or {}) if train else {}
     raw = batch["image"].to(device, non_blocking=True).float().unsqueeze(1)
     mod = batch["modality"].to(device)
@@ -361,10 +369,11 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     app = aug.get("appearance")
     if train and app:
         thick = batch["thick"].to(device) if "thick" in batch else None
-        x = appearance(raw, mod, {**app, "window": {"mode": "fixed"}},
+        window = {"mode": "roles", "jitter": 0.0} if in_chans == 3 else {"mode": "fixed"}
+        x = appearance(raw, mod, {**app, "window": window},
                        thick=(thick[:, 0], thick[:, 1].long()) if thick is not None else None, protect=live_rows)
     else:
-        x = canonical_window(raw, mod)
+        x = encoder_window(raw, mod, in_chans)
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device),
             "meta": batch["meta"].to(device) if "meta" in batch else None}

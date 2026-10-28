@@ -1,0 +1,40 @@
+# Published results we reproduce with our adapters (python -m brain.bench.replicate --model <name>): the check that a
+# published model is run the way its authors ran it. Each target copies the paper's protocol (its test scans where
+# published, its training-set size, its readout and metric), not the benchmark's, so our number should land within
+# the paper's interval (and, on a large test set, within a few percent of its value). A miss points at the adapter
+# (input orientation, crop, intensity scaling, feature choice), not at the model.
+#
+# Per target: task (a brain.downstream task whose labels we use) or datasets (dataset -> class), test_ids (the
+# paper's test scans; else n_test_subjects held out by subject), n_trainval (training + validation scans, sampled per
+# seed when the paper's own are not published), metric, reported value with its 95% interval, and the source.
+
+brainiac:
+  # Tak et al., Nature Neuroscience 2026 (BrainIAC), Supplementary Tables 31-33: frozen backbone, its first output token
+  # (features[0][:, 0]), dropout 0.2 + one linear layer, Adam lr 0.001, best epoch on validation. Test IDs from the
+  # authors' release (github.com/AIM-KannLab/BrainIAC).
+  mci_oasis1:
+    task: oasis1_cdr                       # CDR 0 (healthy) vs CDR >= 0.5 (MCI); the paper's 235 scans are ours
+    test_ids: configs/bench/replicate/brainiac_mci_oasis1_test.csv
+    n_trainval: 195
+    metric: auc
+    reported: 0.721
+    ci: [0.536, 0.878]
+    source: "Supp. Table 31 (n test 40: 29 healthy, 11 MCI)"
+  stroke_atlas:
+    task: atlas_days_post_stroke           # our target is log(1 + days); the paper's is days
+    target: expm1
+    max_target: 240                        # the paper's cohort: 210 patients, 0-240 days
+    test_ids: configs/bench/replicate/brainiac_stroke_atlas_test.csv
+    n_trainval: 170
+    metric: mae
+    reported: 64.31
+    ci: [47.96, 80.66]
+    source: "Supp. Table 32 (n test 40; MAE in days, CI half-width 16.35)"
+  sequence_brats23:
+    datasets: {brats2023_gli_t1n: T1, brats2023_gli_t1c: T1CE, brats2023_gli_t2w: T2, brats2023_gli_t2f: FLAIR}
+    n_test_subjects: 219                   # the paper tests on the 219 BraTS 2023 GLI validation cases (876 scans),
+                                           # which we do not hold: here 219 held-out training cases, same source
+    metric: balanced_accuracy
+    reported: 0.758
+    ci: null
+    source: "Supp. Table 33 (n test 876, trained on the 5,004 BraTS 2023 GLI training scans)"

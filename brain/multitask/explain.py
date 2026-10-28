@@ -46,7 +46,8 @@ def encode(model, cfg, image_zyx: np.ndarray, modality: str, device) -> tuple[di
     raw = torch.from_numpy(np.ascontiguousarray(image_zyx, np.float32))[None, None].to(device)
     mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=device)
     gate = (cfg.get("views") or {}).get("gate") or {}
-    x, keep = gate_and_window(raw, mod, tuple(model.backbone.patch_xyz), gate)
+    x, keep = gate_and_window(raw, mod, tuple(model.backbone.patch_xyz), gate,
+                              in_chans=model.backbone.patch_embed.proj.in_channels)
     with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
         enc = model.encode(x, keep)
     enc = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in enc.items()}
@@ -177,7 +178,8 @@ def tokens(a) -> None:
         for label, r, img in imgs:
             raw = torch.from_numpy(img)[None, None].to(dev)
             mod = torch.tensor([0 if str(r.modality).lower().startswith("ct") else 1], device=dev)
-            x, keep = gate_and_window(raw, mod, tuple(enc_net.patch_xyz), gate)
+            x, keep = gate_and_window(raw, mod, tuple(enc_net.patch_xyz), gate,
+                                      in_chans=enc_net.patch_embed.proj.in_channels)
             with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda"):
                 e = encode_backbone(enc_net, x, keep)
             feats.append((e["tokens"][0].float().cpu().numpy(), keep[0].cpu().numpy().astype(bool)))

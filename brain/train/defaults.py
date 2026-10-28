@@ -34,6 +34,8 @@ LEJEPA3D: dict[str, Any] = {
         "rope_base_mm": 100.0, "checkpoint": True, "proj_norm": "batch", "length_buckets": 4,
         # Token head for the dense loss: 0 builds none (a plain pooled-only model).
         "dense_dim": 128, "dense_hidden": 512,
+        # budgeted token refinement (brain.models.refine): a share of each crop's cells as 8 half-size tokens; 0 = off
+        "refine": {"groups": ["global"], "frac_max": 0.0, "random_frac": 0.5},
         # Prefix tokens: n_cls=1 adds a CLS that becomes the pooled (global) embedding; registers are extra
         # position-free tokens attention can use as scratch space. 0/0 = mean-pooled patch tokens.
         "n_cls": 0, "n_registers": 0,
@@ -52,14 +54,18 @@ LEJEPA3D: dict[str, Any] = {
     },
     # Intensity re-rendering, applied per crop. See brain/data/augment.py.
     "aug": {
-        "window": {"mode": "random", "mix": "brain"},
-        # Monotone tissue-contrast curve: random knots over the window's output range, so soft tissue can be
-        # stretched, compressed or (with ``flip``) inverted, as T1 <-> T2 <-> CT do.
+        # mode random / fixed: one asinh window; roles: the three role windows as channels (model.in_chans 3,
+        # windowing.ROLES), each jittered by ``jitter`` widths; roles with channels 1: the same pipeline with one
+        # role window per crop (model.in_chans 1), the matched control for the three-channel input
+        "window": {"mode": "random", "mix": "brain", "jitter": 0.0, "channels": 3},
+        # Monotone tissue-contrast curve on MRI rows: random knots over the window's output range, so soft tissue can
+        # be stretched, compressed or (with ``flip``) inverted, as T1 <-> T2 do. Never CT (HU are physical).
         "curve": {"p": 0.8, "knots": 5, "strength": 0.6, "flip": 0.3},
         # Smooth multiplicative bias field (MRI coil shading). Skipped for CT.
         "bias": {"p": 0.5, "amp": 0.3},
         # kind gaussian (sigma in window units) or rician (snr range, magnitude MRI noise; CT stays gaussian)
-        "noise": {"p": 0.5, "sigma": [0.02, 0.15], "kind": "gaussian", "snr": [15.0, 100.0]},
+        "noise": {"p": 0.5, "sigma": [0.02, 0.15], "kind": "gaussian", "snr": [15.0, 100.0],
+                  "sigma_hu": [2.0, 15.0]},                      # sigma_hu: CT noise in HU (window mode roles)
         "blur": {"p": 0.3, "sigma_vox": [0.5, 1.5]},
         # Anisotropic blur along one axis, as in thick-slice acquisitions resampled to 1 mm.
         "through_plane": {"p": 0.5, "fwhm_vox": [2.0, 6.0]},
@@ -217,8 +223,9 @@ for _name, _c in _DEFAULTS.items():
         # None: gathered SSL terms get their full gradient; an int reproduces the old (1/W) weighting of that GPU count
         _c["loss"].setdefault("gather_world_ref", None)
     # scan metadata (modality / contrast, brain.data.volumes.META) as an encoder input, replaced by "unknown" with
-    # probability drop; checkpoints without the key have none
-    _c["model"].setdefault("meta", {"enabled": True, "drop": 0.2})
+    # probability drop; checkpoints without the key have none. Off by default since 2026-10-28: the sequence label is a
+    # shortcut against a modality-agnostic encoder (runs saved with it on keep it)
+    _c["model"].setdefault("meta", {"enabled": False, "drop": 0.2})
     if _name in ("multitask", "joint"):
         # uncertainty balancing: log-variances soft-clamped to +-uncertainty_clamp (task weights within e^+-clamp)
         _c["loss"].setdefault("uncertainty_clamp", 1.0)

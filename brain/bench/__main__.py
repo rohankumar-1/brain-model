@@ -1,4 +1,4 @@
-"""python -m brain.bench {list, run, board}: see ``brain/bench/__init__.py``."""
+"""python -m brain.bench {list, run, card, compare, pin, board}: see ``brain/bench/__init__.py``."""
 
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ def main() -> None:
     r.add_argument("--dependency", default=None, help="Slurm dependency for --submit, e.g. afterok:123")
     cd = sub.add_parser("card", help="every recorded number for one model -> runs/bench/cards/<name>.md")
     cd.add_argument("--model", required=True)
+    cp = sub.add_parser("compare", help="every model x every task in the task's metric -> runs/bench/compare_v*.md")
+    cp.add_argument("--models", nargs="*", default=None, help="default: every models.yaml model with results")
     pn = sub.add_parser("pin", help="fix each task's readout (best mean val over models with complete results)")
     pn.add_argument("--models", nargs="*", default=None)
     bd = sub.add_parser("board", help="the leaderboard")
@@ -50,6 +52,10 @@ def main() -> None:
         from brain.bench.run import run
 
         run(a.model, tasks=a.tasks, full=a.full, submit=a.submit, dependency=a.dependency, extra=extra)
+    elif a.cmd == "compare":
+        from brain.bench.compare import compare
+
+        compare(a.models)
     elif a.cmd == "pin":
         from brain.bench.board import pin
 

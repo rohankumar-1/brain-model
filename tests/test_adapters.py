@@ -75,3 +75,18 @@ def test_ct_fm_input_orientation():
     a = e._affine(ATTRS)
     assert np.allclose(a[:3, 0], [0, 0, 3]) and np.allclose(a[:3, 1], [0, -1, 0]) and np.allclose(a[:3, 2], [-1, 0, 0])
     assert np.allclose(a @ np.r_[31.5, 127.5, 127.5, 1.0], np.r_[_box_centre(ATTRS), 1.0])
+
+
+def test_ct_fm_triage_input_stacks_windows_along_s():
+    """CT-FM's head-CT pipeline: each HU window scaled to [0, 1], the copies stacked along S."""
+    from brain.downstream.adapters.published import CTFM
+
+    e = CTFM.__new__(CTFM)
+    e.windows = [(0.0, 80.0), (-125.0, 175.0), (28.0, 36.0), (-900.0, 2100.0)]
+    hu = torch.tensor([-1024.0, 0.0, 32.0, 40.0, 1000.0]).view(5, 1, 1).expand(5, 2, 2)
+    x = e._input(hu)
+    assert x.shape == (20, 2, 2) and float(x.min()) >= 0 and float(x.max()) <= 1
+    assert torch.allclose(x[3:5, 0, 0], torch.tensor([0.5, 1.0]))                    # blood window: 40 HU -> 0.5
+    assert torch.allclose(x[12, 0, 0], torch.tensor(0.5))                             # stroke window: 32 HU -> 0.5
+    e.windows = []
+    assert torch.allclose(e._input(hu)[:, 0, 0], ((hu[:, 0, 0] + 1024) / 3072).clamp(0, 1))

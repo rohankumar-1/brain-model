@@ -35,13 +35,13 @@ def _fmt(v, d: int = 3) -> str:
 def transfer_rows(model, b, tasks: list[str]) -> pd.DataFrame:
     """One row per benchmark task: the leaderboard's readout for this model on the pinned index, scored like the
     leaderboard scores it (its saved per-scan predictions, every CV repeat saved, subject bootstrap)."""
-    from brain.bench.board import _pick
+    from brain.bench.board import _pick, current_results
     from brain.eval.report import _suite_preds, fixed_heads, score_ci, suite_heads
     from brain.eval.skill import skill
 
     t = suite_heads()
     t = t[t.task.isin(tasks)]
-    t = t[t.index_sha1 == b.index_sha1] if b.index_sha1 else t
+    t = t[current_results(t, b)]
     heads = b.readouts() or fixed_heads(t)
     rows = []
     for task in tasks:

@@ -257,6 +257,29 @@ def test_appearance_augmentation_keeps_the_foreground_gate():
     assert not torch.allclose(aug["x"], plain["x"])
 
 
+def test_a_three_channel_encoder_gets_the_role_windows_and_segments():
+    """``model.in_chans`` 3: the three role windows in training and evaluation (unaugmented: exactly ``role_windows``),
+    and the model runs on them, segmentation decoder included."""
+    from brain.common.windowing import role_windows
+
+    app = {"bias": {"p": 1.0, "amp": 0.2}, "noise": {"p": 1.0, "kind": "rician", "snr": [15, 100]},
+           "blur": {"p": 1.0, "sigma_vox": [0.5, 1.0]}}
+    cfg = _cfg(flip_lr=0.0, affine={"p": 0.0}, appearance=app)
+    cfg["model"]["in_chans"] = 3
+    raw = _raw()
+    plain, aug = (prepare(raw, cfg, CPU, (8, 8, 4), train=t) for t in (False, True))
+    assert plain["x"].shape[1] == 3 and aug["x"].shape == plain["x"].shape and torch.isfinite(aug["x"]).all()
+    assert torch.allclose(plain["x"], role_windows(raw["image"].float().unsqueeze(1), raw["modality"]))
+    assert torch.equal(aug["keep"], plain["keep"])
+    torch.manual_seed(0)
+    model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
+    model.set_token_tasks([REG.index[t] for t in REG.train_ids(cfg["tasks"])])
+    out = model(aug["x"], aug["keep"], aug["task"], aug["seg_pair"])
+    assert torch.isfinite(out["binary"]).all()
+    if len(aug["seg_pair"]):
+        assert out["seg"].shape == (len(aug["seg_pair"]), 1, *(s // 2 for s in SHAPE))
+
+
 def test_tasks_asked_alone_do_not_see_each_other_and_match_a_single_task_query():
     cfg, model = _model()
     b = _prepared(cfg)

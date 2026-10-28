@@ -48,6 +48,17 @@ models:
     pretrain_datasets: []
     reference: "CT-FM, Pai et al. 2025 (arXiv 2501.09001); huggingface.co/project-lighter/ct_fm_feature_extractor; Apache 2.0"
     kwargs: {spacing_spl: [3, 1, 1], shape_spl: [64, 256, 256]}
+  ct_fm_triage:
+    # the same weights fed the input of CT-FM's own head-CT evaluation (its repo's evaluation/cq500.yaml): 5 x 2 x 2 mm,
+    # 48 x 128 x 128, four HU windows (blood, subdural, stroke, bone) stacked along S
+    adapter: brain.downstream.adapters.published:CTFM
+    class: ssl
+    modalities: [ct]
+    weights: weights/ct_fm/model.safetensors
+    pretrain_datasets: []
+    reference: "CT-FM, Pai et al. 2025 (arXiv 2501.09001), head-CT triage input; Apache 2.0"
+    kwargs: {spacing_spl: [5, 2, 2], shape_spl: [48, 128, 128],
+             windows: [[0, 80], [-125, 175], [28, 36], [-900, 2100]]}
   brainiac:
     adapter: brain.downstream.adapters.published:BrainIAC
     class: ssl

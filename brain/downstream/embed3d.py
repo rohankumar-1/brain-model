@@ -12,7 +12,7 @@ from brain.data.gate import token_keep
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.data.volumes import meta_id, n_meta
 from brain.models.vit3d import VIT_SIZES, BrainEncoder
-from brain.common.windowing import asinh_window, windows_for
+from brain.common.windowing import asinh_window, role_windows, windows_for
 from brain.common.grid import GRID_XYZ, PATCH_XYZ
 
 
@@ -95,6 +95,11 @@ class FrozenEncoder3D:
         self.taps_only = False         # drop the final tokens (and the CLS) and keep only the tapped blocks
         self.meta: int | None = None   # the next volume's META id (``volume_meta``); None = unknown
         self.task_tokens: torch.Tensor | None = None   # a task-token model's trained-task tokens (task_token_prefix)
+        # a three-input encoder takes the role windows (windowing.ROLES) as channels in one pass, whatever ``window``
+        self.role_channels = model.patch_embed.proj.in_channels == 3
+        self.meta_off = False          # encode as if the scan's metadata (its contrast) were unknown
+        # share of each view's kept cells encoded as 8 half-size tokens, the most detailed first (BRAIN_REFINE)
+        self.refine_frac = float(os.environ.get("BRAIN_REFINE", "0") or 0)
         # CLS embeddings (models with a CLS token): of the last single-pass encode, per window of the last
         # ``embed_windows`` call, and per volume of the last ``extract_volume_embeddings_3d`` run.
         self._last_cls: torch.Tensor | None = None
@@ -105,6 +110,14 @@ class FrozenEncoder3D:
         self.reg_bank: np.ndarray | None = None          # (N, n_windows * R * D) over a whole extraction
 
     @torch.no_grad()
+    def _window(self, cropped: torch.Tensor, c: float, w: float, modality: str) -> torch.Tensor:
+        """The encoder input of a native-unit (X, Y, Z) crop: one asinh window, or the three role channels (C, X, Y, Z)
+        for a three-input encoder."""
+        if not self.role_channels:
+            return asinh_window(cropped, c, w)
+        mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=cropped.device)
+        return role_windows(cropped[None, None], mod)[0]
+
     def embed_tokens(
         self, vol_xyz: torch.Tensor, c: float, w: float, modality: str = "mri",
         window_xyz: tuple[int, int, int] | None = None, stride_xyz: tuple[int, int, int] | None = None,
@@ -133,7 +146,7 @@ class FrozenEncoder3D:
         native = vol_xyz.float()
         cropped, start, size = _crop_to_patch(native, self.patch_xyz)
         fg = token_gate(cropped, modality, self.patch_xyz, self.gate)
-        x = asinh_window(cropped, c, w)
+        x = self._window(cropped, c, w, modality)
         if window_xyz is None:
             tokens, coords = self._encode(x, start, size, fg)
         else:
@@ -173,7 +186,7 @@ class FrozenEncoder3D:
 
     def _encode_batch(self, x, starts, size, keep):
         """``x`` is (B, X, Y, Z), ``starts`` are B origin triples, ``keep`` is (B, T)."""
-        view = x.unsqueeze(1)
+        view = x if x.dim() == 5 else x.unsqueeze(1)                   # (B, C, X, Y, Z)
         coords, pmms = zip(*[_crop_coords(view.device, st, size, self.spacing_mm, self.patch_xyz) for st in starts])
         coords, pmm = torch.cat(coords, 0), torch.cat(pmms, 0)
         self.model.eval()
@@ -182,9 +195,15 @@ class FrozenEncoder3D:
         if getattr(self.model, "meta_emb", None) is not None:   # a model trained with metadata: the scan's, or unknown
             meta = torch.full((view.shape[0],), int(self.meta or 0), dtype=torch.long, device=view.device)
         tt = None if self.task_tokens is None else self.task_tokens.to(view.device)
+        refine = None
+        if self.refine_frac > 0:
+            from brain.models.refine import choose_cells, detail_scores
+
+            refine = choose_cells(detail_scores(view.permute(0, 1, 4, 3, 2), self.patch_xyz), keep, self.refine_frac,
+                                  random_frac=0.0)
         with torch.autocast(**amp):
             out = self.model(view, coords, pmm, keep=keep, patch_xyz=self.patch_xyz, taps=self.tap_blocks, meta=meta,
-                             task_tokens=tt)
+                             task_tokens=tt, refine=refine)
         taps = [t.float() for t in out["taps"]]                 # bf16 under autocast; float32 like the final tokens
         if self.tap_norm:
             taps = [torch.nn.functional.layer_norm(t, t.shape[-1:]) for t in taps]
@@ -195,7 +214,7 @@ class FrozenEncoder3D:
 
     def _embed_patch_batch(self, x, starts, size, keep):
         """Patch embedding only (no transformer). Same grid as ``_encode_batch``."""
-        view = x.unsqueeze(1)
+        view = x if x.dim() == 5 else x.unsqueeze(1)                   # (B, C, X, Y, Z)
         coords, pmms = zip(*[_crop_coords(view.device, st, size, self.spacing_mm, self.patch_xyz) for st in starts])
         coords, pmm = torch.cat(coords, 0), torch.cat(pmms, 0)
         self.model.eval()
@@ -210,7 +229,7 @@ class FrozenEncoder3D:
         """Pre-transformer patch embeddings on the ``embed_tokens`` grid (decoder skip)."""
         cropped, start, size = _crop_to_patch(vol_xyz.float(), self.patch_xyz)
         fg = token_gate(cropped, modality, self.patch_xyz, self.gate)
-        x = asinh_window(cropped, c, w)
+        x = self._window(cropped, c, w, modality)
         if window_xyz is None:
             pe, _ = self._embed_patch_batch(x.unsqueeze(0), (start,), size, fg.view(1, -1))
             return pe[0]
@@ -226,7 +245,7 @@ class FrozenEncoder3D:
         cropped, starts, keeps, size = [], [], [], None
         for v in vols:
             cr, st, sz = _crop_to_patch(v.float(), self.patch_xyz)
-            cropped.append(asinh_window(cr, c, w))
+            cropped.append(self._window(cr, c, w, modality))
             starts.append(st)
             keeps.append(token_gate(cr, modality, self.patch_xyz, self.gate))
             size = sz
@@ -238,7 +257,7 @@ class FrozenEncoder3D:
         cropped, starts, keeps, size = [], [], [], None
         for v in vols:
             cr, st, sz = _crop_to_patch(v.float(), self.patch_xyz)
-            cropped.append(asinh_window(cr, c, w))
+            cropped.append(self._window(cr, c, w, modality))
             starts.append(st)
             keeps.append(token_gate(cr, modality, self.patch_xyz, self.gate))
             size = sz
@@ -287,9 +306,11 @@ class FrozenEncoder3D:
         from brain.downstream.models import VolumeEmbedding
 
         x = torch.from_numpy(np.ascontiguousarray(read_volume_xyz(path))).to(next(self.model.parameters()).device)
-        self.meta = volume_meta().get(str(volume_id)) if getattr(self.model, "meta_emb", None) is not None else None
+        with_meta = getattr(self.model, "meta_emb", None) is not None and not self.meta_off
+        self.meta = volume_meta().get(str(volume_id)) if with_meta else None
         tile = os.environ.get("BRAIN_EVAL_TILE", "") == "1"
-        seqs, xyz, fg = self.embed_windows(x, windows_for(window, modality), modality=modality,
+        windows = [(0.0, 1.0)] if self.role_channels else windows_for(window, modality)   # roles: one pass
+        seqs, xyz, fg = self.embed_windows(x, windows, modality=modality,
                                            **({"window_xyz": (128, 128, 64), "stride_xyz": (64, 64, 32)} if tile else {}))
         return VolumeEmbedding(tokens=torch.cat(list(seqs), dim=-1), xyz=xyz, keep=fg,
                                cls=None if self.last_cls is None else self.last_cls.reshape(-1),

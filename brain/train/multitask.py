@@ -38,6 +38,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     m = cfg["model"]
     if synthetic or not m.get("init_from"):
         enc = BrainEncoder(size=m.get("size", "test"), patch_xyz=tuple(cfg["views"]["patch_xyz"]),
+                           in_chans=int(m.get("in_chans", 1)),
                            qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
                            rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
                            n_meta=n_meta(m))
@@ -51,6 +52,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         cfg["views"] = {**(scfg.get("views") or {}), "gate": cfg["views"].get("gate")}
         cfg["views"]["patch_xyz"] = list(enc.patch_xyz)
         m["size"] = enc.size
+        m["in_chans"] = int(enc.patch_embed.proj.in_channels)      # data.prepare windows the input to match
         # the encoder keeps the numerics it was trained with (the defaults' True would not describe it)
         m["rope_fp32"], m["fp32_residual"] = bool(enc.rope.fp32), bool(enc.fp32_residual)
         if n_meta(m) and enc.meta_emb is None:                # metadata on an encoder trained without it

@@ -21,9 +21,11 @@ OUT = REPO_ROOT / "runs" / "bench"
 
 
 def current_results(t: pd.DataFrame, b) -> pd.Series:
-    """Rows computed under this benchmark version: on its store index and, for cross-validated tasks, with
-    cross-fitted validation (v2; v1 CV results are left out and counted as stale)."""
+    """Rows computed under this benchmark version: on its store index, with the suite's default eval window (multi)
+    and plain encoding (no refinement / fine grid / taps variant) and, for cross-validated tasks, with cross-fitted
+    validation (v2; v1 CV results are left out and counted as stale)."""
     ok = t.index_sha1 == b.index_sha1 if b.index_sha1 else pd.Series(True, index=t.index)
+    ok &= t.variant == "multi"        # the suite's default window (CT: brain, subdural, bone), plain encoding
     return ok & (t.cv != "cv") if b.version >= 2 else ok
 
 

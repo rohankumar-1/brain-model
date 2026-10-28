@@ -56,6 +56,15 @@ seen:
   oasis1_mmse: [mmse]
   oasis2_mmse: [mmse]
   dementia: [mmse]          # held-out few-shot task built from OASIS-1 CDR: not held out for runs that trained MMSE
+  # a closely related label trained on the same cohort (added 2026-10-28): CDR stage <- MMSE on OASIS-1 / -2; autism
+  # diagnosis <- ADOS severity, which exists only for ABIDE's ASD subjects
+  oasis1_cdr: [mmse]
+  oasis2_cdr: [mmse]
+  abide_asd: [autism_severity]
+  # RSNA ICH: the hemorrhage tasks train on its study labels, and hemorrhage segmentation on BHSD / HemSeg masks of
+  # RSNA studies (added 2026-10-27; before, multitask models were scored on rsna_ich as if it were transfer)
+  rsna_ich: [hemorrhage_any, hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular,
+             hemorrhage_subarachnoid, hemorrhage_subdural, hemorrhage_segmentation]
 
 # adaptation: few-shot on the held-out tasks (brain.multitask.fewshot), task embedding fitted on k labelled scans.
 # Multitask / joint checkpoints only (the run report).

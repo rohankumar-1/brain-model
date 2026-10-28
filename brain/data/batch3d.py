@@ -138,7 +138,7 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
             n = view.shape[0]
             flat = view.reshape(n * b, *view.shape[2:])
             d[f"{g}_view"] = appearance(flat, mod.repeat(n), aug, (thick[0].repeat(n), thick[1].repeat(n)),
-                                        vid.repeat(n), cid.repeat(n), tq.repeat(n, 1)).view(n, b, *flat.shape[1:])
+                                        vid.repeat(n), cid.repeat(n), tq.repeat(n, 1)).view(n, b, -1, *flat.shape[2:])   # -1: role channels
         d["plans"][g] = length_plan(counts.flatten(), buckets)
     pr = (cfg["loss"].get("predict") or {})
     if float(pr.get("weight", 0.0)) > 0:

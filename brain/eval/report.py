@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -238,6 +239,15 @@ def cv_protocol(protocol: str | None) -> str:
     return "cv-xf" if isinstance(c, dict) and c.get("val") == "cross_fitted" else "cv"
 
 
+def _reroot(path: str | None) -> str | None:
+    """A stored artifact path, moved under this checkout's ``runs/`` when it was written from another checkout (a
+    worktree since removed) whose ``runs/`` pointed at the same store."""
+    if not path or os.path.exists(path) or "/runs/" not in path:
+        return path
+    moved = REPO_ROOT / "runs" / path.split("/runs/", 1)[1]
+    return str(moved) if moved.exists() else path
+
+
 @lru_cache(maxsize=1)
 def suite_heads() -> pd.DataFrame:
     """Every (model, task, head) of the frozen suite with its val / test score, protocol and prediction file."""
@@ -246,13 +256,19 @@ def suite_heads() -> pd.DataFrame:
     con = db.connect()
     db.ingest(con)
     t = db.table(con)
-    t = t[t.kind == "task"].sort_values("finished_utc").drop_duplicates(["model_id", "task", "head", "view", "seed"],
-                                                                          keep="last")
+    t = t[t.kind == "task"].copy()
+    # the eval window (canonical / multi / ...) and encoding variant (``embeddings.cache_tag``: refinement, fine grid,
+    # taps, ...) are part of a result's identity: a variant's run is another result, never the plain encoder's
+    proto = [(json.loads(p) if isinstance(p, str) and p else {}) for p in t.protocol]
+    t["window"] = [p.get("window") or "multi" for p in proto]
+    t["variant"] = [(p.get("window") or "multi") + (p.get("encoding") or "") for p in proto]
+    t = t.sort_values("finished_utc").drop_duplicates(["model_id", "task", "head", "view", "seed", "variant"],
+                                                      keep="last")
     t = t[~t.model_id.str.contains("+", regex=False)].copy()
     t["fp"] = t.model_id.map(fingerprint)
     # segmentation heads store per-volume Dice (``<head>_volumes``), the others per-scan predictions (``<head>``)
-    t["pred"] = [(json.loads(a).get(h) or json.loads(a).get(f"{h}_volumes")) if isinstance(a, str) and a else None
-                 for a, h in zip(t.artifacts, t["head"])]
+    t["pred"] = [_reroot((json.loads(a).get(h) or json.loads(a).get(f"{h}_volumes")) if isinstance(a, str) and a
+                         else None) for a, h in zip(t.artifacts, t["head"])]
     t["cv"] = [cv_protocol(p) for p in t.protocol]
     t["encoder"] = ~t["head"].astype(str).str.startswith(SUPERVISED_READOUTS)
     return t

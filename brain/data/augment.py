@@ -12,7 +12,9 @@ it came from, so that agreement between views can only be reached through anatom
 4. ``curve``         random monotone re-rendering of tissue contrast: a piecewise-linear map whose knots sit at quantiles
                      of the crop's own foreground intensities, so each tissue mode can be stretched or squeezed
                      independently. ``flip`` negates it about the median, which swaps the order of tissues as T1 -> T2
-                     or CT-like -> MRI-like contrast does. Background stays the darkest value.
+                     does. Background stays the darkest value. MRI rows only: CT density is physical (hyperdense acute
+                     blood, hypodense infarct and chronic blood), and before 2026-10-28 CT rows were re-rendered and
+                     inverted too, which taught the encoder to ignore hyper- vs hypodensity.
 5. ``blur``/``drift``/``noise``  isotropic blur, a slow additive drift, and noise, in windowed units.
    With ``noise.kind: rician`` MRI rows instead get Rician noise in native units (before the window): the magnitude of
    the signal plus complex Gaussian noise, which is how MRI noise arises (biased upward and grainy in dark tissue and
@@ -33,7 +35,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from brain.common.windowing import MOD_CT, MOD_MRI, asinh_window, fg_thresh, floors, sample_windows
+from brain.common.windowing import MOD_CT, MOD_MRI, asinh_window, fg_thresh, floors, role_windows, sample_windows
 
 FWHM_TO_SIGMA = 1.0 / 2.3548
 QUANTILE_SAMPLES = 16384  # foreground voxels sampled per row to place the curve knots
@@ -259,6 +261,8 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     measured on the unaugmented intensities)."""
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
+    if (aug.get("window") or {}).get("mode") == "roles":
+        return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect)
     if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
         x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
@@ -271,8 +275,53 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
         x, noisy = rician_noise(x, modality, noise)
     y = window_view(x, modality, aug)
     if _enabled(aug.get("curve")):
-        y = contrast_curve(y, fg, aug["curve"])
+        y = mri_curve(y, modality, fg, aug["curve"])
     return degrade(y, aug, skip_noise=noisy, skip_drift=protect)
+
+
+def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect) -> torch.Tensor:
+    """``appearance`` for a three-channel encoder (``window.mode: roles``): every intensity augmentation in native units,
+    then the three role windows (``windowing.role_windows``, jittered by ``window.jitter``) last, so CT channels keep
+    their physical meaning (blood ~60 HU in each). The contrast curve re-renders MRI rows only. Returns (R, 3, ...), or
+    (R, 1, ...) with ``window.channels`` 1 (one role window per row: the one-channel control)."""
+    r, dev = x.shape[0], x.device
+    if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
+        x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
+    if _enabled(aug.get("bias")):
+        x = bias_field(x, modality, aug["bias"], skip=protect)
+    if _enabled(aug.get("through_plane")):
+        x = through_plane(x, aug["through_plane"], thick)
+    noise = aug.get("noise") or {}
+    if _enabled(noise):
+        x, noisy = rician_noise(x, modality, noise) if str(noise.get("kind", "gaussian")) == "rician" else (x, None)
+        ct = (modality.reshape(r) == MOD_CT) & (torch.rand(r, device=dev) < float(noise["p"]))
+        if noisy is not None:
+            ct &= ~noisy.to(dev)
+        lo, hi = noise.get("sigma_hu", (2.0, 15.0))              # CT: Gaussian noise in HU
+        x = x + (ct.float() * _uniform(r, lo, hi, dev)).view(r, 1, 1, 1, 1) * torch.randn_like(x)
+    if _enabled(aug.get("curve")):
+        x = mri_curve(x, modality, fg, aug["curve"])
+    bl = aug.get("blur") or {}
+    if _enabled(bl):
+        on = torch.rand(r, device=dev) < float(bl["p"])
+        lo, hi = bl.get("sigma_vox", (0.5, 1.5))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
+    win = aug.get("window") or {}
+    y = role_windows(x, modality, float(win.get("jitter", 0.0)))
+    if int(win.get("channels", 3)) == 1:
+        # the matched one-channel control: this same pipeline, one role window per row drawn uniformly (frozen
+        # evaluation's ``multi`` passes use these windows), so the channel count is the only difference from roles
+        pick = torch.randint(0, y.shape[1], (r, 1) + (1,) * (y.dim() - 2), device=dev)
+        y = y.gather(1, pick.expand(r, 1, *y.shape[2:]))
+    return y
+
+
+def mri_curve(x: torch.Tensor, modality: torch.Tensor, fg: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """``contrast_curve`` on the MRI rows of ``x`` only; CT rows are returned unchanged (module docstring, ``curve``)."""
+    mri = (modality.reshape(-1).to(x.device) == MOD_MRI).nonzero(as_tuple=True)[0]
+    if mri.numel():
+        x[mri] = contrast_curve(x[mri], fg[mri], cfg)
+    return x
 
 
 def skull_dropout(volume: torch.Tensor, brain: torch.Tensor, modality: int, p: float,

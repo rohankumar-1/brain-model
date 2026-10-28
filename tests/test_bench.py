@@ -35,6 +35,8 @@ def test_our_checkpoints_map_their_trained_tasks_to_seen_benchmark_tasks():
     ours = _ref(cls="supervised", seen=("mmse", "age"), ckpt="x.pt")      # seen_tasks: the registry tasks it trained
     assert {"oasis1_mmse", "oasis2_mmse"} <= b.seen_by(ours)
     assert "oasis1_mmse" not in b.tasks_for(ours)
+    assert {"oasis1_cdr", "oasis2_cdr"} <= b.seen_by(ours)                 # CDR stage: MMSE trained on the same cohort
+    assert "abide_asd" in b.seen_by(_ref(cls="supervised", seen=("autism_severity",), ckpt="x.pt"))
 
 
 def test_registry_entries_are_valid_and_resolve():

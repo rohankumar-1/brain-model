@@ -11,7 +11,9 @@ Weights are loaded from safetensors only (no pickles from third parties). Both n
 2.0). A SegResNet encoder (77M) trained with intra-sample SimCLR on 148k CTs of the Imaging Data Commons. Input as in
 its pretraining: SPL orientation, 3 x 1 x 1 mm, HU -1024..2048 scaled to [0, 1]; here the whole stored box (64 x 256 x
 256 voxels = 192 x 256 x 256 mm, the head and some padding) in one pass. Global feature: the last stage average-pooled
-(the model card's recipe), 512-d; tokens: that stage (4 x 16 x 16 at 48 x 16 x 16 mm).
+(the model card's recipe), 512-d; tokens: that stage (4 x 16 x 16 at 48 x 16 x 16 mm). ``ct_fm_triage`` (kwargs
+``windows``): the input of CT-FM's own head-CT evaluation instead, 5 x 2 x 2 mm, 48 x 128 x 128, four HU windows
+stacked along S; tokens average the four copies' maps.
 
 ``BrainIAC``: BrainIAC (Tak et al., Nature Neuroscience 2026; github.com/AIM-KannLab/BrainIAC, non-commercial research
 licence). A MONAI 3D ViT-B (16^3 patches, 96^3 input, no CLS token) trained with SimCLR on ~32k structural MRIs (T1,
@@ -51,6 +53,10 @@ class CTFM(ExternalEncoder):
         self.shape = tuple(int(v) for v in kw.get("shape_spl", (64, 256, 256)))
         if any(s % 16 for s in self.shape):
             raise ValueError(f"CT-FM input {self.shape} must be a multiple of 16 on every axis")
+        # HU windows, each scaled to [0, 1], stacked along S as CT-FM's head-CT triage pipeline does
+        # (evaluation/cq500.yaml: blood 0-80, subdural -125-175, stroke 28-36, bone -900-2100, ConcatItemsd dim=1);
+        # none: its pretraining scaling, HU -1024..2048 in one copy
+        self.windows = [tuple(float(v) for v in w) for w in kw.get("windows") or []]
         self.model = SegResEncoder(spatial_dims=3, init_filters=32, in_channels=1, blocks_down=(1, 2, 2, 4, 4))
         self.model.load_state_dict(load_file(str(resolve(spec["weights"]))), strict=True)
         self.model.eval().to(device)
@@ -63,16 +69,24 @@ class CTFM(ExternalEncoder):
         a[:3, 3] = _box_centre(attrs) - a[:3, :3] @ ((np.asarray(self.shape) - 1) / 2)
         return a
 
+    def _input(self, hu: torch.Tensor) -> torch.Tensor:
+        """The network input from HU on the model grid (S, P, L): one scaled copy, or the windows stacked along S."""
+        if not self.windows:
+            return ((hu + 1024.0) / 3072.0).clamp(0, 1)
+        return torch.cat([((hu - lo) / (hi - lo)).clamp(0, 1) for lo, hi in self.windows], 0)
+
     @torch.no_grad()
     def encode(self, vol_xyz, modality, brain, attrs) -> dict:
         aff = self._affine(attrs)
-        x = self.resample(vol_xyz, attrs, aff, self.shape, fill=-1024.0)
-        x = ((x + 1024.0) / 3072.0).clamp(0, 1)
-        f = self.model(x[None, None])[-1][0]                   # (512, S/16, P/16, L/16)
+        x = self._input(self.resample(vol_xyz, attrs, aff, self.shape, fill=-1024.0))
+        f = self.model(x[None, None])[-1][0]                   # (512, copies * S/16, P/16, L/16)
+        pooled = f.mean((1, 2, 3))                             # the whole map, as CT-FM's heads pool it
+        if self.windows:                                       # the copies cover the same anatomy: average them
+            f = f.reshape(f.shape[0], len(self.windows), -1, *f.shape[2:]).mean(1)
         stride = np.diag([16.0, 16.0, 16.0, 1.0])
         stride[:3, 3] = 7.5                                    # feature voxel -> centre of its 16^3 input block
         out = self.to_token_grid(f, aff @ stride, vol_xyz, modality, attrs)
-        out["pooled"] = f.mean((1, 2, 3)).cpu().numpy()
+        out["pooled"] = pooled.cpu().numpy()
         return out
 
 
@@ -101,7 +115,9 @@ class BrainIAC(ExternalEncoder):
     @torch.no_grad()
     def encode(self, vol_xyz, modality, brain, attrs) -> dict:
         raw = self.raw_intensity(vol_xyz, modality, attrs)
-        m = brain if brain is not None else vol_xyz > -5.5
+        # brain voxels the scan has: a skull-stripped source (ATLAS, BraTS, MSD, ...) leaves background inside the
+        # SynthStrip mask, which raw_intensity would turn into large negative values (a false rim, z-scored with the brain)
+        m = (brain & (vol_xyz > -5.5)) if brain is not None else vol_xyz > -5.5
         img = self.resample(np.where(m, raw, 0.0).astype(np.float32), attrs, self.tpl_affine, self.tpl_shape)
         x = F.interpolate(img[None, None], size=(self.SIZE,) * 3, mode="trilinear", align_corners=False)
         nz = x != 0
