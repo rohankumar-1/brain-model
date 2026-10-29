@@ -116,11 +116,6 @@ def instance() -> None:
     fetch()
 
 
-def sinoct() -> None:
-    """SinoCT reconstructed DICOMs only. Sample: ``--sample 100``. Overlap filter: ``--overlap``."""
-    from brain.datasets import download_sinoct as S
-    S.write_blocklist(S.OUT / "rsna_blocklist.txt", S.rsna_blocklist())
-    S.sample_dicoms(100, S.OUT / "sample")
 
 
 def brainmetshare() -> None:

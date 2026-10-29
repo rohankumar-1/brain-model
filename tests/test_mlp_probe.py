@@ -32,3 +32,17 @@ def test_binary_multilabel_and_regression_learn_and_cross_fit():
             assert np.corrcoef(p, y[te])[0, 1] > 0.8, kind
         else:
             assert _safe_auc(y[te], p) > 0.85, kind
+
+
+def test_octant_embedding_keeps_the_side():
+    from brain.downstream.run_suite import octant_embedding
+
+    n, (nz, ny, nx), d = 4, (4, 4, 4), 3
+    mus = np.zeros((n, nz * ny * nx, d), np.float32)
+    g = mus.reshape(n, nz, ny, nx, d)
+    g[0, :, :, :2, 0] = 1.0                       # scan 0: signal in the low-x half only
+    g[1, :, :, 2:, 0] = 1.0                       # scan 1: high-x half only
+    o = octant_embedding({"mus": mus, "mask": np.ones((n, nz * ny * nx), bool)}, (nz, ny, nx)).reshape(n, 8, d)
+    assert o[0, 0::2, 0].min() == 1.0 and o[0, 1::2, 0].max() == 0.0
+    assert o[1, 1::2, 0].min() == 1.0 and o[1, 0::2, 0].max() == 0.0
+    assert np.allclose(o[0].mean(0), o[1].mean(0))   # the pooled mean cannot tell them apart

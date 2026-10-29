@@ -59,7 +59,8 @@ def parse_args() -> argparse.Namespace:
                    help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid (default: axial only)")
     p.add_argument("--readout", choices=["pooled", "axial", "raw"], default="pooled",
                    help="pooled (benchmark v3): a linear probe and BrainDINO's MLP head on one embedding per volume "
-                        "(CLS, else the mean token); axial (v2): PCA, then per-plane and 4x4x4 probes on a cubic token "
+                        "(CLS, else the mean token), plus a linear probe on the 8 octant means of a 3D token grid "
+                        "(spatial: side and coarse position); axial (v2): PCA, then per-plane and 4x4x4 probes on a cubic token "
                         "grid, plus linear heads on each global embedding; raw: pool every token")
     p.add_argument("--cv", choices=["auto", "on", "off"], default="auto",
                    help="repeated subject-grouped k-fold CV instead of the fixed split (auto: small held-out tasks)")
@@ -149,6 +150,34 @@ def pooled_embedding(emb: dict, chunk: int = 64) -> tuple[np.ndarray, str]:
     return out, "mean"
 
 
+def octant_embedding(emb: dict, grid_zyx: tuple[int, int, int], chunk: int = 32) -> np.ndarray:
+    """(N, 8 D): the mean foreground token of each octant of the token grid (halves along z, y and x), so a linear
+    probe still sees the side and the coarse position of a finding that one pooled vector averages away."""
+    mus, mask = emb["mus"], np.asarray(emb["mask"])
+    nz, ny, nx = grid_zyx
+    d = mus.shape[-1]
+    out = np.zeros((len(mus), 8, d), dtype=np.float32)
+    cells = [(slice(0, nz // 2), slice(nz // 2, nz)), (slice(0, ny // 2), slice(ny // 2, ny)),
+             (slice(0, nx // 2), slice(nx // 2, nx))]
+    for i in range(0, len(mus), chunk):
+        x = np.asarray(mus[i:i + chunk], dtype=np.float32).reshape(-1, nz, ny, nx, d)
+        m = mask[i:i + chunk].reshape(-1, nz, ny, nx, 1).astype(np.float32)
+        k = 0
+        for sz in cells[0]:
+            for sy in cells[1]:
+                for sx in cells[2]:
+                    xm, mm = x[:, sz, sy, sx], m[:, sz, sy, sx]
+                    out[i:i + chunk, k] = (xm * mm).sum((1, 2, 3)) / np.clip(mm.sum((1, 2, 3)), 1, None)
+                    k += 1
+    return out.reshape(len(mus), 8 * d)
+
+
+def spatial_head(task: TaskBundle, seed: int):
+    """``spatial``: the linear probe (logistic / ridge, C or alpha on val) on the octant embedding."""
+    reg, multi = task.task_type == "regression", task.task_type == "multilabel"
+    return _rename(make_ridge(), "spatial", "mean") if reg else _rename(make_logreg_pool(multi, seed), "spatial", "mean")
+
+
 def pooled_heads(task: TaskBundle, seed: int) -> list:
     """Benchmark v3 readouts on the pooled embedding: ``linear`` (logistic / ridge, C or alpha on val) and ``mlp``."""
     reg, multi = task.task_type == "regression", task.task_type == "multilabel"
@@ -215,12 +244,21 @@ def main() -> None:
         vec, pooled_kind = pooled_embedding(emb)
         p_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((len(vec), 1), dtype=bool)}
         p_emb.pop("z", None)
-        print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp")
+        o_emb = None
+        if grid is not None:
+            octs = octant_embedding(emb, grid)
+            o_emb = {**emb, "mus": octs[:, None, :], "mask": np.ones((len(octs), 1), dtype=bool)}
+            o_emb.pop("z", None)
+        print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp"
+              + (f"; spatial (octants) {octs.shape}" if o_emb is not None else ""))
 
     def head_sets_for(task_s: TaskBundle, packs_s: dict) -> list[tuple[str, dict, list]]:
         """Fresh heads for one split (PCA readouts are refit on this split's training volumes)."""
         if args.readout == "pooled":
             sets = [(pooled_kind, ensure_val(split_xy(task_s, p_emb), seed=args.seed), pooled_heads(task_s, args.seed))]
+            if o_emb is not None:
+                sets.append(("octants", ensure_val(split_xy(task_s, o_emb), seed=args.seed),
+                             [spatial_head(task_s, args.seed)]))
             if token_heads and grid is not None:
                 n_out = len(task_s.label_names) if multilabel else 1
                 sets.append(("tokens", packs_s, make_token_heads(

@@ -172,7 +172,7 @@ presence and 13 locations, 2,254 aneurysm points (`train_localizers.csv`, pixel 
 segmentations. `sources.rsna_ica` reads series straight from the zip by byte offsets (index cached in
 `work/rsna_ica`); prep needs `BRAIN_DICOM_READER=dcm2niix` (some MR series are one enhanced multi-frame file), with
 the SimpleITK reader as fallback when dcm2niix refuses a series (derived / secondary CTAs, malformed overlay tags).
-Pilot (`jobs/rsna_ica_pilot.sbatch`, 30 series per modality): MRA 30/30 (median template brain Dice 0.93 despite the
+Pilot (`jobs/archive/rsna_ica_pilot.sbatch`, 30 series per modality): MRA 30/30 (median template brain Dice 0.93 despite the
 slab), T2 30/30, T1 post 27/30 + 3 reader fallbacks, CTA 12 ok + 4 reader fallbacks + 14 flagged.
 
 Known issue: the flagged CTAs carry wrong rescale tags. Their stored pixels are already in HU (air ~ -1000), but the

@@ -139,3 +139,20 @@ def test_old_brats_numbering_is_stored_as_brats_2023():
     assert remap_seg("upenn_gbm_t1n", "seg", m).tolist() == [0, 1, 2, 3]
     assert remap_seg("brats2024_gli_t1n", "seg", m).tolist() == [0, 1, 2, 4]   # 4 is the resection cavity there
     assert remap_seg("ucsf_pdgm_t1n", "brain", m).tolist() == [0, 1, 2, 4]
+
+
+def test_long_ct_keeps_only_the_head_and_its_physical_position():
+    from brain.prep.geometry import crop_to_head, standardize
+
+    a = np.full((400, 32, 32), -1000.0, np.float32)
+    a[:, 8:24, 8:24] = 40.0                       # neck / torso: tissue on every slice
+    a[380:, :, :] = -1000.0                       # air above the vertex (slices 380+)
+    img = sitk.GetImageFromArray(a)
+    img.SetSpacing((1.0, 1.0, 1.0))
+    img = standardize(img)
+    out, info = crop_to_head(img)
+    assert info["head_crop_mm"] == 400.0 and out.GetSize()[2] == 240
+    top = out.TransformIndexToPhysicalPoint((0, 0, out.GetSize()[2] - 1))[2]
+    assert abs(top - img.TransformIndexToPhysicalPoint((0, 0, 394))[2]) < 1e-6      # vertex (379) + 15 mm margin
+    short = standardize(sitk.GetImageFromArray(a[:200]))
+    assert crop_to_head(short)[1] == {}

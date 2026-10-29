@@ -608,19 +608,6 @@ def upenn_gbm(root: Path = DATASETS / "upenn_gbm" / "nifti") -> list[Case]:
     return cases
 
 
-def sinoct(root: Path = DATASETS / "sinoct" / "reconstructed") -> list[Case]:
-    """Keep-only reconstructed SinoCT series (RSNA overlap already dropped at pull). One case per series."""
-    root = Path(root)
-    if not root.exists():
-        return []
-    cases = []
-    for d in sorted(root.glob("batch_*/series_*/reconstructed_image")):
-        n = sum(1 for _ in d.glob("*.dcm")) + sum(1 for _ in d.glob("*.DCM"))
-        if n < 8:
-            continue
-        series, batch = d.parent.name, d.parent.parent.name
-        cases.append(Case("sinoct", f"{batch}_{series}", "ct", d))
-    return cases
 
 
 def instance(root: Path = DATASETS / "instance2022" / "extracted") -> list[Case]:

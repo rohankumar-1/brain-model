@@ -89,6 +89,35 @@ def read(path: Path) -> sitk.Image:
     return standardize(img)
 
 
+HEAD_CROP_ABOVE_MM, HEAD_KEEP_MM = 260.0, 240.0
+
+
+def crop_to_head(img: sitk.Image, above_mm: float = HEAD_CROP_ABOVE_MM,
+                 keep_mm: float = HEAD_KEEP_MM) -> tuple[sitk.Image, dict]:
+    """A CT longer than ``above_mm`` (head-and-neck CTA from the aortic arch) keeps its top ``keep_mm``: vertex
+    through the skull base. Otherwise the neck and shoulders, wider and with more soft tissue than the head, pull the
+    centering estimates apart (RSNA-ICA: flagged ``head_disagree`` CTAs had a median 350 mm coverage, the passing ones
+    191 mm). The top is the highest slice with tissue (> -300 HU on >= 1% of the widest slice's area) plus 15 mm.
+    Physical positions are unchanged (a sub-image), so the stored transform still maps to the source scan."""
+    n, sp = img.GetSize(), img.GetSpacing()
+    if n[2] * sp[2] <= above_mm:
+        return img, {}
+    a = sitk.GetArrayViewFromImage(img)
+    area = (a[:, ::4, ::4] > -300).mean((1, 2))
+    tissue = np.flatnonzero(area >= 0.01 * area.max())
+    if not len(tissue):
+        return img, {}
+    up = np.array(img.GetDirection()).reshape(3, 3)[2, 2] > 0          # slice index runs toward superior
+    k, margin = int(round(keep_mm / sp[2])), int(round(15.0 / sp[2]))
+    if up:
+        hi = min(n[2], int(tissue.max()) + 1 + margin)
+        lo = max(0, hi - k)
+    else:
+        lo = max(0, int(tissue.min()) - margin)
+        hi = min(n[2], lo + k)
+    return img[:, :, lo:hi], {"head_crop_mm": float(n[2] * sp[2]), "head_crop_slices": [lo, hi]}
+
+
 def coarse(img: sitk.Image, mm: float = COARSE_MM) -> sitk.Image:
     """Isotropic ``mm`` (default ~4 mm) bin-averaged copy, cheap enough for centering and registration."""
     small = sitk.BinShrink(img, [max(1, int(mm / s)) for s in img.GetSpacing()])

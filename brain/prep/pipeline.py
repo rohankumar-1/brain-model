@@ -197,6 +197,8 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
         if ct:
             img, info["offset_repaired"] = intensity.fix_ct_offset(img)
             img = intensity.clamp_ct(img)
+            img, crop = geometry.crop_to_head(img)              # head-and-neck CTA: the head only
+            info |= crop
     if needs_n4(case.dataset):
         with stage("n4"):
             img = intensity.n4(img)

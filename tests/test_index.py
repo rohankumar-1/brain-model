@@ -88,9 +88,6 @@ def test_held_out_families():
         dedup_key("fomo_yale_mets_t1w", "sub-a_ses-01_t1w") == "fomo_yale_mets:sub-a"
     assert dataset_family("fomo_openneuro_ds000228_t1w") == "fomo_openneuro_ds000228"
     assert "cq500" in all_held_out()
-    assert "sinoct" not in HELD_OUT
-    assert dataset_family("sinoct") == "sinoct"
-    assert dedup_key("sinoct", "batch_8_series_8969") == "sinoct:batch_8_series_8969"
     assert "msd_braintumor" in HELD_OUT
     assert dataset_family("msd_braintumor") == "msd_braintumor"
     assert volume_id("msd_braintumor", "BRATS_001", "mri") == "msd_braintumor:BRATS_001"

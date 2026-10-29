@@ -207,91 +207,12 @@ def test_msd_source_lists_labeled_train_cases(tmp_path):
     assert cases[0].modality == "mri" and cases[0].masks[0][0] == "seg"
 
 
-def test_sinoct_source_groups_reconstructed_series(tmp_path):
-    from pathlib import Path
-    from brain.prep.sources import sinoct
-
-    d = tmp_path
-    root = Path(d)
-    keep = root / "batch_1" / "series_9" / "reconstructed_image"
-    skip = root / "batch_1" / "series_10" / "reconstructed_image"
-    keep.mkdir(parents=True)
-    skip.mkdir(parents=True)
-    for i in range(12):
-        (keep / f"image_{i}.dcm").write_bytes(b"dicom")
-    for i in range(3):
-        (skip / f"image_{i}.dcm").write_bytes(b"dicom")
-    cases = sinoct(root)
-    assert len(cases) == 1
-    assert cases[0].dataset == "sinoct" and cases[0].modality == "ct"
-    assert cases[0].case_id == "batch_1_series_9"
-    assert cases[0].path == keep
 
 
-def test_sinoct_pixel_fingerprint_ignores_fov_pad_and_matches():
-    import pandas as pd
-    from brain.datasets.sinoct_overlap import canon_plane, fingerprints_from_hu, score_probe
-
-    brain = np.full((512, 512), -1024, np.int16)
-    brain[80:432, 80:432] = np.arange(352 * 352, dtype=np.int16).reshape(352, 352) % 80 + 20
-    padded = brain.copy()
-    padded[:12] = -3024
-    padded[-12:] = -3024
-    a = fingerprints_from_hu(brain)
-    b = fingerprints_from_hu(padded)
-    assert a["exact"] == b["exact"] and a["coarse"] == b["coarse"] and a["ahash"] == b["ahash"]
-    other_img = np.full((512, 512), -1024, np.int16)
-    other_img[80:432, 80:432] = 200
-    other = fingerprints_from_hu(other_img)
-    assert other["exact"] != a["exact"]
-    assert canon_plane(brain).shape == (384, 384)
-
-    fp = pd.DataFrame([{"study_id": "ID_rsna", "member": "a.dcm", **a}])
-    hit = pd.DataFrame([{"series": "series_1", "batch": "batch_1", **b}])
-    miss = pd.DataFrame([{"series": "series_2", "batch": "batch_1", **other}])
-    scores = score_probe(pd.concat([hit, miss], ignore_index=True), fp, hamming=8)
-    by = scores.set_index("series")
-    assert bool(by.loc["series_1", "drop"]) and by.loc["series_1", "reason"] == "exact"
-    assert not bool(by.loc["series_2", "drop"])
 
 
-def test_sinoct_pull_skips_dropped_series():
-    import pandas as pd
-    from brain.datasets.sinoct_overlap import select_pull_files
-
-    recon = pd.DataFrame({
-        "series": ["series_1", "series_1", "series_2", "series_3"],
-        "rel": ["a.dcm", "b.dcm", "c.dcm", "d.dcm"],
-        "size": [1, 1, 1, 1],
-    })
-    got = select_pull_files(recon, keep={"series_1", "series_2", "series_3"}, drop={"series_2"})
-    assert set(got["series"]) == {"series_1", "series_3"}
-    assert "c.dcm" not in set(got["rel"])
 
 
-def test_sinoct_drops_sinograms_and_rsna_ids():
-    import pandas as pd
-    from brain.datasets.download_sinoct import classify, is_sinogram, normalize_id
-
-    assert is_sinogram("Data/sinograms/0073410.npy")
-    assert not is_sinogram("Data/0073410/ct.dcm")
-    block = {normalize_id("ID_1f6d1e8aeb"), normalize_id("ID_000000e27")}
-    files = pd.DataFrame({
-        "file_id": ["a", "b", "c", "d"],
-        "file_name": [
-            "Data/ID_1f6d1e8aeb/slice.dcm",
-            "Data/keepme/slice.dcm",
-            "Data/sinograms/keepme.npy",
-            "Data/other/ID_000000e27.dcm",
-        ],
-        "size": [1, 1, 1, 1],
-    })
-    labels = pd.DataFrame({"patient_id": ["ID_1f6d1e8aeb", "keepme", "other"], "label": ["abnormal", "normal", "normal"]})
-    out = classify(files, labels, block)
-    keep = set(out.loc[out.keep, "file_name"])
-    assert keep == {"Data/keepme/slice.dcm"}
-    assert set(out.loc[out.drop_reason == "rsna", "patient_id"]) >= {"ID_1f6d1e8aeb", "other"}
-    assert (out.kind == "sinogram").sum() == 1
 
 
 def test_brainmetshare_pairs_sequences_and_seg_on_bravo(tmp_path):

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Few-shot (held-out tasks) and transfer (trained tasks on new cohorts) evaluation of a multitask checkpoint.
 #
-#   sbatch --export=ALL,CKPT=runs/multitask/v3init_s42/best.pt jobs/multitask_fewshot.sbatch
+#   sbatch --export=ALL,CKPT=runs/multitask/omni_b_tokens/best.pt jobs/multitask_fewshot.sbatch
 #   sbatch --export=ALL,CKPT=...,EXTRA_ARGS="--shots 16 64 --tasks cq500_hemorrhage dementia" jobs/multitask_fewshot.sbatch
 
 #SBATCH -p pi_dbertsim

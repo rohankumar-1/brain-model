@@ -5,7 +5,6 @@ from __future__ import annotations
 import torch
 
 from brain.common.windowing import WINDOW_MIXES, asinh_window, floors, foreground_mask, sample_windows
-from brain.data.crops2d import same_crop_seq_pair, same_crop_window_pair, warp_floor
 from brain.objectives.sigreg import pairwise_cosine, prediction_loss
 
 
@@ -56,30 +55,6 @@ def test_tissue_mix_is_brain_heavy():
     assert (w > 0).all() and c.shape == (8, 1, 1, 1)
 
 
-def test_warp_floor_padding_is_the_modality_floor():
-    x = torch.full((2, 1, 16, 16), 40.0)
-    mod = torch.tensor([0, 1])
-    x[1] = 1.0
-    floor = floors(mod).view(2, 1, 1, 1)
-    theta = torch.zeros(2, 2, 3)
-    theta[:, 0, 0] = 1
-    theta[:, 1, 1] = 1
-    theta[:, 0, 2] = 1.5  # shift out so most of the crop is padding
-    y = warp_floor(x, theta, 16, floor)
-    pad = (y[0] - (-1024.0)).abs() < 1e-3
-    assert pad.float().mean() > 0.4
-    assert ((y[1] + 6.0).abs() < 1e-3).float().mean() > 0.4
-
-
-def test_same_crop_window_pair_disagrees_photometrically():
-    torch.manual_seed(0)
-    x = torch.zeros(4, 1, 32, 32)
-    x[:, :, 8:24, 8:24] = 80.0
-    mod = torch.zeros(4, dtype=torch.long)
-    pair = same_crop_window_pair(x, mod, area=(1.0, 1.0), max_rot=0.0)
-    assert pair.shape == (2, 4, 1, 32, 32)
-    assert torch.isfinite(pair).all()
-    assert not torch.allclose(pair[0], pair[1])
 
 
 def test_window_pair_loss_is_zero_when_views_match():
@@ -88,18 +63,6 @@ def test_window_pair_loss_is_zero_when_views_match():
     assert prediction_loss(z).item() < 1e-6
     assert pairwise_cosine(z).item() > 0.999
 
-
-def test_same_crop_seq_pair_shares_geometry():
-    torch.manual_seed(0)
-    x = torch.zeros(2, 1, 32, 32)
-    sib = torch.zeros(2, 1, 32, 32)
-    x[:, :, 8:24, 8:24] = 2.0
-    sib[:, :, 8:24, 8:24] = -1.0
-    mod = torch.ones(2, dtype=torch.long)
-    pair = same_crop_seq_pair(x, sib, mod, area=(1.0, 1.0), max_rot=0.0)
-    assert pair.shape == (2, 2, 1, 32, 32)
-    assert torch.isfinite(pair).all()
-    assert not torch.allclose(pair[0], pair[1])
 
 
 def test_foreground_mask_by_modality():

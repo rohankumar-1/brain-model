@@ -31,7 +31,7 @@ brain/
   downstream/  frozen-encoder tasks, heads, probes, segmentation, results views; models.py (any model, ours or
                published, behind one interface) and adapters/ (published encoders, baselines)
   bench/       the benchmark: versioned spec, run, per-model card, leaderboard
-  datasets/    download / fetch scripts, SinoCT overlap
+  datasets/    download / fetch scripts
 configs/<method>/*.yaml    only the keys that differ from brain/train/defaults.py need be set
 configs/bench/             benchmark.yaml (the protocol), models.yaml (BQ checkpoints by name; published models)
 jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep_v6*, synthseg, multitask_*, eval_run /

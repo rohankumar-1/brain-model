@@ -1,6 +1,6 @@
 """Few-shot and transfer evaluation of a multitask checkpoint.
 
-    python -m brain.multitask.fewshot --ckpt runs/multitask/v3init_s42/best.pt --shots 16 64 256 --seeds 3
+    python -m brain.multitask.fewshot --ckpt runs/multitask/omni_b_tokens/best.pt --shots 16 64 256 --seeds 3
 
 Held-out tasks (registry ``role: held_out``) have a row in the task-embedding table that training never updated.
 Few-shot fitting optimises only that row (and, for multiclass, the task's class vectors) on ``k`` labelled scans of the
