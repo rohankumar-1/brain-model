@@ -1,0 +1,27 @@
+# Single-task (or single-family) model: the multitask recipe restricted to one task, fully fine-tuned from v3 SSL.
+# A per-task specialist (benchmark class C) on the same splits, and a teacher for weak labels later.
+#   sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/single_task.yaml,\
+#     EXTRA_ARGS="--set tasks.ids=[age] --out-dir runs/single/age" jobs/train_pi.sbatch
+#   (a task family: --set tasks.groups=[hemorrhage])
+# Everything not set here is the multitask default (brain/train/defaults.py): task tokens, augmentation, sampling.
+data:
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
+
+model:
+  init_from: runs/v3/cls_s42/best.pt      # step 18000
+
+tasks: {exclude: null}                    # the chosen task(s) only, even a small one
+
+loss: {balance: ema}
+
+optim:
+  enc_lr_mult: 1.0                        # full fine-tuning
+  layer_decay: 0.75
+  batch_size: 8                           # whole volumes per GPU
+
+train:
+  max_steps: 10000
+  best_metric: loss
+
+output:
+  out_dir: runs/single/unnamed

@@ -1,0 +1,32 @@
+# The pinned readout per benchmark task (python -m brain.bench pin): the head with the best mean validation
+# score over the models listed, never chosen on test. Re-pin only with a new benchmark version.
+version: 1
+pinned_utc: '2026-10-27T16:21:57+00:00'
+from_models:
+- BQ-R6
+- BQ-v3
+- BQ-A1
+index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
+readouts:
+  rsna_ich: cls_logreg
+  cq500: tok_conv
+  cq500_edh: tok_conv
+  cq500_other_fracture: tok_conv
+  cq500_bleed_side: tok_conv
+  aisd_remote_infarct: tok_conv
+  isles24_lvo_side: tok_conv
+  isles24_mrs: tok_conv
+  isles24_mrs_discharge: grid_logreg
+  atlas_lesion_volume: tok_conv
+  atlas_days_post_stroke: tok_conv
+  oasis1_cdr: cls_logreg
+  oasis2_cdr: grid_logreg
+  oasis1_mmse: cls_ridge
+  oasis2_mmse: plane_ridge
+  abide_asd: tok_conv
+  ixi_age: tok_conv
+  pixar_age: tok_conv
+  ms3seg_age: tok_conv
+  msd: tok_conv
+  ms3seg_lesion_load: tok_conv
+  valdo_epvs: tok_conv

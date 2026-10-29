@@ -1,0 +1,448 @@
+\documentclass[10pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{caption}
+
+\setlist{itemsep=0.15em,topsep=0.3em}
+\setlength{\parskip}{0.35em}
+\setlength{\parindent}{0pt}
+\captionsetup{font=small,labelfont=bf}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\status}[1]{\textcolor{black!55}{\textit{[#1]}}}
+
+\title{\textbf{BrainModel: a modality-agnostic 3D foundation model for brain CT and MRI}\\[0.3em]
+\large Setup, data, preprocessing, methods and planned experiments}
+\author{Working document}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We are building a single self-supervised 3D encoder for brain CT and MRI whose frozen embeddings should serve many
+downstream tasks: hemorrhage and stroke detection, tumor and lesion segmentation, dementia staging, brain age and
+more. This document fixes the setting, the data (about 30 public sources, roughly 110{,}000 volumes), the shared
+preprocessing that places every scan in one anatomical frame, the model and training objective, the downstream
+evaluation protocol, and the experiments planned to finalize the model and then to post-train it with task
+conditioning.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+%=====================================================================================================================
+\section{Motivation}
+
+Brain imaging AI is fragmented: most models are trained for one task, one modality and often one scanner. Yet CT and
+the many MRI contrasts image the same anatomy, and large amounts of unlabeled scans are available while labels are
+scarce, heterogeneous and expensive. A shared encoder pretrained without labels on both modalities could (i) give
+strong frozen features for new tasks with little labeled data, (ii) transfer knowledge across modalities, and (iii)
+provide one representation that many clinical questions can be read from. The design goal is therefore generality:
+an embedding that is useful across many tasks, not the best model on any single one.
+
+%=====================================================================================================================
+\section{Setting}
+
+\paragraph{Self-supervised pretraining.} A 3D Vision Transformer is trained on unlabeled CT and MRI volumes with a
+joint-embedding objective (LeJEPA~\cite{lejepa}): different crops and intensity renderings of the same volume must map
+to nearby embeddings, while a distribution penalty (SIGReg) keeps the embedding space isotropic and prevents collapse.
+Agreement is enforced both for a pooled (volume-level) embedding and token by token, and a masked-prediction term
+keeps local detail. Labels are never used, and downstream evaluation families are held out of pretraining entirely.
+
+\paragraph{Frozen evaluation.} The pretrained encoder is frozen. Every volume is embedded once (full-volume token
+maps), and light heads are fit on the embeddings for each labeled task: linear/ridge readouts, a small 3D
+convolutional probe, and a token decoder for segmentation. Token-level probes measure what the representation
+encodes without any task head (lesion detectability, scanner/dataset fingerprint, anatomical position). A
+randomly initialized encoder of the same architecture is evaluated identically and serves as the floor.
+
+\paragraph{Task-conditioned post-training.} After the self-supervised model is finalized (size, hyperparameters,
+training length, data selection and preprocessing), it is post-trained jointly on many labeled tasks, conditioned on
+a learned task vector that identifies the task (e.g.\ age regression, hemorrhage classification). The post-trained
+model is compared with the frozen model plus heads, on the tasks it was trained on and, crucially, on tasks held out
+of post-training.
+
+\paragraph{Experiment records.} Every evaluation writes a self-contained record (model and checkpoint provenance,
+data version, protocol, validation and test metrics with confidence intervals, environment, artifacts) that is
+ingested into one SQLite database, so models, heads, seeds and data versions are compared on identical footing.
+
+%=====================================================================================================================
+\section{Data}
+
+\subsection{Sources}
+
+Table~\ref{tab:data} lists every dataset. \emph{Role} is \textbf{SSL} (unlabeled pretraining; the dataset may also
+carry downstream labels) or \textbf{held out} (never seen in pretraining; evaluation only). Counts are volumes (one
+volume = one 3D scan of one sequence) and subjects in the current store; they are updated by the final index build.
+
+\begingroup
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{longtable}{L{2.35cm} L{5.5cm} L{1.95cm} r r L{1.25cm} L{2.6cm}}
+\caption{Datasets. Mod.: modality and sequences in the store. Vol./Subj.: volumes and subjects.}\label{tab:data}\\
+\toprule
+Dataset & Description & Mod. & Vol. & Subj. & Role & Tasks \\
+\midrule
+\endfirsthead
+\toprule
+Dataset & Description & Mod. & Vol. & Subj. & Role & Tasks \\
+\midrule
+\endhead
+\midrule \multicolumn{7}{r}{\textit{continued}} \\
+\endfoot
+\bottomrule
+\endlastfoot
+\multicolumn{7}{l}{\textbf{CT}}\\
+RSNA ICH~\cite{rsna} & Head CT studies from the RSNA 2019 Intracranial Hemorrhage Detection challenge, labeled per slice for any hemorrhage and five subtypes. & CT & 25{,}137 & 25{,}137 & SSL & \code{rsna\_ich} \\
+CQ500~\cite{cq500} & Non-contrast head CTs from Indian hospitals, read by three radiologists for hemorrhage subtypes, calvarial fracture, mass effect and midline shift. & CT & 422 & 422 & held out & \code{cq500} \\
+Seg-CQ500 & A CQ500 subset with voxel-level intracranial hemorrhage masks. & CT & 51 & 51 & held out & \code{seg\_cq500}, \code{cq500} \\
+INSTANCE 2022 & Non-contrast head CTs with intracranial hemorrhage masks from the MICCAI 2022 INSTANCE challenge. & CT & 100 & 100 & held out & \code{instance} \\
+AISD~\cite{aisd} & Non-contrast CTs of acute ischemic stroke with infarct masks drawn with reference to follow-up diffusion MRI. & CT & 398 & 398 & held out & \code{aisd} \\
+ISLES 2024 & Acute stroke admission CT (non-contrast and CT angiography) with infarct masks from follow-up MRI. & NCCT, CTA & 298 & 149 & held out & \code{isles24} \\
+\midrule
+\multicolumn{7}{l}{\textbf{MRI: tumors}}\\
+BraTS GLI (2023, 2024)~\cite{brats21} & Adult glioma, pre-operative (2023) and post-treatment (2024), four co-registered skull-stripped sequences with tumor sub-region labels. & T1, T1-Gd, T2, FLAIR & 11{,}488 & 1{,}830 & SSL & \code{brats2023\_gli}, \code{brats2024\_gli} \\
+BraTS MEN 2023~\cite{bratsmen} & Pre-operative meningioma, four skull-stripped sequences with tumor labels. & T1, T1-Gd, T2, FLAIR & 4{,}000 & 944 & SSL & \code{brats2023\_men} \\
+BraTS PED 2023~\cite{bratsped} & Pediatric brain tumors (mostly high-grade gliomas), four skull-stripped sequences with tumor labels. & T1, T1-Gd, T2, FLAIR & 576 & 144 & SSL & \code{brats2023\_ped} \\
+BraTS-GoAT & Mixed tumor types from the BraTS generalizability-across-tumors cohort, four skull-stripped sequences (via the FOMO corpus). & T1, T1-Gd, T2, FLAIR & 10{,}444 & 2{,}611 & SSL & -- \\
+MSD Brain Tumour~\cite{msd} & Multi-parametric glioma MRIs from the Medical Segmentation Decathlon (Task 01); the T1 channel is used. & T1 & 484 & 484 & held out & \code{msd} \\
+BrainMetShare~\cite{brainmetshare} & Skull-stripped multi-sequence MRI of patients with brain metastases (Stanford). & T1, T1-Gd, BRAVO, FLAIR & 624 & 156 & held out & reserved \\
+FOMO Yale brain mets & Longitudinal, skull-stripped multi-sequence MRI of patients with brain metastases. & T1, T1-Gd, T2, FLAIR, PD & 33{,}681 & 1{,}430 & SSL & -- \\
+\midrule
+\multicolumn{7}{l}{\textbf{MRI: stroke and white-matter disease}}\\
+ATLAS~\cite{atlas} & T1 MRI of chronic stroke with manually traced lesion masks. & T1 & 1{,}453 & 1{,}453 & held out & \code{atlas} \\
+ISLES 2022~\cite{isles22} & Acute and sub-acute ischemic stroke MRI with lesion masks in diffusion space. & DWI, ADC, FLAIR & 750 & 250 & held out & \code{isles22} \\
+WMH 2017~\cite{wmh} & FLAIR and T1 MRI from several scanners with white-matter hyperintensity masks (MICCAI 2017 challenge). & FLAIR, T1 & 340 & 170 & held out & \code{wmh} \\
+\midrule
+\multicolumn{7}{l}{\textbf{MRI: aging, dementia, development and healthy cohorts}}\\
+OASIS-1~\cite{oasis1} & Cross-sectional T1 MRI of adults aged 18--96, including very mild to mild Alzheimer's disease, with CDR. & T1 & 436 & 416 & SSL & \code{oasis1\_age}, \code{oasis1\_cdr} \\
+OASIS-2~\cite{oasis2} & Longitudinal T1 MRI of nondemented and demented older adults (60--96) with CDR at each visit. & T1 & 373 & 150 & SSL & \code{oasis2\_cdr}, \code{oasis2\_conversion} \\
+IXI & T1 and T2 MRI of about 600 healthy adults from three London hospitals, with demographics. & T1, T2 & 1{,}159 & 582 & SSL & \code{ixi\_age} \\
+ABIDE I~\cite{abide} & T1 MRI of individuals with autism spectrum disorder and typically developing controls from 17 sites. & T1 & 1{,}102 & 1{,}102 & SSL & \code{abide\_asd} \\
+AOMIC PIOP1~\cite{aomic} & T1 MRI of young adults (Amsterdam Open MRI Collection, population imaging of psychology 1). & T1 & 216 & 216 & SSL & \code{piop1\_age} \\
+AOMIC PIOP2~\cite{aomic} & As PIOP1, a second cohort. & T1 & 226 & 226 & SSL & \code{piop2\_age} \\
+AOMIC ID1000~\cite{aomic} & T1 MRI of about 1{,}000 young adults with broad demographic and psychometric data. & T1 & 928 & 928 & SSL & \code{id1000\_age} \\
+Pixar~\cite{pixar} & T1 MRI of children aged 3--12 and adults from a movie-viewing fMRI study (OpenNeuro ds000228). & T1 & 155 & 155 & SSL & \code{pixar\_age} \\
+\midrule
+\multicolumn{7}{l}{\textbf{MRI: FOMO pretraining corpus (structural sequences of selected families)}}\\
+HBN~\cite{hbn} & Healthy Brain Network: children and adolescents, a transdiagnostic pediatric mental-health cohort. & T1, T2, FLAIR, PD & 8{,}481 & 3{,}843 & SSL & -- \\
+NKI-Rockland~\cite{nki} & Community lifespan sample from the Nathan Kline Institute. & T1, T2, FLAIR & 5{,}951 & 1{,}326 & SSL & -- \\
+CoRR~\cite{corr} & Consortium for Reliability and Reproducibility: repeated scans for test--retest studies. & T1 & 2{,}745 & 1{,}498 & SSL & -- \\
+BrainLat~\cite{brainlat} & Latin American cohort with neurodegenerative diseases (AD, FTD, PD, MS) and controls. & T1, FLAIR & 632 & 587 & SSL & -- \\
+M4Raw~\cite{m4raw} & Low-field (0.3\,T) multi-contrast brain MRI. & T1, T2, FLAIR & 624 & 208 & SSL & -- \\
+Nigerian clinical & Clinical brain MRI acquired in Nigeria. & T1, T2, FLAIR & 283 & 82 & SSL & -- \\
+\midrule
+\multicolumn{7}{l}{\textbf{Used only for exclusion or not used}}\\
+BHSD & Hemorrhage segmentation labels for a subset of RSNA studies; these studies are removed from pretraining. & CT & -- & -- & exclusion & -- \\
+SinoCT & Reconstructed head CT series; dropped: mostly $\sim$36\,mm slabs that cannot be placed in a whole-head frame. & CT & -- & -- & excluded & -- \\
+\end{longtable}
+\endgroup
+
+\subsection{Splits and hold-outs}
+
+\begin{itemize}
+  \item \textbf{Subject-level splits.} Volumes are assigned train/validation/test (75/10/15) by subject, stratified
+  by modality and dataset family, so all scans of a subject share one split. Splits are inherited across store
+  rebuilds so results stay comparable; official test sets are pinned where they exist (e.g.\ AISD).
+  \item \textbf{Held-out families.} CQ500/Seg-CQ500, INSTANCE, AISD, ISLES 2022/2024, ATLAS, WMH, BrainMetShare and MSD
+  are never used for pretraining, nor are FOMO families whose source mapping overlaps them, nor the BHSD studies.
+  \item \textbf{One pretraining volume per subject and contrast.} Duplicates (e.g.\ the same BraTS subject in two
+  releases, repeat OASIS sessions) are reduced to a single volume for pretraining.
+  \item \textbf{Pretraining overlap is recorded.} Several downstream families (OASIS, IXI, ABIDE, AOMIC, Pixar,
+  BraTS, RSNA) are part of pretraining as unlabeled images; their test subjects are never trained on, and every
+  evaluation record stores the fraction of the task's volumes that were in the pretraining set.
+\end{itemize}
+
+\subsection{Downstream tasks}
+
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabularx}{\textwidth}{@{}L{3.0cm} l L{2.6cm} X l@{}}
+\toprule
+Task & Type & Data & Target & Headline metric \\
+\midrule
+\code{cq500} & multi-label & CQ500, Seg-CQ500 & ICH, IPH, IVH, SDH, SAH, calvarial fracture, mass effect, midline shift (reader majority) & macro AUC \\
+\code{rsna\_ich} & multi-label & RSNA & any hemorrhage, epidural, intraparenchymal, intraventricular, subarachnoid, subdural (study level) & macro AUC \\
+\code{oasis1\_cdr}, \code{oasis2\_cdr} & binary & OASIS-1/2 & CDR $>0$ & AUC \\
+\code{oasis2\_conversion} & binary & OASIS-2 & CDR 0 at first visit, CDR $>0$ later & AUC \\
+\code{abide\_asd} & binary & ABIDE I & autism spectrum disorder vs.\ control & AUC \\
+\code{msd} & binary & MSD & high enhancing-tumor burden & AUC \\
+\code{*\_age} (6 tasks) & regression & OASIS-1, IXI, Pixar, PIOP1/2, ID1000 & chronological age & $R^2$ \\
+\midrule
+\code{seg\_cq500}, \code{instance} & segmentation & Seg-CQ500, INSTANCE & intracranial hemorrhage & macro Dice \\
+\code{brats2023\_gli}, \code{brats2023\_ped} & segmentation & BraTS & enhancing tumor, tumor core, whole tumor & macro Dice \\
+\code{brats2023\_men} & segmentation & BraTS MEN & meningioma & macro Dice \\
+\code{brats2024\_gli} & segmentation & BraTS 2024 & enhancing tumor, resection cavity & macro Dice \\
+\code{atlas}, \code{isles22}, \code{isles24}, \code{aisd} & segmentation & stroke sets & ischemic lesion / infarct & macro Dice \\
+\code{wmh} & segmentation & WMH & white-matter hyperintensities & macro Dice \\
+\midrule
+\code{probe3d} & token probes & held-out lesion sets, all families & lesion detectability (AP lift, AUROC), modality/dataset fingerprint, position $R^2$ & per probe \\
+\bottomrule
+\end{tabularx}
+\caption{The downstream suite: 25 entries, run for every checkpoint.}
+\label{tab:tasks}
+\end{table}
+
+%=====================================================================================================================
+\section{Preprocessing}
+
+Every scan is mapped to one stored representation: a $256\times256\times160$ grid of 1\,mm voxels in a common
+anatomical frame, in native intensity units, with a brain mask and a record of how it got there. The steps, and why
+each is there:
+
+\begin{enumerate}
+  \item \textbf{Read and orient.} Every source (NIfTI, Analyze, DICOM series) is read into one orientation convention;
+  CT values are repaired where a converter shifted them and clamped to the valid Hounsfield range.
+  \textit{Why:} about 30 sources disagree on file formats, axis orders and padding values; the model must not have to
+  learn them.
+  \item \textbf{Bias-field correction (raw MRI only).} N4~\cite{n4} removes the smooth intensity inhomogeneity of
+  receive coils; releases that are already corrected are left alone. \textit{Why:} coil shading is a scanner
+  property, not anatomy, and would otherwise be a shortcut and a confound for intensity statistics.
+  \item \textbf{Registration to a template.} Each scan is centered, then fitted rigidly and affinely to the MNI152
+  template~\cite{mni} by mutual information, which needs no intensity correspondence, so CT and every MRI contrast map
+  to the same T1 template. Skull-stripped releases are fitted to the template's brain only. The fit runs on the CPU
+  (SimpleITK) or on the GPU (a validated PyTorch port, about $10\times$ faster), and the full transform is stored.
+  \textit{Why:} the same anatomical point should land at the same position in every scan, so the encoder's position
+  encoding means anatomy and datasets are comparable. The fit is deliberately affine, not deformable, so individual
+  anatomy (atrophy, ventricle size, lesions) is preserved; the stored transform recovers true physical sizes and maps
+  outputs back onto the original scan.
+  \item \textbf{One resampling onto a fixed grid.} The scan is resampled once, through the fitted transform, onto
+  $256\times256\times160$\,mm at 1\,mm, with anti-aliasing where the source is finer. \textit{Why:} a single
+  interpolation avoids compounding blur; 160\,mm of depth holds the whole brain (vertex to cerebellum, 154\,mm in
+  MNI space) and is divisible by every patch depth used.
+  \item \textbf{Brain mask.} SynthStrip~\cite{synthstrip}, a contrast- and modality-agnostic skull-stripping network,
+  runs on the GPU; each mask is checked against the registered template brain (Dice $\geq 0.85$ within the scan's
+  field of view) with a classical fallback. \textit{Why:} the mask provides parenchyma statistics for MRI intensity
+  normalization, enables the skull-dropout augmentation that makes skull-on and skull-stripped scans look alike, and
+  is a quality signal for the whole pipeline.
+  \item \textbf{Native intensity units.} CT stays in Hounsfield units; MRI becomes a robust z-score (median and MAD
+  inside the brain). Windowing is not baked in; random windows are applied during training. \textit{Why:} CT units
+  are physical and should be kept; MRI units are arbitrary and need per-scan normalization; deferring windows lets one
+  stored volume be seen under many renderings.
+  \item \textbf{Storage and index.} One compressed file per volume holds the image and its brain mask (one file read
+  per training sample); label masks are stored alongside for downstream use. An index records subjects, splits,
+  hold-outs, acquisition geometry (including slice thickness) and quality-control fields. \textit{Why:} fast
+  loading for training, and every downstream number can be traced to the exact data version.
+  \item \textbf{Quality control and exclusions.} Volumes that fail centering or foreground checks are not stored;
+  SinoCT is dropped; RSNA volumes that fail the brain-mask check (mostly mis-assembled DICOM series) are excluded from
+  pretraining but kept for evaluation. Raw data is kept as compressed archives (JPEG-LS for imaging,
+  byte-exact for everything else) so the pipeline can be rerun.
+\end{enumerate}
+
+%=====================================================================================================================
+\section{Methods}
+
+\subsection{Encoder}
+
+\begin{itemize}
+  \item \textbf{Architecture.} A 3D Vision Transformer (pre-norm, 12 blocks, query/key normalization), in sizes
+  \emph{tiny} (width 192, 3 heads) and \emph{small} (width 384, 6 heads); \emph{base} (768, 12) is available.
+  \item \textbf{Tokens.} Anisotropic patches of $16\times16\times8$\,mm; a full volume is a $20\times16\times16$ grid
+  of 5{,}120 tokens. Patch size is variable (the patch embedding is resized, FlexiViT-style~\cite{flexivit}) and a
+  small network adds a function of the log patch size in mm, so the model knows the physical scale of each token.
+  \item \textbf{Position.} Rotary position embedding~\cite{rope} on the token centers in millimetres (3D, base
+  100\,mm), so crops of any size and position share one coordinate system.
+  \item \textbf{Air tokens} (patch center below a CT/MRI threshold) are dropped before the transformer; rows of
+  different lengths are bucketed to limit padding.
+  \item \textbf{Optional prefix tokens:} a CLS token and register tokens~\cite{registers}, without position and never
+  dropped. With a CLS token, the pooled embedding is its output; otherwise it is the mean over patch tokens.
+  \item \textbf{Heads used only in training:} a projector MLP for the pooled embedding, a token head (128-d) for the
+  dense terms, and a small predictor transformer for masked prediction.
+\end{itemize}
+
+\subsection{Views and augmentation}
+
+Crops are cut on the volume's own token grid, so overlapping crops share tokens exactly: two global crops
+($128\times128\times64$\,mm, the second inside the first), two local crops ($64\times64\times32$\,mm) and two fine crops
+($32\times32\times16$\,mm at $8\times8\times4$\,mm patches) inside a global crop, plus one crop seen under two
+intensity windows. Crops must contain at least 15\% foreground. Appearance is re-rendered independently per crop, so
+that views can only be matched through anatomy, never through contrast, resolution or the presence of a skull:
+random intensity windows; a random monotone contrast curve with knots at tissue quantiles, inverted with probability
+0.3 (as T1 and T2 order tissues differently); a smooth MRI bias field; blur along the acquisition axis up to a
+random slice thickness (using the recorded native thickness); isotropic blur, slow drift and noise; and, with
+probability 0.5, \emph{skull dropout}, cutting a whole volume to its brain mask (only masks that passed quality
+control).
+
+\subsection{Objective}
+
+With $\lambda=0.02$,
+\begin{equation*}
+\mathcal{L} = (1-\lambda)\,\mathcal{L}_{\text{inv}} + \lambda\,\mathcal{L}_{\text{SIGReg}} + w_{\text{win}}\mathcal{L}_{\text{win}}
++ w_{\text{dense}}\big[(1-\lambda)\mathcal{L}_{\text{dense}} + \lambda\,\mathcal{L}_{\text{SIGReg}}^{\text{tok}}\big]
++ w_{\text{pred}}\big(\mathcal{L}_{\text{pred}} + w_{\text{pix}}\mathcal{L}_{\text{pix}}\big).
+\end{equation*}
+\begin{itemize}
+  \item $\mathcal{L}_{\text{inv}}$, $\mathcal{L}_{\text{SIGReg}}$: the LeJEPA terms on pooled embeddings: every view is
+  pulled to the mean of the global views, and the batch of embeddings is pushed toward an isotropic Gaussian with a
+  sketched Epps--Pulley test on random 1-D projections. $\mathcal{L}_{\text{win}}$ ties the pair of windows.
+  \item $\mathcal{L}_{\text{dense}}$: every grid position covered by two or more views is pulled to the mean of its
+  token embeddings across views (fine tokens averaged into their coarse position);
+  $\mathcal{L}_{\text{SIGReg}}^{\text{tok}}$ applies SIGReg to 32 sampled token embeddings per view.
+  \item $\mathcal{L}_{\text{pred}}$, $\mathcal{L}_{\text{pix}}$: three blocks of 3--6 tokens are hidden in each global
+  crop; a 4-layer predictor regresses their token-head embeddings from the unmasked crop (stop-gradient target) and
+  the $2\times2\times2$ cell means of their voxels. The weight ramps up over 2{,}000 steps.
+\end{itemize}
+
+\subsection{Training}
+
+The \emph{small} recipe: AdamW (lr $2.5\times10^{-4}$, $\beta=(0.9, 0.95)$, weight decay 0.05, none on norms, biases
+and prefix tokens), 2{,}000 warm-up steps then cosine decay, gradient clipping at 1.0, bfloat16, 30{,}000 steps,
+batch 96 volumes per GPU on 2 GPUs. Sampling is balanced across dataset families with mass $\propto n^{0.5}$, so the
+largest families (FOMO Yale, RSNA) do not dominate. Checkpoints record their own provenance (code version, store
+format and grid, index hash) so evaluations can name exactly what a model was trained on.
+
+\subsection{Frozen evaluation protocol}
+
+\begin{itemize}
+  \item \textbf{Embedding.} Each volume is encoded once, whole, under the evaluation windows (CT: brain, subdural,
+  bone; MRI: tissue, wide), giving a 5{,}120-token map, a foreground mask and, for CLS models, the CLS embedding.
+  \item \textbf{Classification and regression heads.} PCA (16 components, fitted on training tokens) followed by
+  three readouts: per-axial-slab mean and max, a $4\times4\times4$ grid of cell means, and global mean and max, each
+  with logistic or ridge regression; a small 3D convolutional probe on the full-width token map (seed ensemble,
+  early stopping); and a linear head on the CLS embedding when present. Regularization is chosen on validation.
+  \item \textbf{Segmentation.} A token U-Net decoder trained on cached token maps upsamples to one logit per voxel
+  (cross-entropy plus soft Dice per region); training volumes are also encoded shifted off the patch grid and flipped.
+  Dice is reported on the 64 axial slices scored by the 2D reference and on the whole volume.
+  \item \textbf{Token probes} (\code{probe3d}). Lesion detection from single tokens (linear and MLP, average-precision
+  lift over prevalence and AUROC, per held-out lesion family); fingerprinting (balanced accuracy of predicting
+  modality and source dataset from pooled embeddings; lower is better for dataset); and location (ridge regression from
+  a token to its normalized position, $R^2$, plus the participation ratio of the token covariance). Pixel-statistics
+  and random-initialization controls are run alongside.
+  \item \textbf{Statistics and selection.} Bootstrap 95\% intervals over test volumes; for each model and task the
+  head is chosen on validation, never on test. Results are compared across models with a suite-wide score: each
+  task's headline metric expressed as gain over the random-initialization floor, averaged within task groups (CT
+  classification, MRI classification, regression, segmentation, probes) and then across groups, so the many
+  segmentation tasks do not dominate.
+\end{itemize}
+
+\subsection{Task-conditioned post-training}
+
+\begin{itemize}
+  \item \textbf{Conditioning.} A learned task vector enters the encoder as an extra prefix token (the same mechanism as
+  CLS and registers); FiLM-style modulation is a later alternative. Each task keeps its own small output head
+  (classification, regression or segmentation decoder).
+  \item \textbf{Task granularity.} One vector per label (each hemorrhage subtype, age, CDR) with a shared
+  per-dataset component, so related labels can share structure; batches mix tasks.
+  \item \textbf{Null task.} The task vector is replaced by a learned null vector for 10--20\% of samples, so the model
+  keeps a task-free embedding that can be compared like-for-like with the self-supervised model.
+  \item \textbf{Balancing.} Temperature-based task sampling and per-task loss normalization, so RSNA (about 25{,}000
+  labeled volumes) does not drown OASIS (about 400).
+  \item \textbf{Preserving generality.} The self-supervised loss is kept as an auxiliary term (or only adapters/LoRA
+  are trained), and the token probes are rerun before and after post-training.
+\end{itemize}
+
+%=====================================================================================================================
+\section{Planned experiments}
+
+All experiments use the v6 store, the downstream suite of Table~\ref{tab:tasks}, two seeds where differences are
+small, and the suite-wide score. A change is adopted when it improves the suite score beyond the seed spread and no
+task group regresses beyond its confidence interval.
+
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{@{}L{0.6cm} L{3.4cm} L{5.4cm} L{5.6cm}@{}}
+\toprule
+& Question & Arms & Readout \\
+\midrule
+E0 & Floor and baseline & random-init encoder; current \emph{small} recipe & reference rows for every comparison \\
+E1 & Prefix tokens & none (mean pooling) / 1 CLS / CLS + 4 registers & global tasks (CLS vs.\ token heads), dense tasks and probes (registers) \\
+E2 & Token-level SIGReg & 4 vs.\ 32 sampled tokens per view (32 adopted) & token-probe quality, segmentation \\
+E3 & Full-volume context & + one full-volume view per sample & global tasks; train/test context gap \\
+E4 & Mixed patch size & per-crop patch $16\times16\times8$ or $8\times8\times4$, with cross-scale view pairs & dense tasks at both scales; coarse-token quality \\
+E5 & Scale, length and data & tiny / small / base; longer schedules; sampling exponent; FOMO share; QC exclusions & suite score vs.\ compute \\
+E6 & Task-conditioned post-training & see Table~\ref{tab:ladder} & seen and held-out tasks; label efficiency; probes before/after \\
+\bottomrule
+\end{tabular}
+\caption{Experiment plan. E0 and E1 are queued on the v6 store; E2's setting is already adopted.}
+\label{tab:exp}
+\end{table}
+
+\paragraph{Post-training comparison (E6).} Roughly a third of the tasks are fixed as \emph{held out of
+post-training} before any post-training run (rotated if compute allows). On seen tasks, the rungs of
+Table~\ref{tab:ladder} separate what the representation, head capacity, supervision and conditioning each
+contribute. On held-out tasks, the self-supervised and post-trained backbones are compared with identical heads, and
+a new task vector is learned with everything else frozen (a few hundred parameters). Heads are also trained on 10\%
+and 100\% of each task's labels.
+
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{@{}l L{7.5cm} L{5.5cm}@{}}
+\toprule
+Rung & Model & Isolates \\
+\midrule
+1 & frozen self-supervised encoder + linear head & the representation \\
+2 & frozen self-supervised encoder + small attentive / MLP head & head capacity \\
+3 & single-task fine-tuning, one model per task & supervised ceiling per task \\
+4 & multi-task fine-tuning, no task vector & shared supervision \\
+5 & multi-task fine-tuning with task vector & conditioning \\
+\bottomrule
+\end{tabular}
+\caption{Comparison ladder for task-conditioned post-training, on identical splits.}
+\label{tab:ladder}
+\end{table}
+
+%=====================================================================================================================
+\section{Known limitations}
+
+\begin{itemize}
+  \item \textbf{Affine size normalization.} Stored lengths and volumes are scaled by the registration (volumes by a
+  median factor of 1.35 in our data). True sizes are recovered from the stored transform; size-sensitive endpoints
+  must use it or condition on it.
+  \item \textbf{RSNA DICOM assembly.} About 2\% of RSNA studies mix slice thicknesses or repeat positions within a
+  series, and gantry tilt is only removed when the affine fit succeeds. Affected volumes are excluded from pretraining;
+  the reader will be replaced (position-based assembly with tilt correction) before the next rebuild.
+  \item \textbf{Mixed registration engines.} Volumes are registered by SimpleITK or by the GPU port depending on the
+  processing phase; each volume records which, and the GPU port was validated as equal or better except on heavily
+  tilted CT.
+  \item \textbf{Shared pretraining and evaluation images.} Several downstream families are in the unlabeled
+  pretraining pool (Section~3.2); held-out families provide the clean test of transfer.
+  \item \textbf{OASIS-1.} SynthStrip under-segments the atlas-registered OASIS-1 images; their masks fail quality
+  control and are not used for skull dropout.
+\end{itemize}
+
+%=====================================================================================================================
+\begin{thebibliography}{99}\small
+\bibitem{lejepa} R.~Balestriero and Y.~LeCun. LeJEPA: provable and scalable self-supervised learning without the heuristics. \emph{arXiv}, 2025.
+\bibitem{flexivit} L.~Beyer et al. FlexiViT: one model for all patch sizes. \emph{CVPR}, 2023.
+\bibitem{rope} J.~Su et al. RoFormer: enhanced transformer with rotary position embedding. \emph{Neurocomputing}, 2024.
+\bibitem{registers} T.~Darcet, M.~Oquab, J.~Mairal and P.~Bojanowski. Vision transformers need registers. \emph{ICLR}, 2024.
+\bibitem{n4} N.~J.~Tustison et al. N4ITK: improved N3 bias correction. \emph{IEEE Trans.\ Med.\ Imaging}, 2010.
+\bibitem{mni} V.~Fonov et al. Unbiased average age-appropriate atlases for pediatric studies. \emph{NeuroImage}, 2011.
+\bibitem{synthstrip} A.~Hoopes et al. SynthStrip: skull-stripping for any brain image. \emph{NeuroImage}, 2022.
+\bibitem{rsna} A.~E.~Flanders et al. Construction of a machine learning dataset through collaboration: the RSNA 2019 brain CT hemorrhage challenge. \emph{Radiology: Artificial Intelligence}, 2020.
+\bibitem{cq500} S.~Chilamkurthy et al. Deep learning algorithms for detection of critical findings in head CT scans: a retrospective study. \emph{The Lancet}, 2018.
+\bibitem{aisd} K.~Liang et al. Symmetry-enhanced attention network for acute ischemic infarct segmentation with non-contrast CT images. \emph{MICCAI}, 2021.
+\bibitem{brats21} U.~Baid et al. The RSNA-ASNR-MICCAI BraTS 2021 benchmark on brain tumor segmentation and radiogenomic classification. \emph{arXiv}, 2021.
+\bibitem{bratsmen} D.~LaBella et al. The ASNR-MICCAI brain tumor segmentation (BraTS) challenge 2023: intracranial meningioma. \emph{arXiv}, 2023.
+\bibitem{bratsped} A.~F.~Kazerooni et al. The brain tumor segmentation (BraTS) challenge 2023: focus on pediatrics. \emph{arXiv}, 2023.
+\bibitem{msd} M.~Antonelli et al. The Medical Segmentation Decathlon. \emph{Nature Communications}, 2022.
+\bibitem{brainmetshare} E.~Gr{\o}vik et al. Deep learning enables automatic detection and segmentation of brain metastases on multisequence MRI. \emph{J.\ Magn.\ Reson.\ Imaging}, 2020.
+\bibitem{atlas} S.-L.~Liew et al. A large, curated, open-source stroke neuroimaging dataset to improve lesion segmentation algorithms. \emph{Scientific Data}, 2022.
+\bibitem{isles22} M.~R.~Hernandez Petzsche et al. ISLES 2022: a multi-center magnetic resonance imaging stroke lesion segmentation dataset. \emph{Scientific Data}, 2022.
+\bibitem{wmh} H.~J.~Kuijf et al. Standardized assessment of automatic segmentation of white matter hyperintensities and results of the WMH segmentation challenge. \emph{IEEE Trans.\ Med.\ Imaging}, 2019.
+\bibitem{oasis1} D.~S.~Marcus et al. Open Access Series of Imaging Studies (OASIS): cross-sectional MRI data in young, middle aged, nondemented, and demented older adults. \emph{J.\ Cogn.\ Neurosci.}, 2007.
+\bibitem{oasis2} D.~S.~Marcus et al. Open Access Series of Imaging Studies: longitudinal MRI data in nondemented and demented older adults. \emph{J.\ Cogn.\ Neurosci.}, 2010.
+\bibitem{abide} A.~Di~Martino et al. The autism brain imaging data exchange: towards a large-scale evaluation of the intrinsic brain architecture in autism. \emph{Molecular Psychiatry}, 2014.
+\bibitem{aomic} L.~Snoek et al. The Amsterdam Open MRI Collection, a set of multimodal MRI datasets for individual difference analyses. \emph{Scientific Data}, 2021.
+\bibitem{pixar} H.~Richardson et al. Development of the social brain from age three to twelve years. \emph{Nature Communications}, 2018.
+\bibitem{hbn} L.~M.~Alexander et al. An open resource for transdiagnostic research in pediatric mental health and learning disorders. \emph{Scientific Data}, 2017.
+\bibitem{nki} K.~B.~Nooner et al. The NKI-Rockland sample: a model for accelerating the pace of discovery science in psychiatry. \emph{Frontiers in Neuroscience}, 2012.
+\bibitem{corr} X.-N.~Zuo et al. An open science resource for establishing reliability and reproducibility in functional connectomics. \emph{Scientific Data}, 2014.
+\bibitem{brainlat} P.~Prado et al. The BrainLat project, a multimodal neuroimaging dataset of neurodegeneration from underrepresented backgrounds. \emph{Scientific Data}, 2023.
+\bibitem{m4raw} M.~Lyu et al. M4Raw: a multi-contrast, multi-repetition, multi-channel MRI k-space dataset for low-field MRI research. \emph{Scientific Data}, 2023.
+\end{thebibliography}
+
+\end{document}

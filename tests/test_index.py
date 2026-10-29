@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from data.prep.index import (
+from pathlib import Path
+
+from brain.prep.index import (
     HELD_OUT,
     SPLIT_RANK,
     all_held_out,
@@ -51,11 +53,15 @@ def test_piop1_and_piop2_do_not_collide():
     assert volume_id("piop1", "sub-0001", "mri") != volume_id("piop2", "sub-0001", "mri")
 
 
-def test_folder_of_keeps_isles_wmh_sequence_dirs():
+def test_folder_of_matches_the_writer():
+    from brain.prep.sources import Case
+    for ds in ("brats2023_gli_t1n", "isles22_flair", "isles22_dwi", "wmh_flair", "wmh_t1", "brainmetshare_flair",
+               "brainmetshare_t1_gd", "fomo_hbn_pd", "brats_goat_t2f", "aisd", "rsna_ich"):
+        assert folder_of(ds) == Case(ds, "x", "mri", Path("x")).folder, ds
     assert folder_of("brats2023_gli_t1n") == "brats2023_gli"
-    assert folder_of("isles22_flair") == "isles22_flair"
+    assert folder_of("isles22_flair") == "isles22"
     assert folder_of("isles22_dwi") == "isles22_dwi"
-    assert folder_of("wmh_flair") == "wmh_flair"
+    assert folder_of("wmh_flair") == "wmh"
     assert folder_of("wmh_t1") == "wmh_t1"
     assert folder_of("aisd") == "aisd"
     assert folder_of("fomo_hbn_t1w") == "fomo_hbn"
@@ -82,9 +88,6 @@ def test_held_out_families():
         dedup_key("fomo_yale_mets_t1w", "sub-a_ses-01_t1w") == "fomo_yale_mets:sub-a"
     assert dataset_family("fomo_openneuro_ds000228_t1w") == "fomo_openneuro_ds000228"
     assert "cq500" in all_held_out()
-    assert "sinoct" not in HELD_OUT
-    assert dataset_family("sinoct") == "sinoct"
-    assert dedup_key("sinoct", "batch_8_series_8969") == "sinoct:batch_8_series_8969"
     assert "msd_braintumor" in HELD_OUT
     assert dataset_family("msd_braintumor") == "msd_braintumor"
     assert volume_id("msd_braintumor", "BRATS_001", "mri") == "msd_braintumor:BRATS_001"
@@ -93,7 +96,7 @@ def test_held_out_families():
 
 def test_inherit_current_splits_keeps_existing_and_assigns_new():
     import pandas as pd
-    from data.prep.index import inherit_current_splits
+    from brain.prep.index import inherit_current_splits
 
     old = pd.DataFrame({"dedup_key": ["ixi:a", "abide1:b"], "split": ["train", "val"]})
     vols = pd.DataFrame({
@@ -110,9 +113,9 @@ def test_inherit_current_splits_keeps_existing_and_assigns_new():
 
 def test_aisd_official_test_ids_are_pinned():
     import pandas as pd
-    from data.download_aisd import splits_for
-    from data.prep.index import pin_official_splits
-    from data.prep.sources import AISD_TEST_IDS, aisd_id
+    from brain.datasets.download_aisd import splits_for
+    from brain.prep.index import pin_official_splits
+    from brain.prep.sources import AISD_TEST_IDS, aisd_id
 
     ids = [aisd_id(x) for x in AISD_TEST_IDS[:3]] + ["0019983", "0021023"]
     vols = pd.DataFrame({

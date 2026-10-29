@@ -1,0 +1,79 @@
+# OMNI-style task tokens vs late fusion (arXiv 2610.12574, "Scaling Multi-Teacher Distillation for Digital Pathology"),
+# arm B: OMNI task tokens. One token per trained task joins the encoder's sequence at the first block
+# (isolated from the other task tokens, read by the patch tokens); the heads read its output.
+# Three arms differing only in the architecture: A slots, B task tokens, C task tokens + MoE top blocks. All on run 6's
+# recipe (v7_nosmall.yaml: 58 tasks, augmentation, uncertainty balancing, v3 warm start) except: labels v2 on the current
+# index; encoder LR 0.25x (A1's; run 6 0.1x) and no encoder freeze (both needed for tokens inside the encoder, kept
+# equal across arms); 12k steps of batch 8 on one L40S (~30% of run 6's scans seen); arms B, C open the patches' attention
+# to the new task tokens over the first 2k steps (warm start: undamped, they shift the encoder's features ~40%). Compare on test with
+#   python -m brain.multitask.test_eval --ckpts runs/multitask/omni_a_slots/best.pt runs/multitask/omni_b_tokens/best.pt \
+#     runs/multitask/omni_c_tokens_moe/best.pt --out runs/diagnostics/test_eval_omni
+#   sbatch -c 16 --mem=96G -J omni_b_tokens --export=ALL,METHOD=multitask,EXPECT_GPUS=1,CONFIG=configs/multitask/omni_b_tokens.yaml \
+#     jobs/train.sbatch
+
+seed: 42
+
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
+  num_workers: 12
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64          # cohort-stratified picker (brain.multitask.data.pick_val_volumes); runs before 2026-10-24 used 16 by id
+  val_max_seg: 4
+
+model:
+  init_from: runs/v3/cls_s42/best.pt      # step 18000
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, width: null, mode: slots, cross_task: true, embedding: learned}
+  seg: {widths: [128, 64, 32, 16]}
+  general: {enabled: false, proj_dim: 128}     # run 3: enabled
+  task_tokens: {enabled: true, write_bias: 10.0, write_ramp_steps: 2000}   # patches ignore the new tokens at first (-10 logits), opening linearly
+
+tasks:
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_survival_12m, glioma_lower_grade, glioma_idh]
+
+aug:
+  flip_lr: 0.5
+  affine: {p: 0.8, rot_deg: [8, 8, 12], shift_mm: 8.0}
+  appearance:
+    bias: {p: 0.3, amp: 0.2}                      # MRI only; mild, as intensity asymmetry is a target
+    through_plane: {p: 0.3, fwhm_vox: [2.0, 6.0]}
+    noise: {p: 0.5, kind: rician, snr: [15, 100], sigma: [0.02, 0.1]}   # Rician on MRI, Gaussian on CT
+    blur: {p: 0.2, sigma_vox: [0.5, 1.0]}
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut: {p: 0.2, mm: [10, 40]}
+
+loss:
+  balance: uncertainty     # run 3: ema
+  ema_decay: 0.99
+  seg_stride: 2
+  general: {weight: 0.0, frac: 0.5, lamb: 0.02, n_proj: 256, crop_min: 0.7, rot_deg: [8, 8, 12], shift_mm: 8.0}
+
+optim:
+  lr: 3.0e-4
+  enc_lr_mult: 0.25
+  layer_decay: 0.8
+  weight_decay: 0.05
+  warmup_steps: 1000
+  freeze_steps: 0          # task tokens live in the encoder: a frozen (no-grad) encoder would not train them
+  clip_grad: 1.0
+  batch_size: 8            # one L40S (mit_normal_gpu allows 2 GPUs per user: two arms at a time)
+
+train:
+  max_steps: 12000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 12000
+  best_metric: loss
+
+output:
+  out_dir: runs/multitask/omni_b_tokens

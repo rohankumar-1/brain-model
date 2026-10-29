@@ -5,8 +5,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from downstream import seg3d as S
-from downstream.tasks import TaskBundle
+from brain.downstream import seg3d as S
+from brain.downstream.tasks import TaskBundle
+from brain.common.grid import DEPTH
+
+N_TOK = int(np.prod(S.grid_for(S.PATCH)))  # tokens of a full volume at the native patch
 
 REGIONS = {"LES": (1,)}
 
@@ -16,8 +19,8 @@ def _cache(n=3, dim=16, seed=0):
     masks = np.zeros((n, *S.VOX), np.uint8)
     for i in range(n):
         masks[i, 20 + 4 * i:60, 40:120, 50:130] = 1
-    feats = rng.normal(size=(n, 4096, dim)).astype(np.float16)
-    aug = rng.normal(size=(n, 2, 4096, dim)).astype(np.float16)  # two extra copies per volume
+    feats = rng.normal(size=(n, N_TOK, dim)).astype(np.float16)
+    aug = rng.normal(size=(n, 2, N_TOK, dim)).astype(np.float16)  # two extra copies per volume
     return S.Cache([f"v{i}" for i in range(n)], feats, masks, aug, {i: i for i in range(n)})
 
 
@@ -48,8 +51,7 @@ class _Tiny(torch.nn.Module):
 
     def forward(self, tok, grid=None):
         b, n, _ = tok.shape
-        side = int(round(n ** (1 / 3)))
-        grid = tuple(grid or (side, side, side))
+        grid = tuple(grid or S.grid_for(S.PATCH))
         pz, py, px = S.PATCH[2], S.PATCH[1], S.PATCH[0]
         x = tok.mean(-1).view(b, 1, *grid)
         x = torch.nn.functional.interpolate(x, size=(grid[0] * pz, grid[1] * py, grid[2] * px), mode="nearest")
@@ -102,23 +104,23 @@ def test_patch_fcn_nearest_upsamples_the_token_grid():
 
 def test_cache_tokens_concatenates_patch_embed():
     cache = _cache()
-    cache.pe = np.ones((3, 4096, 4), np.float16)
+    cache.pe = np.ones((3, N_TOK, 4), np.float16)
     t = cache.tokens(0)
-    assert t.shape == (4096, 20) and np.allclose(t[..., -4:], 1)
+    assert t.shape == (N_TOK, 20) and np.allclose(t[..., -4:], 1)
     assert cache.pe_dim == 4
 
 
 def test_fine_flag_selects_the_half_size_patch_and_tiling():
-    from downstream.seg3d import PATCH, TILE, grid_for
+    from brain.downstream.seg3d import PATCH, TILE, grid_for
 
-    assert grid_for((8, 8, 4)) == (32, 32, 32) and TILE[0][0] % 8 == 0
-    assert PATCH == (16, 16, 8) and grid_for(PATCH) == (16, 16, 16)
+    assert grid_for((8, 8, 4)) == (DEPTH // 4, 32, 32) and TILE[0][0] % 8 == 0
+    assert PATCH == (16, 16, 8) and grid_for(PATCH) == (DEPTH // 8, 16, 16)
 
 
 def test_decoder_handles_the_fine_patch_grid():
-    # full 32^3 -> 128x256x256 is too heavy for login CPU; check the stage count and a scaled-down grid
+    # the full fine grid -> DEPTH x 256 x 256 is too heavy for login CPU; check the stage count and a scaled-down grid
     dec = S.TokenDecoder3D(16, 2, (16, 16, 16), widths=(8, 8, 8, 8, 8), out_vox=(64, 128, 128))
-    assert S.grid_for((8, 8, 4)) == (32, 32, 32) and len(dec.stages) == 3
+    assert S.grid_for((8, 8, 4)) == (DEPTH // 4, 32, 32) and len(dec.stages) == 3
     small = S.TokenDecoder3D(16, 2, (8, 8, 8), widths=(8, 8, 8, 8, 8), out_vox=(32, 32, 32))
     assert small(torch.randn(1, 512, 16)).shape == (1, 2, 32, 32, 32)
 
@@ -136,7 +138,7 @@ def test_sample_crop_prefers_foreground():
     rng = np.random.default_rng(0)
     hits = [S.sample_crop(mask, patch, (8, 8, 8), rng, p_fg=1.0) for _ in range(20)]
     assert all(o == (0, 0, 0) for o in hits)
-    tok = torch.arange(4096 * 2, dtype=torch.float32).reshape(4096, 2)
+    tok = torch.arange(N_TOK * 2, dtype=torch.float32).reshape(N_TOK, 2)
     t, m = S.crop_tokens(tok, torch.from_numpy(mask), (0, 1, 2), (4, 4, 4), patch)
     assert t.shape == (64, 2) and m.shape == (32, 64, 64)
     assert int(m.sum()) == 0  # origin (0,1,2) misses the lesion at token (1,1,1)
@@ -159,9 +161,9 @@ def test_dice_is_scored_on_the_reference_slices_and_on_the_whole_volume():
     assert abs(m["dice_macro"] - 1) < 1e-6 and abs(m["dice_full_macro"] - 1) < 1e-6 and m["n_volumes"] == 3
     bad, _ = S.score_volumes(_Oracle(cache, flip=True), cache, np.array([0]), REGIONS, torch.device("cpu"))
     assert bad["dice_macro"] < 0.1
-    cache.masks[1] = 0  # a volume without the region does not count
+    cache.masks[1] = 0  # a volume without the region: an empty prediction scores 1, a painted one 0
     m, df = S.score_volumes(_Oracle(cache), cache, np.array([0, 1]), REGIONS, torch.device("cpu"))
-    assert np.isnan(df["LES"].iloc[1]) and m["n_positive"] == {"LES": 1}
+    assert df["LES"].iloc[1] == 1.0 and m["n_positive"] == {"LES": 1}
 
 
 def test_token_aug_flips_and_rolls_with_the_mask():

@@ -1,9 +1,3 @@
-Seg-CQ500/
-artifact-cleaner/nnunet_data/
-artifact-cleaner/.venv/
-artifact-cleaner/predictions/
-artifact-cleaner/**/__pycache__/
-data/totalseg_out/
 data/raw/
 data/processed/
 runs
@@ -13,5 +7,11 @@ __MACOSX/
 _MACOSX/
 logs
 *.whl
-data/inspect_preview/jepa_batch/
 .ipynb_checkpoints/
+
+# experiment records + derived SQLite (home is backed up; records are the source of truth)
+results/
+
+# LaTeX build products (docs/Makefile writes aux files here)
+docs/build/
+weights

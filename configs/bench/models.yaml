@@ -1,0 +1,83 @@
+# Models the benchmark evaluates by name (python -m brain.bench run --model <name>): our BrainQuery (BQ) checkpoints,
+# and published encoders and baselines behind adapters.
+#
+# A BrainQuery entry has ``ckpt`` (and a ``note``); its training class, modalities and the tasks it trained on are read
+# from the checkpoint. Naming: BQ-v3 is the self-supervised encoder; BQ-R<n> multitask post-training run n; BQ-A<n> joint
+# SSL + task run n; BQ-T<n> task-token multitask run n; BQ-S-<task> a single-task specialist; BQ-12k-* the 12k-step
+# readout comparison of 2026-10-26.
+#
+# Any other entry:
+#   adapter:            module:Class, a brain.downstream.models.ExternalEncoder subclass (brain/downstream/adapters/)
+#   class:              what it learned from: ssl | supervised | specialist | baseline (brain.downstream.models)
+#   modalities:         [ct], [mri] or [ct, mri]: it is scored only on benchmark tasks of these modalities
+#   weights:            path to its weights (fingerprinted: a changed file is a new model id); omit when it has none
+#   pretrain_datasets:  dataset families of our index it pretrained on (volumes.csv dataset_family): the pretraining
+#                       overlap of each task; omit when unknown (the leaderboard then flags it)
+#   seen_tasks:         benchmark tasks whose labels it trained on: left out of its comparisons
+#   reference:          where it comes from (paper, repository, licence)
+#   kwargs:             adapter options
+models:
+  BQ-v3:          {ckpt: runs/v3/cls_s42/best.pt, note: "self-supervised 3D LeJEPA ViT-S, step 18k: the encoder every BQ run starts from"}
+  BQ-R2:          {ckpt: runs/multitask/snapshots/mt_synthseg_s42/step_0017000.pt, note: "multitask run 2: SynthSeg anatomy, task groups"}
+  BQ-R3:          {ckpt: runs/multitask/v4general_s42/best.pt, note: "multitask run 3: + general slot, more tasks"}
+  BQ-R4:          {ckpt: runs/multitask/v5enclr_s42/best.pt, note: "multitask run 4: encoder 0.5x LR"}
+  BQ-R5:          {ckpt: runs/multitask/v6nogenunc_s42/best.pt, note: "multitask run 5: uncertainty balancing"}
+  BQ-R6:          {ckpt: runs/multitask/v7nosmall_s42/best.pt, note: "multitask run 6: run 5 without the small clinical tasks (slot readout)"}
+  BQ-A1:          {ckpt: runs/joint/a1_warm_v3/best.pt, note: "joint SSL + tasks warm from BQ-v3, slot readout, 40k steps"}
+  BQ-12k-slots:   {ckpt: runs/multitask/omni_a_slots/best.pt, note: "12k-step comparison: slot readout"}
+  BQ-12k-tokens:  {ckpt: runs/multitask/omni_b_tokens/best.pt, note: "12k-step comparison: task tokens (became the default)"}
+  BQ-12k-moe:     {ckpt: runs/multitask/omni_c_tokens_moe/best.pt, note: "12k-step comparison: task tokens + MoE top blocks"}
+  BQ-S-hemorrhage: {ckpt: runs/single/hemorrhage/best.pt, note: "single-task specialist: the 6 hemorrhage tasks"}
+  BQ-T1:          {ckpt: runs/multitask/tokens_s42/best.pt, note: "task tokens, full length (configs/multitask/tokens.yaml); next batch"}
+  BQ-A2:          {ckpt: runs/joint/tokens_warm_v3/best.pt, note: "joint SSL + task tokens (configs/joint/tokens_warm_v3.yaml); next batch"}
+
+  BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
+  regional_stats:
+    adapter: brain.downstream.adapters.baselines:RegionalStats
+    class: baseline
+    modalities: [ct, mri]
+    pretrain_datasets: []
+    reference: "hand-crafted: brain-mask intensity statistics, whole brain and 32 mm blocks (no training)"
+    kwargs: {block_mm: 32}
+  ct_fm:
+    adapter: brain.downstream.adapters.published:CTFM
+    class: ssl
+    modalities: [ct]
+    weights: weights/ct_fm/model.safetensors
+    # Imaging Data Commons CT collections (mostly oncology body CT): none of our CT datasets
+    pretrain_datasets: []
+    reference: "CT-FM, Pai et al. 2025 (arXiv 2501.09001); huggingface.co/project-lighter/ct_fm_feature_extractor; Apache 2.0"
+    kwargs: {spacing_spl: [3, 1, 1], shape_spl: [64, 256, 256]}
+  ct_fm_triage:
+    # the same weights fed the input of CT-FM's own head-CT evaluation (its repo's evaluation/cq500.yaml): 5 x 2 x 2 mm,
+    # 48 x 128 x 128, four HU windows (blood, subdural, stroke, bone) stacked along S
+    adapter: brain.downstream.adapters.published:CTFM
+    class: ssl
+    modalities: [ct]
+    weights: weights/ct_fm/model.safetensors
+    pretrain_datasets: []
+    reference: "CT-FM, Pai et al. 2025 (arXiv 2501.09001), head-CT triage input; Apache 2.0"
+    kwargs: {spacing_spl: [5, 2, 2], shape_spl: [48, 128, 128],
+             windows: [[0, 80], [-125, 175], [28, 36], [-900, 2100]]}
+  brainiac:
+    adapter: brain.downstream.adapters.published:BrainIAC
+    class: ssl
+    modalities: [mri]
+    weights: weights/brainiac/backbone.safetensors     # the SimCLR backbone of BrainIAC.ckpt, saved as safetensors
+    # their pretraining pool (Methods) names ABIDE, OASIS-2, IXI, Pixar, BraTS 2023 and AOMIC (PIOP1/2, ID1000); MSD
+    # brain tumour cases are part of BraTS. The pool also holds their downstream data, so this is "may have seen".
+    pretrain_datasets: [abide1, oasis2, ixi, pixar, brats_gli, brats_men, brats_ped, brats_goat, msd_braintumor, piop1, piop2, id1000]
+    reference: "BrainIAC, Tak et al. 2026 (Nature Neuroscience); github.com/AIM-KannLab/BrainIAC; non-commercial research licence"
+    kwargs: {template: weights/brainiac/temp_head.nii.gz}
+
+# Weights of published models live in weights/ (git-ignored; /home/roku/brain-model/weights, symlinked in worktrees).
+# Planned (adapter and weights still to do; 2026-10-27 survey, check each licence before use):
+#   brain2vec    ssl, [mri]   3D, 74k T1; github.com/CBICA/Brain2Vec; arXiv 2610.28411
+#   headct_fm    ssl, [ct]    3D ViT, 361k head CT; github.com/NYUMedML/headCT_foundation (check weight access)
+#   dinov2_2d    ssl, [ct, mri]  DINOv2 on axial slices, tokens pooled to our grid: the natural-image baseline
+#   sfcn         supervised, [mri]  age / sex on UK Biobank; github.com/ha-ha-ha-han/UKBiobank_deep_pretrain
+#                (seen_tasks: none of ours, but its age head makes the age tasks in-domain: list ixi_age etc.)
+#   brainfm      supervised, [ct, mri]  SynthSeg-style multitask UNet; github.com/jhuldr/BrainFM; arXiv 2509.00549
+# An adapter: subclass ExternalEncoder, set ``dim`` (and ``needs_brain`` for skull stripping), implement ``encode``
+# (resample / crop / normalise the stored 1 mm volume as the model expects, run it, return ``pooled`` and optionally
+# ``tokens`` + ``xyz`` + ``keep``); then add the entry above with its weights path.

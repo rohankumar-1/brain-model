@@ -1,0 +1,150 @@
+# A1: joint SSL + multitask training warm-started from v3, against run 6 (post-training of the same v3 encoder).
+# Only the method differs from run 6: v3's weights and encoder settings (original RoPE, centre-voxel gate; the warm
+# start refuses to run if they differ), run 6's tasks (7 small ones excluded) and uncertainty balancing. Here the
+# encoder trains at full LR with the LeJEPA objective kept on (SSL tapers 1 -> 0.5 by step 4k, tasks ramp in over the
+# first 1k); run 6 trained it at 0.1x with tasks only.
+# Exposure: 40k steps x 2 volumes x 4 GPUs = run 6's 20k x 16 task samples, plus SSL. LR warmup-stable-decay (peak
+# 2.5e-4, last 8k steps decay); snapshots every 5k keep optimizer state, so a cooldown branched from step 20k gives a
+# fairly decayed 20k model to test whether the longer run helps.
+# 2026-10-25 review fixes: v3's encoder numerics kept (rope_fp32 / fp32_residual false) and its 2-GPU weighting of the
+# gathered SSL terms reproduced (loss.gather_world_ref 2); FOV cut, live-target protection, task-table weight-decay
+# exemption, data-term normalisation and the clamped, synced uncertainty weights now apply. Adam betas: optim.betas.
+#   sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/a1_warm_v3.yaml jobs/train_pi4.sbatch
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  default_origin_mm: [0.0, 0.0, 0.0]
+  volume_size_xyz: [256, 256, 160]
+  num_workers: 10
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
+  val_per_task: 64
+  val_max_seg: 4
+model:
+  size: small
+  in_chans: 1
+  proj_dim: 128
+  proj_hidden: 2048
+  qk_norm: true
+  rope_base_mm: 100.0
+  checkpoint: true
+  proj_norm: batch
+  length_buckets: 4
+  dense_dim: 128
+  dense_hidden: 1024
+  n_cls: 1
+  n_registers: 0
+  rope_min_period_mm: null
+  rope_fp32: false          # v3's numerics (bf16 RoPE angles, bf16 residual stream): A1 matches v3 / run 6
+  meta: {enabled: false, drop: 0.0}   # no metadata input / skull-strip augmentation: method-only vs run 6
+  fp32_residual: false
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, width: null, mode: slots, cross_task: true, embedding: learned}
+  seg:
+    widths: [128, 64, 32, 16]
+  init_from: runs/v3/snapshots/v3_cls_s42/step_0018000.pt
+  general: {enabled: false, proj_dim: 128}
+views:
+  patch_xyz: [16, 16, 8]
+  global:
+    n: 2
+    size_xyz: [128, 128, 64]
+  local:
+    n: 2
+    size_xyz: [64, 64, 32]
+  fine:
+    n: 2
+    size_xyz: [32, 32, 16]
+    patch_xyz: [8, 8, 4]
+  nested: true
+  fg_min: 0.15
+  retries: 8
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: center
+aug:
+  window: {mode: random, mix: brain_bone}
+  curve: {p: 0.8, knots: 5, strength: 0.6, flip: 0.3}
+  bias: {p: 0.5, amp: 0.3}
+  noise:
+    p: 0.5
+    sigma: [0.02, 0.15]
+    kind: rician
+    snr: [15, 100]
+  blur:
+    p: 0.3
+    sigma_vox: [0.5, 1.5]
+  through_plane:
+    p: 0.5
+    fwhm_vox: [2.0, 6.0]
+  drift: {p: 0.3, amp: 0.25}
+  skull: {p: 0.3, per_view: true}
+  geometric:
+    p: 0.8
+    rot_deg: [10, 10, 15]
+    scale: [0.85, 1.15]
+    flip_lr: 0.5
+  histmatch:
+    p: 0.15
+    alpha: [0.5, 1.0]
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+  skull_strip: {p: 0.0}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+loss:
+  lamb: 0.03
+  win_weight: 1.0
+  local_pooled: false
+  n_proj: 256
+  gather_ddp: true
+  gather_world_ref: 2       # v3 trained on 2 GPUs, when gathered terms got 1/W of their gradient: reproduce its weighting
+  dense: {weight: 1.0, tokens_per_view: 32, fine_weight: 0.0, stopgrad_mean: false}
+  predict:
+    weight: 1.0
+    pixel_weight: 0.5
+    pixel_cells: [2, 2, 2]
+    blocks: 3
+    block_tokens: [3, 6]
+    depth: 4
+    ramp_steps: 2000
+    fine_weight: 0.0
+    fine_blocks: 2
+    fine_block_tokens: [2, 3]
+  balance: uncertainty
+  ema_decay: 0.99
+  seg_stride: 2
+tasks:
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_survival_12m, glioma_lower_grade, glioma_idh]
+optim: {lr: 0.00025, weight_decay: 0.05, warmup_steps: 1000, clip_grad: 1.0, batch_size: 48, schedule: wsd, decay_steps: 8000}
+train: {max_steps: 40000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 5000, stop_poll: 20, best_metric: score,
+  keep_full: true}
+joint: {ssl_floor: 0.5, task_batch_size: 2, task_workers: 6, normalize: true, warmup_steps: 0, task_ramp_steps: 1000, taper_end_steps: 4000}
+output: {out_dir: runs/joint/a1_warm_v3}

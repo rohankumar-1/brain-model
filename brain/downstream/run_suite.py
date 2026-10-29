@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Run the frozen-encoder brain.downstream suite on one labelled classification or regression task.
+
+  python -m brain.downstream.run_suite --task cq500 --model runs/multitask/tokens_s42/best.pt
+  python -m brain.downstream.run_suite --task ixi_age --model sfcn            # a model in configs/bench/models.yaml
+
+The model's cached tokens (``brain.downstream.embeddings``) feed linear probes on PCA plane / grid / global readouts
+and a 3D conv probe when they lie on the standard 20 x 16 x 16 grid, pooled linear heads otherwise, and a linear head
+on each global embedding the model has (CLS, registers). Our encoders use the asinh windows of ``--window``
+(``multi``: CT brain / subdural / bone, MRI tissue / wide); registry models normalise intensities themselves.
+Segmentation tasks run in ``brain.downstream.seg3d``.
+
+Results land in runs/downstream/<task>/<ckpt_tag>/<run>/ (predictions, config) and as one experiment record per
+head (``brain.downstream.records``; query with ``python -m brain.downstream.db report``). Caches live under
+runs/downstream/_cache/v<store format> so a re-prepped store never reuses stale embeddings.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+
+from brain.common.paths import REPO_ROOT as ROOT
+from brain.prep.store import FORMAT_VERSION
+from brain.downstream.embeddings import load_or_build_embeddings, resolve_path
+from brain.downstream.embeddings import cache_tag
+from brain.downstream.heads import DEFAULT_HEADS, MLPProbe, build_heads, make_logreg_pool, make_ridge
+from brain.downstream.token_probes import make_token_heads
+from brain.downstream.token_readout import token_grid_zyx, token_readout_views
+from brain.downstream import cv
+from brain.downstream.metrics import HEADLINE, binary_metrics, bootstrap_ci, multilabel_metrics, regression_metrics
+from brain.downstream.results import eval_banner, finalize_run, new_run_dir, print_head_table, save_head_result
+from brain.downstream.tasks import SEGMENTATION_TASKS, TASK_NAMES, TaskBundle, load_task, load_volumes, split_xy, \
+    DEFAULT_VOLUMES
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--task", choices=list(TASK_NAMES), required=True)
+    p.add_argument("--model", "--ckpt", dest="model", required=True,
+                   help="a 3D checkpoint, or a model name in configs/bench/models.yaml")
+    p.add_argument("--slices-root", type=Path, default=DEFAULT_VOLUMES.parent)
+    p.add_argument("--out-root", type=Path, default=ROOT / "runs" / "downstream")
+    p.add_argument("--cache-dir", type=Path, default=ROOT / "runs" / "downstream" / "_cache" / f"v{FORMAT_VERSION}")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--run-name", type=str, default=None)
+    p.add_argument("--force-embed", action="store_true")
+    p.add_argument("--heads", type=str, default=DEFAULT_HEADS, help="comma-separated head names")
+    p.add_argument("--msd-target", type=str, default="enhancing_high")
+    p.add_argument("--cq500-threshold", type=float, default=0.5)
+    p.add_argument("--volumes-csv", type=Path, default=None, help="volume table (default slices_zarr/volumes.csv)")
+    p.add_argument("--window", choices=["canonical", "multi", "shifted"], default="multi",
+                   help="asinh window(s) of our encoders (registry models normalise intensities themselves)")
+    p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=None,
+                   help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid (default: axial only)")
+    p.add_argument("--readout", choices=["pooled", "axial", "raw"], default="pooled",
+                   help="pooled (benchmark v3): a linear probe and BrainDINO's MLP head on one embedding per volume "
+                        "(CLS, else the mean token), plus a linear probe on the 8 octant means of a 3D token grid "
+                        "(spatial: side and coarse position); axial (v2): PCA, then per-plane and 4x4x4 probes on a cubic token "
+                        "grid, plus linear heads on each global embedding; raw: pool every token")
+    p.add_argument("--cv", choices=["auto", "on", "off"], default="auto",
+                   help="repeated subject-grouped k-fold CV instead of the fixed split (auto: small held-out tasks)")
+    p.add_argument("--cv-folds", type=int, default=5)
+    p.add_argument("--cv-repeats", type=int, default=3)
+    p.add_argument("--cv-max-subjects", type=int, default=200, help="auto mode: CV below this many subjects")
+    return p.parse_args()
+
+
+def score(task: TaskBundle, y_true: np.ndarray, y_score: np.ndarray) -> dict:
+    if task.task_type == "multilabel":
+        return multilabel_metrics(y_true, y_score, label_names=task.label_names)
+    if task.task_type == "regression":
+        return regression_metrics(y_true, y_score)
+    return binary_metrics(y_true, y_score)
+
+
+def require_stores(task: TaskBundle, slices_root: Path) -> None:
+    missing = [v for v in task.volume_ids if not resolve_path(slices_root, task.image_paths.get(v, "")).is_file()]
+    if missing:
+        raise SystemExit(f"{task.name} is not ready: {len(missing)} images missing (e.g. {missing[0]})")
+    print(f"[data] {len(task.volume_ids)} volumes on disk")
+
+
+def val_scores(head, va: dict, halves: dict[str, int] | None) -> np.ndarray:
+    """The head's validation scores: cross-fitted (each half scored by fits tuned on the other) given ``halves``."""
+    if halves is None or not hasattr(head, "predict_val"):
+        return head.predict_scores(va["mus"], va["mask"], z=va.get("z"))
+    return head.predict_val(va["mus"], va["mask"], [halves[str(v)] for v in va["volume_ids"]], z=va.get("z"))
+
+
+def fit_and_score(head, task: TaskBundle, packs: dict,
+                  halves: dict[str, int] | None = None) -> tuple[dict, np.ndarray]:
+    """Fit on train (tuned / early-stopped on val), score test. ``halves`` (validation volume -> 0 / 1): cross-fit."""
+    tr, va, te = packs["train"], packs["val"], packs["test"]
+    kw = {} if halves is None else {"val_half": [halves[str(v)] for v in va["volume_ids"]]}
+    head.fit(tr["mus"], tr["y"], tr["mask"], va["mus"], va["y"], va["mask"],
+             z=tr.get("z"), z_val=va.get("z"), **kw)
+    scores = head.predict_scores(te["mus"], te["mask"], z=te.get("z"))
+    metrics = score(task, te["y"], scores)
+    if len(va["volume_ids"]):                        # val numbers let a report pick heads without peeking at test
+        metrics["val"] = score(task, va["y"], val_scores(head, va, halves))
+    key = HEADLINE[task.task_type]
+    y = te["y"]
+    lo, hi = bootstrap_ci(lambda i: score(task, y[i], scores[i]).get(key, float("nan")), len(y))
+    metrics[f"{key}_ci"] = [lo, hi]
+    if task.cohort:
+        cohorts = np.asarray(te["cohort"])
+        metrics["by_cohort"] = {
+            c: {**score(task, y[cohorts == c], scores[cohorts == c]), "n": int((cohorts == c).sum())}
+            for c in sorted(set(cohorts))
+        }
+    metrics.update(head=head.name, n_train=len(tr["volume_ids"]), n_val=len(va["volume_ids"]), n_test=len(te["volume_ids"]))
+    if getattr(head, "chosen_", None) is not None:
+        metrics["chosen_param"] = float(head.chosen_)
+    return metrics, scores
+
+
+def ensure_val(packs: dict, frac: float = 0.15, seed: int = 0) -> dict:
+    """Tasks without a val split hold out a fraction of train for early stopping."""
+    if len(packs["val"]["volume_ids"]):
+        return packs
+    tr = packs["train"]
+    order = np.random.default_rng(seed).permutation(len(tr["volume_ids"]))
+    n = max(1, int(frac * len(order)))
+    take = lambda idx: {k: ([v[i] for i in idx] if isinstance(v, list) else v[idx]) for k, v in tr.items()}
+    return {**packs, "val": take(order[:n]), "train": take(order[n:])}
+
+
+def _rename(head, name: str, pool: str | None = None):
+    head.name = name
+    if pool is not None:
+        head.pool = pool
+    return head
+
+
+def pooled_embedding(emb: dict, chunk: int = 64) -> tuple[np.ndarray, str]:
+    """One vector per volume: the CLS token when the model has one, else the mean of its foreground tokens (chunked:
+    large caches are memory-mapped)."""
+    if emb.get("cls") is not None:
+        return np.asarray(emb["cls"], dtype=np.float32), "cls"
+    mus, mask = emb["mus"], np.asarray(emb["mask"])
+    out = np.empty((len(mus), mus.shape[-1]), dtype=np.float32)
+    for i in range(0, len(mus), chunk):
+        x, m = np.asarray(mus[i:i + chunk], dtype=np.float32), mask[i:i + chunk, :, None].astype(np.float32)
+        out[i:i + chunk] = (x * m).sum(1) / np.clip(m.sum(1), 1, None)
+    return out, "mean"
+
+
+def octant_embedding(emb: dict, grid_zyx: tuple[int, int, int], chunk: int = 32) -> np.ndarray:
+    """(N, 8 D): the mean foreground token of each octant of the token grid (halves along z, y and x), so a linear
+    probe still sees the side and the coarse position of a finding that one pooled vector averages away."""
+    mus, mask = emb["mus"], np.asarray(emb["mask"])
+    nz, ny, nx = grid_zyx
+    d = mus.shape[-1]
+    out = np.zeros((len(mus), 8, d), dtype=np.float32)
+    cells = [(slice(0, nz // 2), slice(nz // 2, nz)), (slice(0, ny // 2), slice(ny // 2, ny)),
+             (slice(0, nx // 2), slice(nx // 2, nx))]
+    for i in range(0, len(mus), chunk):
+        x = np.asarray(mus[i:i + chunk], dtype=np.float32).reshape(-1, nz, ny, nx, d)
+        m = mask[i:i + chunk].reshape(-1, nz, ny, nx, 1).astype(np.float32)
+        k = 0
+        for sz in cells[0]:
+            for sy in cells[1]:
+                for sx in cells[2]:
+                    xm, mm = x[:, sz, sy, sx], m[:, sz, sy, sx]
+                    out[i:i + chunk, k] = (xm * mm).sum((1, 2, 3)) / np.clip(mm.sum((1, 2, 3)), 1, None)
+                    k += 1
+    return out.reshape(len(mus), 8 * d)
+
+
+def spatial_head(task: TaskBundle, seed: int):
+    """``spatial``: the linear probe (logistic / ridge, C or alpha on val) on the octant embedding."""
+    reg, multi = task.task_type == "regression", task.task_type == "multilabel"
+    return _rename(make_ridge(), "spatial", "mean") if reg else _rename(make_logreg_pool(multi, seed), "spatial", "mean")
+
+
+def pooled_heads(task: TaskBundle, seed: int) -> list:
+    """Benchmark v3 readouts on the pooled embedding: ``linear`` (logistic / ridge, C or alpha on val) and ``mlp``."""
+    reg, multi = task.task_type == "regression", task.task_type == "multilabel"
+    linear = _rename(make_ridge(), "linear", "mean") if reg else _rename(make_logreg_pool(multi, seed), "linear", "mean")
+    return [linear, MLPProbe(len(task.label_names) if multi else 1, multi, seed, regression=reg)]
+
+
+def readout_head_sets(task: TaskBundle, views: dict, seed: int) -> list[tuple[str, dict, list]]:
+    """Heads for each spatial view. Linear probes see the flattened layout."""
+    reg = task.task_type == "regression"
+    multi = task.task_type == "multilabel"
+    sets = []
+
+    def linear(name: str, pool: str):
+        if reg:
+            return _rename(make_ridge(), name, pool)
+        return _rename(make_logreg_pool(multi, seed), name, pool)
+
+    plane_heads = [linear("plane_ridge" if reg else "plane_logreg", "flat")]
+    grid_heads = [linear("grid_ridge" if reg else "grid_logreg", "mean")]
+    global_heads = [linear("pca_global_ridge" if reg else "pca_global_logreg", "mean")]
+    sets.append(("plane", views["plane"], plane_heads))
+    sets.append(("grid", views["grid"], grid_heads))
+    sets.append(("global", views["global"], global_heads))
+    return sets
+
+
+def headline(task: TaskBundle, m: dict) -> str:
+    key = HEADLINE[task.task_type]
+    lo, hi = m[f"{key}_ci"]
+    return f"{key}={m[key]:.4f} [{lo:.4f}, {hi:.4f}]"
+
+
+def main() -> None:
+    from brain.downstream.models import resolve_model
+    from brain.downstream.records import now_utc
+
+    started = now_utc()
+    args = parse_args()
+    model = resolve_model(args.model)
+    volumes = load_volumes(args.volumes_csv)
+    msd = args.slices_root / "labels" / "msd_volume_labels.csv"
+    task = load_task(args.task, volumes, threshold=args.cq500_threshold,
+                     msd_labels=msd if msd.exists() else None, msd_target=args.msd_target)
+    eval_banner(task.name, f"{task.task_type}  ·  {len(task.volume_ids)} volumes  ·  {model.model_id}")
+    print(f"[task] {task.name} type={task.task_type} n_volumes={len(task.volume_ids)}")
+    if task.name in SEGMENTATION_TASKS or task.task_type == "segmentation":
+        raise SystemExit(f"{task.name} is a segmentation task: python -m brain.downstream.seg3d (our 3D encoders)")
+    mods = set(model.spec.get("modalities") or ("ct", "mri"))
+    task_mods = {str(m).lower()[:2] for m in task.modalities.values()} if task.modalities else set()
+    if task_mods and not task_mods & {m[:2] for m in mods}:
+        raise SystemExit(f"{model.name} takes {sorted(mods)} only; {task.name} is {sorted(task_mods)}")
+    require_stores(task, args.slices_root)
+
+    emb = load_or_build_embeddings(model=model, slices_root=args.slices_root, image_paths=task.image_paths,
+                                   volume_ids=task.volume_ids, cache_dir=args.cache_dir, task=task.name,
+                                   force=args.force_embed, window=args.window, modalities=task.modalities)
+    print(f"[embed] {emb['mus'].shape} ({emb['representation']}) cache={emb['cache_path']}")
+    multilabel = task.task_type == "multilabel"
+    grid = token_grid_zyx(emb["mus"].shape[1])
+    use_readout = args.readout == "axial" and grid is not None
+    token_heads = args.token_heads if args.token_heads is not None else args.readout == "axial"
+    if args.readout == "pooled":
+        vec, pooled_kind = pooled_embedding(emb)
+        p_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((len(vec), 1), dtype=bool)}
+        p_emb.pop("z", None)
+        o_emb = None
+        if grid is not None:
+            octs = octant_embedding(emb, grid)
+            o_emb = {**emb, "mus": octs[:, None, :], "mask": np.ones((len(octs), 1), dtype=bool)}
+            o_emb.pop("z", None)
+        print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp"
+              + (f"; spatial (octants) {octs.shape}" if o_emb is not None else ""))
+
+    def head_sets_for(task_s: TaskBundle, packs_s: dict) -> list[tuple[str, dict, list]]:
+        """Fresh heads for one split (PCA readouts are refit on this split's training volumes)."""
+        if args.readout == "pooled":
+            sets = [(pooled_kind, ensure_val(split_xy(task_s, p_emb), seed=args.seed), pooled_heads(task_s, args.seed))]
+            if o_emb is not None:
+                sets.append(("octants", ensure_val(split_xy(task_s, o_emb), seed=args.seed),
+                             [spatial_head(task_s, args.seed)]))
+            if token_heads and grid is not None:
+                n_out = len(task_s.label_names) if multilabel else 1
+                sets.append(("tokens", packs_s, make_token_heads(
+                    emb["mus"].shape[-1], n_out, multilabel, args.seed, task_s.task_type == "regression",
+                    grid_zyx=grid)))
+            return sets
+        if use_readout:
+            views = token_readout_views(packs_s, seed=args.seed, grid_zyx=grid)
+            print(f"[readout] grid={grid} pca={views['pca_dim']} explained={views['explained_variance']:.3f} "
+                  f"plane={views['plane']['train']['mus'].shape} bins={views['grid']['train']['mus'].shape}")
+            sets = readout_head_sets(task_s, views, args.seed)
+            if token_heads:
+                n_out = len(task_s.label_names) if multilabel else 1
+                sets.append(("tokens", packs_s, make_token_heads(
+                    emb["mus"].shape[-1], n_out, multilabel, args.seed, task_s.task_type == "regression",
+                    grid_zyx=grid)))
+        else:
+            sets = [("raw", packs_s, build_heads(
+                latent_dim=emb["latent_dim"], n_out=len(task_s.label_names) if multilabel else 1,
+                multilabel=multilabel, seed=args.seed, which=[h.strip() for h in args.heads.split(",") if h.strip()],
+                task_type=task_s.task_type))]
+        # Prefix-token models: a linear head on each global embedding the model has (CLS; the registers; both),
+        # next to the patch-token heads, so a CLS / register model is read out the way it summarises a volume.
+        n_vol = len(emb["volume_ids"])
+        globals_ = {}
+        if emb.get("cls") is not None:
+            globals_["cls"] = np.asarray(emb["cls"], dtype=np.float32)
+        if emb.get("registers") is not None:
+            globals_["reg"] = np.asarray(emb["registers"], dtype=np.float32)
+            if "cls" in globals_:
+                globals_["clsreg"] = np.concatenate([globals_["cls"], globals_["reg"]], axis=1)
+        reg = task_s.task_type == "regression"
+        for view_name, vec in globals_.items():
+            g_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((n_vol, 1), dtype=bool)}
+            g_emb.pop("z", None)
+            g_packs = ensure_val(split_xy(task_s, g_emb), seed=args.seed)
+            head = _rename(make_ridge(), f"{view_name}_ridge", "mean") if reg else \
+                _rename(make_logreg_pool(multilabel, args.seed), f"{view_name}_logreg", "mean")
+            sets.append((view_name, g_packs, [head]))
+        return sets
+
+    overlap = model.pretrain_overlap(task.volume_ids, volumes)
+    cv_on = cv.use_cv(args.cv, task, volumes, overlap, args.cv_max_subjects)
+    run_dir = new_run_dir(args.out_root, task.name, model.cache_key, args.run_name)
+    all_metrics = {}
+    head_names = []
+    scored = []
+    if not cv_on:
+        packs = ensure_val(split_xy(task, emb), seed=args.seed)
+        print("[split] " + " ".join(f"{s}={len(p['volume_ids'])}" for s, p in packs.items()))
+        for view_name, view_packs, heads in head_sets_for(task, packs):
+            for head in heads:
+                print(f"\n[head] {head.name} ({view_name}) …")
+                metrics, scores = fit_and_score(head, task, view_packs)
+                metrics["view"] = view_name
+                save_head_result(run_dir, head.name, metrics, y_true=view_packs["test"]["y"], y_score=scores,
+                                 volume_ids=view_packs["test"]["volume_ids"])
+                all_metrics[head.name] = metrics
+                head_names.append(head.name)
+                scored.append((head.name, view_name, metrics))
+                extra = f"  param={metrics['chosen_param']:g}" if "chosen_param" in metrics else ""
+                print("  " + headline(task, metrics) + extra)
+        split_sizes = {f"n_{s}": len(p["volume_ids"]) for s, p in packs.items()}
+        cv_info = None
+    else:
+        fold_info: dict = {}
+        folds = cv.make_folds(task, volumes, args.cv_folds, args.cv_repeats, args.seed, report=fold_info)
+        n_folds = len({f for _, f, _ in folds})
+        print(f"[cv] {len(np.unique(cv.subjects(task, volumes)))} subjects, {n_folds} folds x "
+              f"{args.cv_repeats} repeats (pretrain overlap {overlap}; validation completed in "
+              f"{fold_info['val_repaired']} folds)")
+        preds: dict[str, list] = {}
+        vals: dict[str, list] = {}
+        views_of: dict[str, str] = {}
+        sizes: dict[str, list] = {}
+        for r, f, splits in folds:
+            task_f = replace(task, splits=splits)
+            packs_f = split_xy(task_f, emb)
+            halves = cv.val_halves(task, volumes, splits, args.seed + 1000 * r + f)
+            for view_name, view_packs, heads in head_sets_for(task_f, packs_f):
+                for head in heads:
+                    m, scores = fit_and_score(head, task_f, view_packs, halves)
+                    preds.setdefault(head.name, []).append((r, view_packs["test"]["volume_ids"], scores))
+                    va = view_packs["val"]
+                    if len(va["volume_ids"]):          # cross-fitted val predictions, pooled over folds
+                        vals.setdefault(head.name, []).append((va["y"], val_scores(head, va, halves)))
+                    sizes.setdefault(head.name, []).append((m["n_train"], m["n_val"]))
+                    views_of[head.name] = view_name
+            print(f"[cv] repeat {r + 1} fold {f + 1}/{n_folds} done")
+        key = HEADLINE[task.task_type]
+        for name, fold_preds in preds.items():
+            reps = cv.pooled(task, fold_preds)
+            per_rep = {r: score(task, y, s) for r, (_, y, s) in reps.items()}
+            ids0, y0, s0 = reps[min(reps)]
+            metrics = dict(per_rep[min(per_rep)])
+            metrics[key] = float(np.nanmean([m.get(key, float("nan")) for m in per_rep.values()]))
+            metrics[f"{key}_repeats"] = [float(m.get(key, float("nan"))) for m in per_rep.values()]
+            lo, hi = bootstrap_ci(lambda i: score(task, y0[i], s0[i]).get(key, float("nan")), len(y0))
+            metrics[f"{key}_ci"] = [lo, hi]
+            # val: one score over every fold's inner-validation predictions pooled (a ~15% inner set per fold is a
+            # handful of subjects; averaging per-fold R2/AUC over those is too noisy to pick a head on)
+            if vals.get(name):
+                metrics["val"] = score(task, np.concatenate([y for y, _ in vals[name]]),
+                                       np.concatenate([p for _, p in vals[name]]))
+            n_tr = [a for a, _ in sizes[name]]
+            metrics.update(head=name, view=views_of[name], n_train=int(np.mean(n_tr)),
+                           n_val=int(np.mean([b for _, b in sizes[name]])), n_test=len(ids0),
+                           cv={"folds": n_folds, "repeats": args.cv_repeats, "val": "cross_fitted", **fold_info})
+            save_head_result(run_dir, name, metrics, y_true=y0, y_score=s0, volume_ids=ids0,
+                             repeats=[reps[r] for r in sorted(reps) if r != min(reps)])
+            all_metrics[name] = metrics
+            head_names.append(name)
+            scored.append((name, views_of[name], metrics))
+            print(f"  {name}: " + headline(task, metrics) + f"  (repeats {[round(x, 3) for x in metrics[f'{key}_repeats']]})")
+        split_sizes = {"n_train": int(np.mean([m["n_train"] for m in all_metrics.values()])),
+                       "n_test": len(task.volume_ids)}
+        cv_info = {"folds": n_folds, "repeats": args.cv_repeats, "val_frac": cv.VAL_FRAC, "grouped_by": "dedup_key",
+                   "val": "cross_fitted", **fold_info}
+    print_head_table(task.name, task.task_type, scored)
+    config = {"task": task.name, "task_type": task.task_type, "label_names": task.label_names,
+              "regions": {k: list(v) for k, v in task.regions.items()}, "model": args.model,
+              "ckpt": str(model.ckpt) if model.ckpt else None, "model_info": model.info(),
+              "representation": emb["representation"], "slices_root": str(args.slices_root),
+              "latent_dim": emb["latent_dim"], "heads": head_names,
+              "readout": "pooled" if args.readout == "pooled" else "axial" if use_readout else "raw",
+              "seed": args.seed, "window": args.window, "encoding": cache_tag() if model.is_checkpoint else "",
+              "time_utc": datetime.now(timezone.utc).isoformat(),
+              "started_utc": started, "volumes_csv": str(args.volumes_csv or DEFAULT_VOLUMES),
+              "token_heads": token_heads, "msd_target": args.msd_target if task.name == "msd" else None,
+              "pretrain_overlap": overlap,
+              "embed_cache": str(emb["cache_path"]), **split_sizes, "cv": cv_info}
+    print(f"[ok] summary → {finalize_run(run_dir, config, all_metrics)}")
+    drop_big_cache(Path(emb["cache_path"]))
+
+
+def drop_big_cache(path: Path) -> None:
+    """Delete a task's token cache once its heads are done when the tokens are memory-mapped (> BIG_CACHE_BYTES; RSNA
+    is ~40 GB per model): seven models' worth filled the scratch quota on 2026-10-25. BRAIN_KEEP_BIG_CACHE=1 keeps it."""
+    import os
+
+    side = path.with_suffix(".mus.npy")
+    if not side.exists() or os.environ.get("BRAIN_KEEP_BIG_CACHE") == "1":
+        return
+    gb = side.stat().st_size / 2**30
+    side.unlink()
+    path.unlink(missing_ok=True)
+    print(f"[cache] dropped the {gb:.0f} GB token cache {side} (BRAIN_KEEP_BIG_CACHE=1 keeps it)", flush=True)
+
+
+if __name__ == "__main__":
+    main()

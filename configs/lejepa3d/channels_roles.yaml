@@ -1,0 +1,178 @@
+# Three-channel experiment: BQ-v3 continued 6000 steps; the control is channels_ctrl.yaml (one channel, same data,
+# seed, schedule and augmentation). Here the three role windows are the input channels (windowing.ROLES; CT brain / subdural /
+# bone, MRI tissue / wide / bright tail), each jittered by 0.05 widths, every intensity augmentation in native units
+# (augment._appearance_roles). The patch embedding is widened from v3 with the new channels at zero.
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  default_spacing_mm:
+  - 1.0
+  - 1.0
+  - 1.0
+  default_origin_mm:
+  - 0.0
+  - 0.0
+  - 0.0
+  volume_size_xyz:
+  - 256
+  - 256
+  - 160
+  num_workers: 10
+  balance_alpha: 0.5
+  balance_groups:
+    brats:
+    - brats_gli
+    - brats_men
+    - brats_ped
+    - brats_goat
+model:
+  size: small
+  meta:
+    enabled: false
+  in_chans: 3
+  proj_dim: 128
+  proj_hidden: 2048
+  qk_norm: true
+  rope_base_mm: 100.0
+  checkpoint: true
+  proj_norm: batch
+  length_buckets: 4
+  dense_dim: 128
+  dense_hidden: 1024
+  n_cls: 1
+  n_registers: 0
+views:
+  patch_xyz:
+  - 16
+  - 16
+  - 8
+  global:
+    n: 2
+    size_xyz:
+    - 128
+    - 128
+    - 64
+  local:
+    n: 2
+    size_xyz:
+    - 64
+    - 64
+    - 32
+  fine:
+    n: 2
+    size_xyz:
+    - 32
+    - 32
+    - 16
+    patch_xyz:
+    - 8
+    - 8
+    - 4
+  nested: true
+  fg_min: 0.15
+  retries: 8
+  gate:
+    ct_hu:
+    - -500.0
+    - 200.0
+    mri_lo: -5.5
+aug:
+  window:
+    mode: roles
+    jitter: 0.05
+  curve:
+    p: 0.8
+    knots: 5
+    strength: 0.6
+    flip: 0.3
+  bias:
+    p: 0.5
+    amp: 0.3
+  noise:
+    p: 0.5
+    sigma:
+    - 0.02
+    - 0.15
+    kind: rician
+    snr:
+    - 15
+    - 100
+  blur:
+    p: 0.3
+    sigma_vox:
+    - 0.5
+    - 1.5
+  through_plane:
+    p: 0.5
+    fwhm_vox:
+    - 2.0
+    - 6.0
+  drift:
+    p: 0.3
+    amp: 0.25
+  skull:
+    p: 0.3
+    per_view: true
+  geometric:
+    p: 0.8
+    rot_deg:
+    - 10
+    - 10
+    - 15
+    scale:
+    - 0.85
+    - 1.15
+    flip_lr: 0.5
+  histmatch:
+    p: 0.15
+    alpha:
+    - 0.5
+    - 1.0
+loss:
+  lamb: 0.03
+  win_weight: 1.0
+  local_pooled: false
+  n_proj: 256
+  gather_ddp: true
+  dense:
+    weight: 1.0
+    tokens_per_view: 32
+    fine_weight: 0.0
+    stopgrad_mean: false
+  predict:
+    weight: 1.0
+    pixel_weight: 0.5
+    pixel_cells:
+    - 2
+    - 2
+    - 2
+    blocks: 3
+    block_tokens:
+    - 3
+    - 6
+    depth: 4
+    ramp_steps: 2000
+    fine_weight: 0.0
+    fine_blocks: 2
+    fine_block_tokens:
+    - 2
+    - 3
+optim:
+  lr: 0.0001
+  weight_decay: 0.05
+  warmup_steps: 500
+  clip_grad: 1.0
+  batch_size: 96
+train:
+  max_steps: 6000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 2000
+  stop_poll: 20
+  best_metric: loss
+output:
+  out_dir: runs/channels/roles_v3
+  resume_from: null
+  init_from: runs/v3/cls_s42/best.pt

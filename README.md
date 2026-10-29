@@ -1,16 +1,54 @@
-# brain-model
+# BrainQuery (BQ)
 
-Multimodal CT/MRI representation learning: shared-space prep → self-supervised encoders (2D ViT LeJEPA, 3D BrainModel; ConvVAE is legacy) → frozen-embedding downstream suite.
+**BrainQuery** is a 3D foundation model for brain CT and MRI that answers task queries: a self-supervised ViT encoder
+whose sequence carries one token per task, so one pass answers any of its trained tasks and a new task is learned from
+a few labelled scans. Checkpoints are named `BQ-...` (`configs/bench/models.yaml`; e.g. BQ-v3, the self-supervised
+encoder; BQ-A1, joint SSL + tasks). One package, `brain/`, holds the pipeline end to end: prep (raw archives to
+registered 1 mm Zarr volumes) -> self-supervised pretraining -> task-query training -> evaluation and the benchmark
+against published models (`docs/benchmark.md`).
 
-## Storage layout (ORCD)
+| Method | Command | What it is |
+|---|---|---|
+| `lejepa3d` | `python -m brain.train lejepa3d` | BrainQuery's self-supervised pretraining: 3D LeJEPA on native-grid crops with a dense token objective, RoPE in mm, masked-block prediction (BQ-v3). `docs/lejepa3d.md` |
+| `multitask` | `python -m brain.train multitask` | BrainQuery task training: task tokens on a pretrained encoder, whole volumes (BQ-R*, BQ-T*). `docs/multitask.md` |
+| `joint` | `python -m brain.train joint` | BrainQuery joint SSL + task training of one encoder, with an SSL -> task curriculum (BQ-A*). `brain/train/joint.py` |
+| `mae3d` | `python -m brain.train mae3d` | A 3D MAE baseline, Primus-style ViT on 8 x 8 x 4 mm tokens (split voxel target, lesion-aware masking). |
+
+## Layout
+
+```
+brain/
+  common/      config (defaults + YAML + --set), dist (torchrun, StopFlag), optim (lr, param groups), metrics,
+               checkpoint (atomic save, resume), windowing (asinh windows), paths
+  prep/        read -> center -> register -> resample -> native units -> brain mask; index; QC; pilot;
+               SynthSeg-robust 2.0 (PyTorch port) + runner for anatomy labels
+  data/        volume datasets, crops, appearance augmentation, token gate
+  models/      vit3d (BrainQuery's encoder), viewnet3d, mae3d, projector, patch_embed, rope3d, conv3d
+  objectives/  sigreg (+ batch gather), lejepa3d, dense
+  train/       engine (CLI, loop, resume, checkpoints), defaults, one Trainer per method
+  multitask/   BrainQuery's task side: task registry, label builder (incl. registration / SynthSeg QC), data, the
+               BrainQuery model (task tokens, typed heads), losses, few-shot
+  downstream/  frozen-encoder tasks, heads, probes, segmentation, results views; models.py (any model, ours or
+               published, behind one interface) and adapters/ (published encoders, baselines)
+  bench/       the benchmark: versioned spec, run, per-model card, leaderboard
+  datasets/    download / fetch scripts
+configs/<method>/*.yaml    only the keys that differ from brain/train/defaults.py need be set
+configs/bench/             benchmark.yaml (the protocol), models.yaml (BQ checkpoints by name; published models)
+jobs/                      _env.sh (shared), train.sbatch (+ _pi, _pi4), prep_v6*, synthseg, multitask_*, eval_run /
+                           submit_eval.sh; jobs/archive/ = finished one-off jobs
+tests/                     CPU tests (python tests/run.py tests/test_*.py; pytest also works where installed)
+docs/                      prep.md, lejepa3d.md, multitask.md, downstream_3d.md, benchmark.md; docs/archive/ = old plans
+```
+
+## Storage (ORCD)
 
 | | Path |
 |---|---|
 | Repo | `/home/roku/brain-model` |
 | Scratch (processed Zarr only) | `/home/roku/orcd/scratch/brain-model` |
-| Pool (all raw archives) | `/home/roku/orcd/pool/datasets` |
+| Pool (raw archives) | `/home/roku/orcd/pool/datasets` |
 
-Override with `BRAIN_SCRATCH` / `BRAIN_POOL` / `BRAIN_DATASETS`. `data/raw` points at pool; `data/processed` at scratch.
+Override with `BRAIN_SCRATCH` / `BRAIN_DATASETS` (`brain/common/paths.py`), `BRAIN_REPO` / `BRAIN_ENV` for jobs, `BRAIN_TEMPLATE` for registration (with `BRAIN_TEMPLATE_BRAIN`, its brain mask: the fixed image for skull-stripped scans and the prior for brain-mask QC), `BRAIN_SYNTHSTRIP` for the SynthStrip binary (`SYNTHSTRIP_NOCSF=1` selects the model without extra-cerebral CSF).
 
 ## Datasets
 
@@ -35,49 +73,51 @@ Counts for **volumes / slices** are after shared-space prep (RAS, 1 mm, 256×2
 - MSD Task01 overlaps historically with older BraTS glioma releases — prefer **BraTS 2023 GLI** as the glioma source when both are in the mix; drop or de-dup MSD if needed.
 - All raw archives live under **pool** `/home/roku/orcd/pool/datasets` (BraTS/OASIS zips, RSNA zip, CQ500/Seg-CQ500 NIfTI+masks, MSD tar). Processed volumes are one compressed ZipStore per case, in a folder per dataset, on scratch.
 
-## 1. Preprocessing (one volume store)
-
-All datasets (CQ500, RSNA, BraTS, OASIS, …) share one pipeline. Each volume is one compressed ZipStore under a dataset folder. Splits and SSL sampling are index tables:
+## 1. Preprocessing
 
 ```bash
-python data/preprocess.py --overwrite --workers 6 --skip-download \
-  --train-frac 0.75 --val-frac 0.10 --test-frac 0.15
-# → …/slices_zarr/<dataset>/<case>.zip  plus subjects.csv, volumes.csv, slices.parquet
+PHASE=B sbatch --export=ALL --array=0-7%4 jobs/prep_v6.sbatch     # see jobs/prep_v6*.sbatch for phases A/B and HBN/GoAT
+python -m brain.prep.index --root $STORE
 ```
 
-- **`<dataset>/<case_id>.zip`** — float16 `(128, 1, 256, 256)`, Blosc chunks of 8 slices
-- **`<dataset>/<case_id>.{seg,ICH,brain}.zip`** — labels on that same grid, when the dataset has them
-- **`subjects.csv`** — one row per `dedup_key` with canonical `split`
-- **`volumes.csv`** — one row per volume (`image_path`, source, contrast, mask paths)
-- **`slices.parquet`** — SSL index (`image_path`, `z`); not a second pixel copy
-- Per volume: RAS → 1 mm iso → 256×256×128 → CT HU [-200,200] or MRI Z-score → full volume stored; empty drop + mid-skull sample writes **indices only**
+Each volume is read, centered, **affinely registered to a skull-on T1 template**, resampled once onto a 256 x 256 x 128 mm 1 mm grid, stored in native units (CT HU, MRI robust z), and given a **brain mask**; native acquisition geometry (including slice thickness) is recorded. Details, flags and the store layout: `docs/prep.md`. `--registration none --brain-mask none` reproduces the old head-centering-only store.
 
-Prefer Slurm: `sbatch jobs/preprocess_zarr.sbatch` (extracts BraTS/OASIS if needed, then writes the per-volume zips).
-
-## 2. Models
-
-**ConvVAE** — 2D `(B,1,256,256)`, latent μ/logvar. Heterogeneous batches: 64 independently sampled `(image_path, z)` rows (`num_workers=8`). Train: `sbatch jobs/train_vae_256.sbatch`.
-
-Checkpoints (atomic `*.tmp` → replace) under the run dir:
-
-- `last.pt` — every epoch and on SIGTERM/SIGINT (model, optimizer, scheduler, RNG, epoch, history)
-- `best.pt` — when val reconstruction improves (`vae.pt` alias)
-- Auto-resume from `last.pt` unless `--no-resume`. Slurm job uses `--requeue` and `--signal=B:TERM@120`.
-
-**ViT LeJEPA** (`train_vit.py`, `models/vit.py`) — crop-matching plus SIGReg on 2 global (256) and 6 local (96) views. Views are built on the GPU (`lib/views.py`, area-fraction crops, locals centred on foreground) from 8-slice chunk reads (`lib/slabs.py`, family-balanced with `balance_alpha`). Step-based (warmup + cosine), bf16, optional registers / QK-norm, `torchrun` for multi-GPU. `sbatch jobs/train_vit.sbatch` checkpoints on SIGTERM and requeues itself; configs in `configs/vit_{tiny,small}.yaml`.
-
-**3D BrainModel** (`brainmodel/`, `train_brainmodel.py`) — LeJEPA on native-grid 3D crops with a dense, position-aware token objective; see `docs/brainmodel.md`. Train: `sbatch jobs/train_brainmodel_pi.sbatch`. Judge it with the frozen-token probes: `python -m downstream.probe3d` / `sbatch jobs/probe3d.sbatch`.
-
-**Downstream** (`downstream/`) — frozen encoder; ViT features are `[cls, mean patch]`. Classification / regression: pooled logreg / ridge, seed-ensembled slice-attention MLP (early-stopped on val), XGBoost, with bootstrap 95% CIs. Segmentation: `SegDecoder` (UNETR-style, skips from blocks 3/6/9/12) trained on a pixel cache with GPU augmentation, scored as per-volume Dice.
+## 2. Pretraining
 
 ```bash
-python -m downstream.run_suite --task cq500 --ckpt runs/vit_tiny_v2/last.pt
-python -m downstream.run_suite --task brats2023_gli --ckpt runs/vit_tiny_v2/last.pt
-sbatch --export=ALL,CKPT=runs/vit_tiny_v2/last.pt jobs/downstream_vit.sbatch
+python -m brain.train lejepa3d --synthetic --max-steps 8                      # CPU smoke run, no data
+python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml
+sbatch --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/small.yaml jobs/train_pi.sbatch   # 2 GPUs
+sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/small.yaml jobs/train_pi4.sbatch
+python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml --set optim.lr=3e-4 --set aug.curve.p=0
 ```
 
-## 3. Splits
+All methods share: warmup + cosine schedule, bf16, DDP via `torchrun`, atomic `last.pt` / `best.pt` / `step_*.pt`, resume from `<out_dir>/last.pt`, clean SIGTERM preemption with Slurm requeue, NaN guards, and one log table. Checkpoints store a bare backbone under `model`, so every downstream loader reads all three.
 
-Volume-level **train / val / test = 75 / 10 / 15**, stratified by `(modality, dataset_family)`, assigned by subject `dedup_key` (`seed=42`). SSL/VAE fits train only and early-stops on val. `data/resplit_manifest.py` rewrites table `split` columns only — never copies pixels.
+Appearance augmentation (contrast curves with inversion, bias field, through-plane degradation, skull dropout) is **on by default** for `lejepa3d`; see `docs/lejepa3d.md` to turn parts off.
 
-**DDP later:** same index + `DistributedSampler`; `num_workers` is per rank (start 4–8 workers/GPU). No extra pixel copies.
+## 3. Evaluation and the benchmark
+
+```bash
+python -m brain.bench run --model BQ-T1 --full --submit    # every evaluation that applies to a model
+python -m brain.bench card --model BQ-T1                   # every number recorded for it
+python -m brain.bench board                                # BQ models and published models, by training class
+jobs/submit_eval.sh runs/<run>/last.pt                     # the whole downstream suite (every task), then ingest
+```
+
+The benchmark (`docs/benchmark.md`) is a versioned subset of the suite: fixed tasks, pinned splits, one readout per
+task, comparisons grouped by what a model learned from.
+
+Frozen encoder on the 256 x 256 x 160 grid (20 x 16 x 16 tokens). Classification and regression use PCA plane, grid
+and global readouts plus a 3D conv probe, with bootstrap 95% CIs. Segmentation uses a token U-Net decoder (`seg3d`).
+`probe3d` runs lesion, fingerprint and location token probes with pixel and random-init controls. Every evaluation
+writes an experiment record (model, data provenance, protocol, test and val metrics, environment, artifacts) under
+`results/records/`; `brain.downstream.db` folds the records into SQLite. See `docs/downstream_3d.md`.
+
+## 4. Splits
+
+Volume-level train / val / test = 75 / 10 / 15, stratified by `(modality, dataset_family)`, assigned by subject `dedup_key` (`seed=42`). SSL fits train only and early-stops on val. Index tables only; no pixel copies.
+
+## Tests
+
+`python -m pytest tests -q` runs on CPU. `tests/test_registration.py` needs SimpleITK and takes a minute.

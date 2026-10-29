@@ -1,0 +1,129 @@
+# SSL-only control for configs/joint/small.yaml: identical (code, encoder fixes, data, steps) except the tasks never
+# switch on (warmup_frac 1.0), so the comparison isolates joint training from the foundation fixes.
+#   sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/ssl_only.yaml jobs/train_pi4.sbatch
+aug:
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+  appearance:
+    bias: {amp: 0.2, p: 0.3}
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {amp: 0.1, p: 0.2}
+    noise:
+      kind: rician
+      p: 0.5
+      sigma: [0.02, 0.1]
+      snr: [15, 100]
+    through_plane:
+      fwhm_vox: [2.0, 6.0]
+      p: 0.3
+  bias: {amp: 0.3, p: 0.5}
+  blur:
+    p: 0.3
+    sigma_vox: [0.5, 1.5]
+  curve: {flip: 0.3, knots: 5, p: 0.8, strength: 0.6}
+  drift: {amp: 0.25, p: 0.3}
+  flip_lr: 0.5
+  fov_cut:
+    mm: [10, 40]
+    p: 0.2
+  geometric:
+    flip_lr: 0.5
+    p: 0.8
+    rot_deg: [10, 10, 15]
+    scale: [0.85, 1.15]
+  histmatch:
+    alpha: [0.5, 1.0]
+    p: 0.15
+  noise:
+    kind: rician
+    p: 0.5
+    sigma: [0.02, 0.15]
+    snr: [15, 100]
+  skull: {p: 0.3, per_view: true}
+  through_plane:
+    fwhm_vox: [2.0, 6.0]
+    p: 0.5
+  window: {mix: brain_bone, mode: random}
+data:
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  default_origin_mm: [0.0, 0.0, 0.0]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
+  num_workers: 10
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  val_max_seg: 4
+  val_per_task: 64
+  volume_size_xyz: [256, 256, 160]
+joint: {normalize: true, ssl_floor: 0.5, taper_end_frac: 0.6, task_batch_size: 2, task_ramp_frac: 0.15, task_workers: 6,
+  warmup_frac: 1.0}
+loss:
+  balance: ema
+  dense: {fine_weight: 0.0, stopgrad_mean: false, tokens_per_view: 32, weight: 1.0}
+  ema_decay: 0.99
+  gather_ddp: true
+  lamb: 0.03
+  local_pooled: false
+  n_proj: 256
+  predict:
+    block_tokens: [3, 6]
+    blocks: 3
+    depth: 4
+    fine_block_tokens: [2, 3]
+    fine_blocks: 2
+    fine_weight: 0.0
+    pixel_cells: [2, 2, 2]
+    pixel_weight: 0.5
+    ramp_steps: 2000
+    weight: 1.0
+  seg_stride: 2
+  win_weight: 1.0
+model:
+  checkpoint: true
+  dense_dim: 128
+  dense_hidden: 1024
+  in_chans: 1
+  length_buckets: 4
+  n_cls: 1
+  n_registers: 0
+  proj_dim: 128
+  proj_hidden: 2048
+  proj_norm: batch
+  qk_norm: true
+  rope_base_mm: 100.0
+  rope_min_period_mm: 32.0
+  seg:
+    widths: [128, 64, 32, 16]
+  size: small
+  slot: {cross_task: true, dim: 256, embedding: learned, heads: 8, layers: 3, mode: slots, width: null}
+  taps: [3, 7]
+optim: {batch_size: 48, clip_grad: 1.0, lr: 0.00025, warmup_steps: 2000, weight_decay: 0.05}
+output: {out_dir: runs/joint/ssl_only_s42}
+seed: 42
+tasks: {k_max: 8, max_seg: 2, p_all: 0.2, rare_beta: 0.5}
+train: {best_metric: loss, ckpt_every: 500, eval_every: 1000, keep_every: 5000, log_every: 50, max_steps: 60000, stop_poll: 20}
+views:
+  fg_min: 0.15
+  fine:
+    n: 2
+    patch_xyz: [8, 8, 4]
+    size_xyz: [32, 32, 16]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mode: max
+    mri_lo: -5.5
+  global:
+    n: 2
+    size_xyz: [128, 128, 64]
+  local:
+    n: 2
+    size_xyz: [64, 64, 32]
+  nested: true
+  patch_xyz: [16, 16, 8]
+  retries: 8
