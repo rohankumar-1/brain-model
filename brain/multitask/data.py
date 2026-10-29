@@ -170,10 +170,12 @@ class MultitaskDataset(Dataset):
                 if ref == "@brain":
                     m = np.asarray(arrays["brain"]) > 0
                 else:
-                    path, ids = ref.split("|")
+                    path, ids, *ign = ref.split("|")         # ``path|ids[|ignored ids]``
                     if path not in mask_cache:
                         mask_cache[path] = store.read_image(self.store_root / path, "mask")
-                    m = np.isin(mask_cache[path], [int(i) for i in ids.split(",")])
+                    m = np.isin(mask_cache[path], [int(i) for i in ids.split(",")]).astype(np.uint8)
+                    if ign:                                  # voxels left out of the loss (2): an annotator's "ignore"
+                        m[np.isin(mask_cache[path], [int(i) for i in ign[0].split(",")]) & (m == 0)] = 2
                 if m.shape != img.shape:
                     continue
                 slot = len(seg_masks)
@@ -311,7 +313,8 @@ def fov_cut(raw: torch.Tensor, seg: torch.Tensor, rows: torch.Tensor, mod: torch
     below = torch.arange(z, device=raw.device).view(1, 1, z, 1, 1) < cut.view(-1, 1, 1, 1, 1)
     raw = torch.where(below, floors(mod).view(-1, 1, 1, 1, 1).to(raw.device), raw)
     if len(seg):
-        seg = torch.where(below[rows], torch.zeros((), device=seg.device), seg)
+        tgt = torch.where(below[rows], torch.zeros((), device=seg.device), seg[:, :1])   # validity channel kept
+        seg = torch.cat([tgt, seg[:, 1:]], 1)
     return raw, seg
 
 
@@ -346,7 +349,9 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     task = batch["task"].to(device)
     asked = task >= 0
     live_rows = (aug_unsafe.to(device)[task.clamp_min(0)] & asked).any(1) if aug_unsafe is not None else None
-    seg = batch["seg"].to(device, non_blocking=True).float().unsqueeze(1)
+    seg = batch["seg"].to(device, non_blocking=True)
+    # (P, 1, Z, Y, X) target; with ignored voxels (value 2) a second, validity channel rides through every spatial op
+    seg = torch.stack([seg == 1, seg != 2], 1).float() if (seg == 2).any() else seg.float().unsqueeze(1)
     rows = batch["seg_pair"][:, 0].to(device)
     if train and float(aug.get("flip_lr", 0.0)) > 0:
         flip = torch.rand(b, device=device) < float(aug["flip_lr"])

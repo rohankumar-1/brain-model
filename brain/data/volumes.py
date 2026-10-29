@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import os
 from pathlib import Path
 
@@ -31,6 +32,19 @@ META_ALIASES = {"t1": "t1", "t1w": "t1", "t1n": "t1", "t1_pre": "t1", "t1c": "t1
                 "t2s": "t2s", "ct": "ct", "ncct": "ct", "cta": "cta"}
 DATASET_CONTRAST = {"brainmetshare_bravo": "t1c", "brainmetshare_t1_gd": "t1c", "brainmetshare_t1_pre": "t1",
                     "brainmetshare_flair": "flair", "isles24_cta": "cta", "isles24_ncct": "ct"}
+
+
+def excluded(df: pd.DataFrame, patterns) -> pd.Series:
+    """Rows whose ``dataset`` or ``dataset_family`` matches one of ``patterns`` (fnmatch, e.g. ``brats2023_gli_*``):
+    ``data.ssl_exclude``, the datasets a pretraining round leaves out. A config list rather than index flags, because
+    the index's sha1 pins every benchmark result."""
+    out = pd.Series(False, index=df.index)
+    for col in ("dataset", "dataset_family"):
+        if col in df.columns:
+            names = df[col].astype(str)
+            for pat in patterns or ():
+                out |= names.map(lambda s, p=str(pat): fnmatch.fnmatchcase(s, p))
+    return out
 
 
 def n_meta(model_cfg: dict) -> int:
@@ -97,6 +111,9 @@ class VolumeDataset(Dataset):
             df = df.loc[df["pretrain"].astype(bool)].copy()
         if "ssl_keep" in df.columns:
             df = df.loc[df["ssl_keep"].astype(bool)].copy()
+        exclude = ((crop_cfg or {}).get("data") or {}).get("ssl_exclude") or ()
+        if exclude:
+            df = df.loc[~excluded(df, exclude)].copy()
         self.df = df.reset_index(drop=True)
         if len(self.df) == 0:
             raise ValueError(f"No volumes for split={self.split} in {src}")

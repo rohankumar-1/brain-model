@@ -53,6 +53,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         cfg["views"]["patch_xyz"] = list(enc.patch_xyz)
         m["size"] = enc.size
         m["in_chans"] = int(enc.patch_embed.proj.in_channels)      # data.prepare windows the input to match
+        # the SSL pool the encoder saw, for benchmark overlap records (records.ssl_exclude reads the run's config)
+        cfg["data"]["ssl_exclude"] = list((scfg.get("data") or {}).get("ssl_exclude") or [])
         # the encoder keeps the numerics it was trained with (the defaults' True would not describe it)
         m["rope_fp32"], m["fp32_residual"] = bool(enc.rope.fp32), bool(enc.fp32_residual)
         if n_meta(m) and enc.meta_emb is None:                # metadata on an encoder trained without it

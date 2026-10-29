@@ -89,7 +89,7 @@ def flatten(metrics: dict, split: str) -> list[tuple]:
 
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(path)
+    con = sqlite3.connect(path, timeout=300)          # parallel suite jobs ingest at once
     con.executescript(SCHEMA)
     return con
 

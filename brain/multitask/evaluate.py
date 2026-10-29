@@ -58,7 +58,9 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             elif kind == "multiclass":
                 preds[t].append((float(y[i, j]), int(out["multiclass"][i, j].float().argmax()), vid))
         if out.get("seg") is not None:
-            d = dice(out["seg"].float(), seg_target(b["seg"]))
+            t = seg_target(b["seg"])
+            d = dice(out["seg"].float().masked_fill(t[:, -1:] < 0.5, -1.0) if t.shape[1] == 2 else out["seg"].float(),
+                     t[:, :1])                                    # ignored voxels count as predicted background
             for (i, j), v in zip(b["seg_pair"].tolist(), d.tolist()):
                 preds[int(task[i, j])].append((1.0, v, str(raw["volume_id"][i])))
     model.train(was)

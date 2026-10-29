@@ -30,6 +30,9 @@ def main() -> None:
     cp.add_argument("--models", nargs="*", default=None, help="default: every models.yaml model with results")
     pn = sub.add_parser("pin", help="fix each task's readout (best mean val over models with complete results)")
     pn.add_argument("--models", nargs="*", default=None)
+    ic = sub.add_parser("index-check", help="is a new store index the pinned one plus rows (results stay current)?")
+    ic.add_argument("--old", required=True)
+    ic.add_argument("--new", required=True)
     bd = sub.add_parser("board", help="the leaderboard")
     bd.add_argument("--models", nargs="*", default=None, help="default: every model with benchmark results")
     bd.add_argument("--ref", default=None, help="default: the spec's reference")
@@ -56,6 +59,12 @@ def main() -> None:
         from brain.bench.compare import compare
 
         compare(a.models)
+    elif a.cmd == "index-check":
+        from pathlib import Path
+
+        from brain.bench.spec import index_check
+
+        sys.exit(0 if index_check(Path(a.old), Path(a.new)) else 1)
     elif a.cmd == "pin":
         from brain.bench.board import pin
 

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 
-from brain.prep import brainmask, centering, dicom, geometry, intensity, native, registration
+from brain.prep import brainmask, centering, dicom, geometry, intensity, native, registration, store
 from brain.prep.sources import Case
 
 SIZE = geometry.GRID_XYZ  # (x, y, z)
@@ -23,8 +23,25 @@ SIZE = geometry.GRID_XYZ  # (x, y, z)
 # corrects the volumes already stored).
 LEGACY_N4_DATASETS = {"oasis2", "abide1", "ixi_t1", "ixi_t2", "atlas", "isles22_flair",
                       "pixar", "piop1", "piop2", "id1000", "wmh_flair", "wmh_t1"}
-N4_PREFIXES = ("fomo_", "brats", "msd_braintumor", "brainmetshare", "valdo", "ms3seg")
+N4_PREFIXES = ("fomo_", "brats", "msd_braintumor", "brainmetshare", "valdo", "ms3seg", "ucsf_pdgm",
+               "upenn_gbm", "rsna_ica_mra", "rsna_ica_t2w", "rsna_ica_t1c")
 NO_N4_SUFFIXES = ("_dwi", "_adc")
+
+# Tumour label maps shipped in the old BraTS numbering (enhancing tumour = 4) -> the BraTS 2023 one the store uses
+# (1 necrosis / non-enhancing core, 2 oedema, 3 enhancing): checked off the images by
+# runs/diagnostics/tumor_label_semantics.py (label 4 is the T1c-bright one in both).
+SEG_REMAP = {"ucsf_pdgm": {4: 3}, "upenn_gbm": {4: 3}}
+
+
+def remap_seg(dataset: str, name: str, m: np.ndarray) -> np.ndarray:
+    """A label mask in the store's numbering (``SEG_REMAP``); other masks pass through."""
+    table = next((t for pre, t in SEG_REMAP.items() if str(dataset).startswith(pre)), None) if name == "seg" else None
+    if not table:
+        return m
+    out = m.copy()
+    for a, b in table.items():
+        out[m == a] = b
+    return out
 
 
 INFANT_FAMILIES = ("fomo_infant",)           # registered through the age-matched NIHPD template (registration.py)
@@ -141,6 +158,22 @@ def process(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
     return finish(prepare(case, size, z_anchor, keep_debug, opts), opts)
 
 
+def shared_registration(case: Case) -> tuple[sitk.Transform, dict] | None:
+    """A co-registered sequence reuses its reference's registration (``Case.ref_image``: the reference's stored
+    volume) instead of fitting its own, so every sequence of a subject lands on one grid. Fitting each separately
+    drifted: on UCSF-PDGM (2026-10-28) the reference registered its N4-corrected image and the others the raw file, and
+    SimpleITK fits are not exactly repeatable; T1 vs the other sequences median 0.9 mm, up to 37 mm. None when there is
+    no stored reference (not yet written, or flagged): the sequence then fits on the reference image as before."""
+    path = case.ref_image
+    if path is None or not Path(path).exists():
+        return None
+    attrs = store.read_attrs(Path(path), "image")
+    if attrs.get("reg_affine") is None:
+        return None
+    info = {k: v for k, v in attrs.items() if k.startswith("reg_") and k != "reg_affine"}
+    return native.stored_transform(attrs), info | {"reg_shared": Path(case.ref).name}
+
+
 def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = False,
             opts: Options | None = None) -> Partial:
     """Read -> (N4) -> center -> (register) -> one resample. CPU only; see ``process`` for ``z_anchor``."""
@@ -189,7 +222,10 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
             # the starting pose uses the brain center; z follows the brain's extent so a long CT starts well
             start = np.array(small.TransformContinuousIndexToPhysicalPoint((cx, cy, (z0 + z1) / 2)))
             age = infant_age_months(case) if opts.registration == "affine" else None
-            if age is not None:                  # age-matched infant template, then the fixed template -> adult map
+            shared = shared_registration(case)
+            if shared is not None:
+                pass
+            elif age is not None:                # age-matched infant template, then the fixed template -> adult map
                 contrast = "t2w" if case.dataset.endswith("t2w") else "t1w"
                 itpl = registration.infant_template(age, contrast)
                 rr = registration.register(src, itpl, case.modality, start, opts.registration, stripped=case.stripped)
@@ -209,7 +245,7 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
             else:
                 rr = registration.register(src, tpl, case.modality, start, opts.registration, stripped=case.stripped)
                 rr.info["reg_backend"] = "sitk"
-            tf, rinfo = rr.transform, rr.info
+            tf, rinfo = shared if shared is not None else (rr.transform, rr.info)
             grid = registration.output_grid(tpl, size)
             cover = registration.fov_cover(img, tf, tpl, grid)
             center = np.array(tf.TransformPoint(tuple(tpl.center_mm)))
@@ -221,8 +257,8 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
 
     with stage("resample"):
         raw = geometry.resample(img, grid, default=intensity.FLOOR["ct"] if ct else 0.0, tf=tf)
-        masks = {n: geometry.resample(geometry.read(p), grid, 0.0, nearest=True, tf=tf).astype(np.uint8)
-                 for n, p in case.masks}
+        masks = {n: remap_seg(case.dataset, n, geometry.resample(geometry.read(p), grid, 0.0, nearest=True, tf=tf)
+                              .astype(np.uint8)) for n, p in case.masks}
     info |= cinfo | rinfo | {"shift_x_mm": float(shift[0]), "shift_y_mm": float(shift[1]),
                              "shift_mm": float(np.hypot(*shift)), "modality": case.modality}
     info |= native.geometry_attrs(img, grid, tf, case)       # map stored arrays back onto the source scan

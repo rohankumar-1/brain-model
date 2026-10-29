@@ -86,3 +86,21 @@ def test_cv_repeats_saved_and_scored(tmp_path, monkeypatch):
     one = report.score_ci("auc", preds[:1], reps=200)[0]
     two = report.score_ci("auc", preds[1:], reps=200)[0]
     assert np.isclose(point, (one + two) / 2) and lo <= point <= hi
+
+
+def test_index_check_accepts_added_rows_only(tmp_path):
+    import pandas as pd
+
+    from brain.bench.spec import index_check
+
+    old = pd.DataFrame({"volume_id": ["a", "b", "b"], "dataset": ["x", "x", "y"], "split": ["train", "test", "test"],
+                        "mask_seg": [None, "m", None], "vol_idx": [0, 1, 2]})
+    old.to_csv(tmp_path / "old.csv", index=False)
+    added = pd.concat([old.iloc[:1], pd.DataFrame({"volume_id": ["c"], "dataset": ["z"], "split": ["val"]}),
+                       old.iloc[1:]]).assign(vol_idx=range(4))     # inserted mid-table: row numbers shift
+    added.to_csv(tmp_path / "added.csv", index=False)
+    old.assign(split=["train", "train", "test"]).to_csv(tmp_path / "moved.csv", index=False)
+    assert index_check(tmp_path / "old.csv", tmp_path / "added.csv")
+    assert not index_check(tmp_path / "old.csv", tmp_path / "moved.csv")
+    assert not index_check(tmp_path / "added.csv", tmp_path / "old.csv")      # a dropped row
+    assert load().index_shas[0] == load().index_sha1

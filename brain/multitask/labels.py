@@ -256,7 +256,8 @@ def src_downstream(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     frame = pd.DataFrame({"volume_id": b.volume_ids})
     if b.task_type == "segmentation":
         ids = list(s.get("ids") or sorted({i for r in b.regions.values() for i in r}))
-        ref = [f"{b.mask_paths[i]}|{','.join(str(int(x)) for x in ids)}" for i in b.volume_ids]
+        ign = "|" + ",".join(str(int(x)) for x in s["ignore"]) if s.get("ignore") else ""   # out of the loss
+        ref = [f"{b.mask_paths[i]}|{','.join(str(int(x)) for x in ids)}{ign}" for i in b.volume_ids]
         out = _rows(frame, np.nan, np.asarray(ref, dtype=object))
     else:
         y = np.asarray(b.y, dtype=np.float64)

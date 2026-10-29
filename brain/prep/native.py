@@ -45,6 +45,16 @@ def _affine4(tf: sitk.Transform | None) -> list[float]:
     return m.ravel().tolist()
 
 
+def stored_transform(attrs: dict) -> sitk.AffineTransform:
+    """The registration a stored volume was resampled with (stored-grid physical -> source physical), from its
+    ``reg_affine``: the inverse of ``_affine4``."""
+    m = np.asarray(attrs["reg_affine"], dtype=np.float64).reshape(4, 4)
+    tf = sitk.AffineTransform(3)
+    tf.SetMatrix(tuple(m[:3, :3].ravel()))
+    tf.SetTranslation(tuple(m[:3, 3]))
+    return tf
+
+
 def geometry_attrs(img: sitk.Image, grid, tf: sitk.Transform | None, case) -> dict:
     """Everything ``to_native`` needs, as JSON-able lists (stored with the volume)."""
     src = str(case.path) if getattr(case, "path", None) else f"{case.zip_path}::{case.case_id}"

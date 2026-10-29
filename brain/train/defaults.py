@@ -28,6 +28,8 @@ LEJEPA3D: dict[str, Any] = {
         "num_workers": 10,
         "balance_alpha": 1.0,  # family sampling mass ~ n**alpha: 1 natural mix, 0 uniform over families
         "balance_groups": None,  # {group: [family, ...]}: two-level balance (volumes.family_weights)
+        # datasets / families (fnmatch patterns) this pretraining round leaves out of the SSL pool (volumes.excluded)
+        "ssl_exclude": [],
     },
     "model": {
         "size": "tiny", "in_chans": 1, "proj_dim": 128, "proj_hidden": 2048, "qk_norm": True,

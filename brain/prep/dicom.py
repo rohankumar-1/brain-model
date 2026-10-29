@@ -76,13 +76,57 @@ def read_series_dir(folder: str | Path) -> tuple[sitk.Image, dict]:
         # dcm2niix refuses some series (ImageType DERIVED / SECONDARY CTAs, malformed overlay tags): read those with
         # the SimpleITK series reader instead
         try:
-            return read_series_dcm2niix(folder)
+            img, info = read_series_dcm2niix(folder)
         except RuntimeError as e:
             if "wrote nothing" not in str(e):
                 raise
             img, info = read_series_dir_sitk(folder)
-            return img, {**info, "dcm2niix_variant": "sitk_fallback"}
-    return read_series_dir_sitk(folder)
+            info = {**info, "dcm2niix_variant": "sitk_fallback"}
+    else:
+        img, info = read_series_dir_sitk(folder)
+    return fix_ct_rescale(img, folder, info)
+
+
+def _rescale_tags(folder: str | Path) -> tuple[str, float, float] | None:
+    """(Modality, RescaleSlope, RescaleIntercept) of the folder's first DICOM file; None when it has none."""
+    files = sorted(Path(folder).glob("*.dcm")) + sorted(Path(folder).glob("*.DCM"))
+    if not files:
+        return None
+    r = sitk.ImageFileReader()
+    r.SetFileName(str(files[0]))
+    try:
+        r.ReadImageInformation()
+        get = lambda k, d: r.GetMetaData(k).strip() if r.HasMetaDataKey(k) else d  # noqa: E731
+        return get("0008|0060", ""), float(get("0028|1053", "1")), float(get("0028|1052", "0"))
+    except (RuntimeError, ValueError):
+        return None
+
+
+def _tissue_frac(a: np.ndarray) -> float:
+    return float(((a >= 0) & (a <= 100)).mean())
+
+
+def stored_is_hu(a: np.ndarray, slope: float, intercept: float) -> bool:
+    """CT whose stored pixels are already HU but whose header still rescales them (RSNA-ICA: GE intercept -1024, a
+    Siemens slope 10 / intercept -10240; air lands near -2000 and tissue near -1000): almost nothing sits in 0-100 HU
+    after the rescale, while a real share of the volume (brain, muscle) does before it."""
+    if (slope, intercept) == (1.0, 0.0) or slope == 0:
+        return False
+    return _tissue_frac(a) < 0.01 and _tissue_frac((a - intercept) / slope) > 0.03
+
+
+def fix_ct_rescale(img: sitk.Image, folder: str | Path, info: dict) -> tuple[sitk.Image, dict]:
+    """Undo a CT's header rescale when its stored pixels are already HU (``stored_is_hu``); flagged ``rescale_undone``."""
+    tags = _rescale_tags(folder)
+    if tags is None or tags[0] != "CT":
+        return img, info
+    _, slope, intercept = tags
+    a = sitk.GetArrayViewFromImage(img)
+    if not stored_is_hu(a[::2, ::2, ::2], slope, intercept):
+        return img, {**info, "rescale_undone": False}
+    out = sitk.GetImageFromArray(((a - intercept) / slope).astype(np.float32))
+    out.CopyInformation(img)
+    return out, {**info, "rescale_undone": True}
 
 
 def read_series_dir_sitk(folder: str | Path) -> tuple[sitk.Image, dict]:

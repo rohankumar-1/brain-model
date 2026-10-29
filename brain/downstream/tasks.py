@@ -75,6 +75,10 @@ CLASSIFICATION_TASKS = (
     "gli_survival_12m",
     "gli_lgg",
     "gli_idh",
+    "ucsf_survival_12m",
+    "ucsf_lgg",
+    "ucsf_idh",
+    "ucsf_mgmt",
 )
 REGRESSION_TASKS = (
     "oasis1_age",
@@ -220,6 +224,7 @@ LABEL_FILES = (
     ("isles24", "clinical.tsv"),           # written by brain.prep.stage_new
     ("atlas", "metadata.tsv"),             # written by brain.prep.stage_new
     ("valdo", "labels.tsv"),
+    ("ucsf_pdgm", "meta", "UCSF-PDGM-metadata_v5.csv"),
     ("fomo260k", "participants.tsv"),     # demographics / diagnosis for BrainQuery's tasks (brain.multitask)
 )
 
@@ -778,6 +783,51 @@ def load_gli_idh_task(volumes: pd.DataFrame) -> TaskBundle:
                               modality="mri", cohort_col="cohort")
 
 
+def _ucsf_pdgm(volumes: pd.DataFrame) -> pd.DataFrame:
+    """UCSF-PDGM pre-operative post-contrast T1 (the TCGA glioma tasks' sequence), one baseline scan per patient, with
+    the TCIA clinical metadata. Follow-up scans (``_FU###d``, post-treatment) are left out. Metadata IDs have three
+    digits for baselines (``UCSF-PDGM-004``), files four."""
+    meta = pd.read_csv(label_file("ucsf_pdgm", "meta", "UCSF-PDGM-metadata_v5.csv"))
+    meta = meta[~meta["ID"].str.contains("_FU")]
+    meta["case_id"] = meta["ID"].str.extract(r"UCSF-PDGM-(\d+)")[0].astype(int).map("UCSF-PDGM-{:04d}_t1c".format)
+    vol = volumes[volumes["dataset"] == "ucsf_pdgm_t1c"]
+    return vol.merge(meta, on="case_id", how="inner")
+
+
+def load_ucsf_survival_task(volumes: pd.DataFrame) -> TaskBundle:
+    """UCSF-PDGM overall survival (days from diagnosis) beyond 12 months (1) vs death within 12 months (0); patients
+    censored alive before 12 months are dropped."""
+    m = _ucsf_pdgm(volumes).dropna(subset=["OS"])
+    m = m[(m["1-dead 0-alive"] == 1) | (m["OS"] >= 365)]
+    return _bundle_from_frame("ucsf_survival_12m", "binary", m, (m["OS"] >= 365).astype(np.int64).to_numpy(),
+                              ["survived_12m"], modality="mri")
+
+
+def load_ucsf_lgg_task(volumes: pd.DataFrame) -> TaskBundle:
+    """UCSF-PDGM WHO CNS 2021 grade 2-3 (1) vs grade 4 (0)."""
+    m = _ucsf_pdgm(volumes)
+    return _bundle_from_frame("ucsf_lgg", "binary", m, (m["WHO CNS Grade"] < 4).astype(np.int64).to_numpy(),
+                              ["grade_2_3"], modality="mri")
+
+
+def load_ucsf_idh_task(volumes: pd.DataFrame) -> TaskBundle:
+    """UCSF-PDGM IDH1/2 mutation (any variant, UCSF500 sequencing) vs wildtype."""
+    m = _ucsf_pdgm(volumes).dropna(subset=["IDH"])
+    return _bundle_from_frame("ucsf_idh", "binary", m, (m["IDH"] != "wildtype").astype(np.int64).to_numpy(),
+                              ["IDH_mutant"], modality="mri")
+
+
+def load_ucsf_mgmt_task(volumes: pd.DataFrame) -> TaskBundle:
+    """MGMT promoter methylation (positive vs negative) in IDH-wildtype glioblastoma, the setting of the BraTS 2021 /
+    RSNA-MICCAI MGMT challenge. Unknown and indeterminate are dropped; restricting to one diagnosis keeps the label from
+    standing in for IDH (IDH-mutant tumours are mostly methylated)."""
+    m = _ucsf_pdgm(volumes)
+    m = m[(m["Final pathologic diagnosis (WHO 2021)"] == "Glioblastoma, IDH-wildtype")
+          & m["MGMT status"].isin(["positive", "negative"])]
+    return _bundle_from_frame("ucsf_mgmt", "binary", m, (m["MGMT status"] == "positive").astype(np.int64).to_numpy(),
+                              ["MGMT_methylated"], modality="mri")
+
+
 def load_ms3seg_task(volumes: pd.DataFrame) -> TaskBundle:
     return _load_seg("ms3seg", volumes, "ms3seg_flair", MS3SEG_REGIONS, ".seg.zip", mask_col="mask_seg",
                      modality="mri")
@@ -1004,6 +1054,14 @@ def load_task(
         return load_gli_lgg_task(volumes)
     if name == "gli_idh":
         return load_gli_idh_task(volumes)
+    if name == "ucsf_survival_12m":
+        return load_ucsf_survival_task(volumes)
+    if name == "ucsf_lgg":
+        return load_ucsf_lgg_task(volumes)
+    if name == "ucsf_idh":
+        return load_ucsf_idh_task(volumes)
+    if name == "ucsf_mgmt":
+        return load_ucsf_mgmt_task(volumes)
     if name == "isles24_mrs":
         return load_isles24_mrs_task(volumes)
     if name == "isles24_nihss":

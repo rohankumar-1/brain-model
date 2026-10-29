@@ -13,6 +13,7 @@ of one person always share a split. AISD keeps its official 52-case test split.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import multiprocessing as mp
@@ -42,7 +43,12 @@ SPLIT_RANK = {"test": 0, "val": 1, "train": 2}  # lower wins when merging inheri
 
 # Entire families stay out of the pretraining index (brain.downstream still gets train/val/test).
 HELD_OUT = {"cq500", "isles22", "atlas", "wmh", "isles24", "instance", "aisd", "brainmetshare",
-            "msd_braintumor", "ms3seg", "valdo"}
+            "msd_braintumor", "ms3seg", "valdo", "ucsf_pdgm", "upenn_gbm"}
+# Held-out families some of whose subjects are also in a pretraining family under another name (UCSF-PDGM patients in
+# BraTS 2021; UPENN-GBM patients, the BraTS site-1 cases): they share the pretraining copy's dedup_key, so both copies
+# get one split and the held-out scan counts as seen when its twin was (brain.downstream.records.pretrain_overlap).
+# Their own scans still never enter SSL.
+SHARED_SUBJECTS = {"ucsf_pdgm", "upenn_gbm"}
 
 
 def all_held_out() -> set[str]:
@@ -102,6 +108,51 @@ def contrast_of(dataset: str, case_id: str) -> str:
     return ""
 
 
+UCSF_PDGM_META = DATASETS / "ucsf_pdgm" / "meta" / "UCSF-PDGM-metadata_v5.csv"
+
+
+@functools.cache
+def ucsf_pdgm_brats() -> dict[int, str]:
+    """UCSF-PDGM case number -> its BraTS 2021 copy as a BraTS-GLI patient (BraTS2021_NNNNN == BraTS-GLI-NNNNN; 262
+    of these are in the store's brats2023_gli), from the TCIA metadata (IDs there have three digits, files four)."""
+    if not UCSF_PDGM_META.exists():
+        return {}
+    m = pd.read_csv(UCSF_PDGM_META, usecols=["ID", "BraTS21 ID"]).dropna()
+    m = m[~m["ID"].str.contains("_FU")]       # a follow-up row names its own BraTS case: the person keys by the baseline
+    num = m["ID"].str.extract(r"UCSF-PDGM-(\d+)")[0].astype(int)
+    return dict(zip(num, "BraTS-GLI-" + m["BraTS21 ID"].str.extract(r"BraTS2021_(\d{5})")[0]))
+
+
+def ucsf_pdgm_key(case_id: str) -> str:
+    """One person: the BraTS twin's key when the patient is also in BraTS 2021 (so both copies share a split), else
+    the UCSF number. Follow-ups (``_FU###d``) and the contrast suffix are dropped."""
+    num = int(case_id.split("_")[0].removeprefix("UCSF-PDGM-"))
+    twin = ucsf_pdgm_brats().get(num)
+    return f"brats:gli:{twin}" if twin else f"ucsf_pdgm:UCSF-PDGM-{num:04d}"
+
+
+UPENN_GBM_TWINS = DATASETS / "upenn_gbm" / "meta" / "brats_twins.csv"
+
+
+@functools.cache
+def upenn_gbm_brats() -> dict[str, str]:
+    """UPENN-GBM patient -> its BraTS-GLI copy. TCIA gives no mapping (UPenn is BraTS site 1, without local IDs), so
+    ``brats_twins.csv`` is found by image content after prep (runs/diagnostics/upenn_brats_twins.py). Empty until
+    then: every patient keys by its own ID."""
+    if not UPENN_GBM_TWINS.exists():
+        return {}
+    m = pd.read_csv(UPENN_GBM_TWINS, usecols=["upenn_id", "brats_id"]).dropna()
+    return dict(zip(m["upenn_id"], m["brats_id"]))
+
+
+def upenn_gbm_key(case_id: str) -> str:
+    """One person: the BraTS twin's key when found, else the UPENN patient (``_11`` / ``_21`` timepoints and the
+    contrast suffix dropped)."""
+    pid = case_id.split("_")[0]
+    twin = upenn_gbm_brats().get(pid)
+    return f"brats:gli:{twin}" if twin else f"upenn_gbm:{pid}"
+
+
 def brats_patient(case_id: str) -> str:
     """BraTS-GLI-00005-000-t1n and BraTS-GLI-00005-100-t1n are one person."""
     p = case_id
@@ -156,6 +207,10 @@ def dedup_key(dataset: str, case_id: str) -> str:
         return "brats:" + fam.removeprefix("brats_") + ":" + brats_patient(case_id)
     if fam == "cq500":
         return "cq500:" + case_id
+    if fam == "ucsf_pdgm":
+        return ucsf_pdgm_key(case_id)
+    if fam == "upenn_gbm":
+        return upenn_gbm_key(case_id)
     if fam in ("rsna_ich", "bhsd", "hemseg"):       # BHSD / HemSeg volumes are RSNA studies (same subject, split)
         pid = rsna_patients().get(case_id)          # by patient: 810 patients had studies in more than one split
         return "rsna:" + (f"patient:{pid}" if pid else case_id)
@@ -457,7 +512,8 @@ def assert_no_leak(vols: pd.DataFrame, slices: pd.DataFrame, bhsd: set[str]) -> 
         leak = sa & sb
         assert not leak, f"dedup_key in SSL {a} and {b}: {list(leak)[:5]}"
     ssl_keys = set(ssl["dedup_key"])
-    held = set(vols.loc[vols.dataset_family.isin(all_held_out()), "dedup_key"])
+    held = set(vols.loc[vols.dataset_family.isin(all_held_out() - SHARED_SUBJECTS), "dedup_key"])
+    assert not (vols.dataset_family.isin(SHARED_SUBJECTS) & vols.pretrain).any(), "a shared-subject family in SSL"
     assert not (ssl_keys & held), f"held-out subjects in SSL index: {list(ssl_keys & held)[:5]}"
     bhsd_keys = {"rsna:" + i for i in bhsd}
     assert not (ssl_keys & bhsd_keys), f"BHSD studies in SSL index: {list(ssl_keys & bhsd_keys)[:5]}"

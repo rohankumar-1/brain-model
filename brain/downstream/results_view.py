@@ -32,7 +32,7 @@ SUPERVISED_DIRS = ("/multitask/", "/single/", "/joint/")
 SEEN_LABELS = frozenset({"rsna_ich", "brats2023_gli", "brats2023_men", "brats2024_gli", "brats2023_ped",
                          "oasis1_mmse", "oasis2_mmse", "abide_ados", "gli_survival_12m", "gli_lgg", "gli_idh"})
 SEEN_TASK = frozenset({"cq500", "seg_cq500", "instance", "msd", "oasis1_age", "ixi_age", "pixar_age", "piop1_age",
-                       "piop2_age", "id1000_age", "ms3seg_age"})
+                       "piop2_age", "id1000_age", "ms3seg_age", "ucsf_survival_12m", "ucsf_lgg", "ucsf_idh"})
 
 
 def supervised_models(con) -> set[str]:

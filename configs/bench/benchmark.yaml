@@ -13,6 +13,9 @@ version: 2
 # the store index the splits come from (sha1 of volumes.csv, 2026-10-26 re-index after the CQ500 DICOM re-conversion);
 # results computed on another index are flagged in the leaderboard
 index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
+# later indexes that only add rows to it (python -m brain.bench index-check): results on them count as current
+index_compatible:
+  - 59c964508422a3cbffa103702343feccf67708d4   # 2026-10-28: + UCSF-PDGM (2,004 volumes, held out)
 # the model every other one is paired against (a checkpoint or a models.yaml name)
 reference: BQ-R6
 # the label table in-domain and few-shot scoring read (BrainQuery models with task heads), whatever a checkpoint

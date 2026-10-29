@@ -21,8 +21,9 @@ COHORT_RANK = {"brats2024_gli": 50, "brats2023_gli": 40, "brats2024_men_rt": 30,
                "brats2023_men": 20, "brats2023_ped": 10}
 
 
-# skull-stripped releases (dataset-name prefixes): BraTS, MSD, ATLAS R2/3, BrainMetShare, FOMO Yale mets, ISLES'22
-STRIPPED_PREFIXES = ("brats", "msd_braintumor", "atlas", "brainmetshare", "fomo_yale_mets", "isles22")
+# skull-stripped releases (dataset-name prefixes): BraTS, MSD, ATLAS R2/3, BrainMetShare, FOMO Yale mets, ISLES'22, UCSF-PDGM
+STRIPPED_PREFIXES = ("brats", "msd_braintumor", "atlas", "brainmetshare", "fomo_yale_mets", "isles22", "ucsf_pdgm",
+                     "upenn_gbm")
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class Case:
     zip_path: str = ""                              # RSNA: source zip and member byte ranges
     members: tuple = ()
     ref: Path | None = None                         # co-registered sequence that decides this subject's grid
+    ref_image: Path | None = None                   # the ref's stored volume (set by brain.prep.run): reuse its fit
 
     @property
     def stripped(self) -> bool:
@@ -556,6 +558,53 @@ def msd(root: Path = DEFAULT_MSD_ROOT) -> list[Case]:
             seg = root / "labelsTr" / f"{stem}.nii"
         masks = (("seg", seg),) if seg.exists() else ()
         cases.append(Case("msd_braintumor", stem, "mri", src, masks))
+    return cases
+
+
+# UCSF-PDGM file sequence -> dataset contrast suffix (the BraTS ones, so folder / family strip to ``ucsf_pdgm``)
+UCSF_PDGM_SEQS = (("T1", "t1n"), ("T1c", "t1c"), ("T2", "t2w"), ("FLAIR", "t2f"))
+
+
+def ucsf_pdgm(root: Path = DATASETS / "ucsf_pdgm" / "nifti") -> list[Case]:
+    """UCSF-PDGM v5 (TCIA): preoperative diffuse glioma, skull-stripped and co-registered 1 mm (240 x 240 x 155, the
+    BraTS grid). The four structural sequences; every one carries the shipped brain mask, the tumour segmentation (old BraTS
+    labels 1 / 2 / 4, stored as 1 / 2 / 3: pipeline.SEG_REMAP) rides with T1 and the others share T1's registration. Flat folder ``<ID>[_FU###d]_<seq>.nii.gz``
+    (follow-up scans of six patients carry ``_FU###d``). ADC / DWI / SWI are downloaded but not prepped."""
+    root = Path(root)
+    cases = []
+    for t1 in sorted(root.glob("UCSF-PDGM-*_T1.nii.gz")):
+        sid = t1.name.removesuffix("_T1.nii.gz")
+        brain = root / f"{sid}_brain_segmentation.nii.gz"
+        seg = root / f"{sid}_tumor_segmentation.nii.gz"
+        for seq, c in UCSF_PDGM_SEQS:
+            p = root / f"{sid}_{seq}.nii.gz"
+            if not p.exists():
+                continue
+            masks = ((("brain", brain),) if brain.exists() else ()) + ((("seg", seg),) if c == "t1n" and seg.exists() else ())
+            cases.append(Case(f"ucsf_pdgm_{c}", f"{sid}_{c}", "mri", p, masks, ref=None if c == "t1n" else t1))
+    return cases
+
+
+# UPENN-GBM file sequence -> dataset contrast suffix
+UPENN_GBM_SEQS = (("T1", "t1n"), ("T1GD", "t1c"), ("T2", "t2w"), ("FLAIR", "t2f"))
+
+
+def upenn_gbm(root: Path = DATASETS / "upenn_gbm" / "nifti") -> list[Case]:
+    """UPENN-GBM v2 (TCIA): de novo glioblastoma, skull-stripped and co-registered to SRI24 1 mm (240 x 240 x 155, the
+    BraTS grid). Flat folder ``UPENN-GBM-<NNNNN>_<11|21>_<seq>.nii.gz`` (``_11`` pre-operative, ``_21`` the follow-up
+    scan of 41 patients). The tumour segmentation (labels 1 / 2 / 4, stored as 1 / 2 / 3: pipeline.SEG_REMAP) rides with T1: the manual one where it exists (147
+    scans), else the automated one; the other sequences share T1's registration. No brain mask is shipped."""
+    root = Path(root)
+    cases = []
+    for t1 in sorted(root.glob("UPENN-GBM-*_T1.nii.gz")):
+        sid = t1.name.removesuffix("_T1.nii.gz")
+        seg = next((p for p in (root / f"{sid}_segm.nii.gz", root / f"{sid}_automated_approx_segm.nii.gz")
+                    if p.exists()), None)
+        for seq, c in UPENN_GBM_SEQS:
+            p = root / f"{sid}_{seq}.nii.gz"
+            if p.exists():
+                masks = (("seg", seg),) if c == "t1n" and seg is not None else ()
+                cases.append(Case(f"upenn_gbm_{c}", f"{sid}_{c}", "mri", p, masks, ref=None if c == "t1n" else t1))
     return cases
 
 

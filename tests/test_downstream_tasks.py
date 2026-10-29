@@ -79,6 +79,7 @@ TASK_DATASETS = {
     "gli_survival_12m": {"brats2023_gli_t1c"},
     "gli_lgg": {"brats2023_gli_t1c"},
     "gli_idh": {"brats2023_gli_t1c"},
+    **{t: {"ucsf_pdgm_t1c"} for t in ("ucsf_survival_12m", "ucsf_lgg", "ucsf_idh", "ucsf_mgmt")},
 }
 
 TASK_TYPES = {
@@ -147,6 +148,8 @@ def _volumes() -> pd.DataFrame:
         _row("isles24_ncct", "isles24_ncct:sub-1", modality="ct", mask_cow="/tmp/c.cow.zip", mask_lvo="/tmp/c.lvo.zip"),
         _row("isles24_cta", "isles24_cta:sub-1", modality="ct"),
         _row("brats2023_gli_t1c", "mri:BraTS-GLI-00100-000-t1c", case_id="BraTS-GLI-00100-000-t1c"),
+        _row("ucsf_pdgm_t1c", "ucsf_pdgm_t1c:UCSF-PDGM-0004_t1c", case_id="UCSF-PDGM-0004_t1c"),
+        _row("ucsf_pdgm_t1c", "ucsf_pdgm_t1c:UCSF-PDGM-0429_FU003d_t1c", case_id="UCSF-PDGM-0429_FU003d_t1c"),
     ]
     for name, (col, path) in SEG_MASK.items():
         ds = next(iter(TASK_DATASETS[name]))
@@ -225,6 +228,11 @@ def _write_clinical(root: Path) -> Path:
     pd.DataFrame({"brats_id": ["BraTS-GLI-00100-000"], "tcga_id": ["TCGA-02-0085"], "cancer_type": ["GBM"],
                   "os_months": [20.0], "deceased": [1], "idh_mutant": [0.0], "codeleted": [0.0]}).to_csv(
         root / "tcga_glioma" / "clinical.tsv", sep="\t", index=False)
+    (root / "ucsf_pdgm" / "meta").mkdir(parents=True)
+    pd.DataFrame({"ID": ["UCSF-PDGM-004", "UCSF-PDGM-0429_FU003d"], "WHO CNS Grade": [4, 4], "IDH": ["wildtype"] * 2,
+                  "Final pathologic diagnosis (WHO 2021)": ["Glioblastoma, IDH-wildtype"] * 2,
+                  "MGMT status": ["positive", "negative"], "1-dead 0-alive": [1, 1], "OS": [200, 200]}).to_csv(
+        root / "ucsf_pdgm" / "meta" / "UCSF-PDGM-metadata_v5.csv", index=False)
     msd = root / "msd_volume_labels.csv"
     pd.DataFrame({"volume_id": ["msd:1"], "enhancing_high": [1]}).to_csv(msd, index=False)
     return msd
@@ -275,6 +283,16 @@ def test_msd_joins_store_ids_and_builds_enhancing_high(tmp_path):
     assert task.name == "msd" and task.task_type == "binary"
     assert task.volume_ids == ["msd_braintumor:BRATS_001"]
     assert int(task.y[0]) == 1
+
+
+def test_ucsf_tasks_use_one_baseline_scan_per_patient(tmp_path):
+    msd = _write_clinical(tmp_path)
+    with (patch("brain.downstream.tasks.DATASETS", tmp_path),
+          patch("brain.downstream.tasks.LABEL_SOURCES", tmp_path / "_not_synced")):
+        for name in ("ucsf_survival_12m", "ucsf_lgg", "ucsf_idh", "ucsf_mgmt"):
+            task = load_task(name, _volumes(), msd_labels=msd)
+            assert task.volume_ids == ["ucsf_pdgm_t1c:UCSF-PDGM-0004_t1c"], name
+        assert load_task("ucsf_mgmt", _volumes(), msd_labels=msd).y.tolist() == [1]
 
 
 def test_rsna_is_one_task_named_rsna_ich():

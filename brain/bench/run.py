@@ -21,6 +21,20 @@ SBATCH_GPU = ["-p", "pi_dbertsim,mit_normal_gpu", "--gres=gpu:l40s:1", "--exclud
 def sbatch_gpu(hours: int) -> list[str]:
     return SBATCH_GPU if hours <= 6 else ["-p", "pi_dbertsim", *SBATCH_GPU[2:]]
 HEADS_DIR = REPO_ROOT / "runs" / "bench" / "heads"
+SUITE_JOBS = 4          # the suite entries split over this many parallel GPU jobs (each runs its share in turn)
+
+
+def no_token_tasks(b, todo: list[str]) -> list[str]:
+    """Transfer tasks whose pinned readout is not the 3D-conv probe: they skip fitting it (``--no-token-heads``), the
+    costliest head, which they never report. Before ``pin`` every head runs (the leaderboard chooses on val)."""
+    pinned = b.readouts() or {}
+    return [t for t in todo if t in pinned and pinned[t] != "tok_conv" and t not in b.seg_tasks]
+
+
+def shards(todo: list[str], n: int, long: set[str]) -> list[list[str]]:
+    """``todo`` dealt round-robin into ``n`` parts, the ``long`` entries first so they land in different parts."""
+    order = sorted(todo, key=lambda t: t not in long)
+    return [s for s in (order[i::n] for i in range(n)) if s]
 
 
 def has_heads(model) -> bool:
@@ -59,6 +73,8 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
     from brain.downstream.suite import command
 
     b = load()
+    # the suite readout is part of the protocol (v2: axial PCA views + tok_conv; v3: pooled linear + mlp)
+    extra = ["--readout", str(b.raw.get("readout", "axial")), *(extra or [])]
     ref_model = resolve_model(model)
     ref = resolve_model(b.reference)
     todo, other = plan(ref_model, ref, b, tasks=tasks, full=full)
@@ -71,9 +87,11 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
         jobs = []
         # the jobs run this checkout's code (jobs/_env.sh defaults to the main checkout)
         base_env = {**os.environ, "BRAIN_REPO": str(REPO_ROOT)}
-        if todo:
-            hours = min(24, 1 + len(todo) // 3 + (3 * sum(t in b.seg_tasks for t in todo)) + 2 * ("probe3d" in todo))
-            env = {**base_env, "CKPT": model, "SUITE_TASKS": " ".join(todo), "EXTRA": " ".join(extra or [])}
+        no_tok = " ".join(no_token_tasks(b, todo))
+        for part in shards(todo, SUITE_JOBS, {*b.seg_tasks, "probe3d"}):
+            hours = min(24, 1 + len(part) // 3 + (3 * sum(t in b.seg_tasks for t in part)) + 2 * ("probe3d" in part))
+            env = {**base_env, "CKPT": model, "SUITE_TASKS": " ".join(part), "EXTRA": " ".join(extra or []),
+                   "NO_TOKEN_TASKS": no_tok}
             cmd = ["sbatch", "--parsable", "--export=ALL", "-t", f"{hours:02d}:00:00",
                    "-J", f"bench-{ref_model.cache_key[:20]}", *sbatch_gpu(hours), *dep,
                    str(REPO_ROOT / "jobs" / "eval_run.sbatch")]
@@ -89,8 +107,9 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
               f"--model {model}")
         return
     failed = []
+    no_tok = set(no_token_tasks(b, todo))
     for t in todo:
-        cmd = command(t, model, list(extra or []))
+        cmd = command(t, model, list(extra or []) + (["--no-token-heads"] if t in no_tok else []))
         print("[bench] " + " ".join(cmd[2:]), flush=True)
         if subprocess.call(cmd, cwd=REPO_ROOT):
             failed.append(t)

@@ -28,7 +28,7 @@ from brain.common.paths import REPO_ROOT as ROOT
 from brain.prep.store import FORMAT_VERSION
 from brain.downstream.embeddings import load_or_build_embeddings, resolve_path
 from brain.downstream.embeddings import cache_tag
-from brain.downstream.heads import DEFAULT_HEADS, build_heads, make_logreg_pool, make_ridge
+from brain.downstream.heads import DEFAULT_HEADS, MLPProbe, build_heads, make_logreg_pool, make_ridge
 from brain.downstream.token_probes import make_token_heads
 from brain.downstream.token_readout import token_grid_zyx, token_readout_views
 from brain.downstream import cv
@@ -55,10 +55,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--volumes-csv", type=Path, default=None, help="volume table (default slices_zarr/volumes.csv)")
     p.add_argument("--window", choices=["canonical", "multi", "shifted"], default="multi",
                    help="asinh window(s) of our encoders (registry models normalise intensities themselves)")
-    p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=True,
-                   help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid")
-    p.add_argument("--readout", choices=["axial", "raw"], default="axial",
-                   help="axial: PCA, then per-plane and 4x4x4 probes on a cubic token grid; raw: pool every token")
+    p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=None,
+                   help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid (default: axial only)")
+    p.add_argument("--readout", choices=["pooled", "axial", "raw"], default="pooled",
+                   help="pooled (benchmark v3): a linear probe and BrainDINO's MLP head on one embedding per volume "
+                        "(CLS, else the mean token); axial (v2): PCA, then per-plane and 4x4x4 probes on a cubic token "
+                        "grid, plus linear heads on each global embedding; raw: pool every token")
     p.add_argument("--cv", choices=["auto", "on", "off"], default="auto",
                    help="repeated subject-grouped k-fold CV instead of the fixed split (auto: small held-out tasks)")
     p.add_argument("--cv-folds", type=int, default=5)
@@ -134,6 +136,26 @@ def _rename(head, name: str, pool: str | None = None):
     return head
 
 
+def pooled_embedding(emb: dict, chunk: int = 64) -> tuple[np.ndarray, str]:
+    """One vector per volume: the CLS token when the model has one, else the mean of its foreground tokens (chunked:
+    large caches are memory-mapped)."""
+    if emb.get("cls") is not None:
+        return np.asarray(emb["cls"], dtype=np.float32), "cls"
+    mus, mask = emb["mus"], np.asarray(emb["mask"])
+    out = np.empty((len(mus), mus.shape[-1]), dtype=np.float32)
+    for i in range(0, len(mus), chunk):
+        x, m = np.asarray(mus[i:i + chunk], dtype=np.float32), mask[i:i + chunk, :, None].astype(np.float32)
+        out[i:i + chunk] = (x * m).sum(1) / np.clip(m.sum(1), 1, None)
+    return out, "mean"
+
+
+def pooled_heads(task: TaskBundle, seed: int) -> list:
+    """Benchmark v3 readouts on the pooled embedding: ``linear`` (logistic / ridge, C or alpha on val) and ``mlp``."""
+    reg, multi = task.task_type == "regression", task.task_type == "multilabel"
+    linear = _rename(make_ridge(), "linear", "mean") if reg else _rename(make_logreg_pool(multi, seed), "linear", "mean")
+    return [linear, MLPProbe(len(task.label_names) if multi else 1, multi, seed, regression=reg)]
+
+
 def readout_head_sets(task: TaskBundle, views: dict, seed: int) -> list[tuple[str, dict, list]]:
     """Heads for each spatial view. Linear probes see the flattened layout."""
     reg = task.task_type == "regression"
@@ -188,15 +210,29 @@ def main() -> None:
     multilabel = task.task_type == "multilabel"
     grid = token_grid_zyx(emb["mus"].shape[1])
     use_readout = args.readout == "axial" and grid is not None
+    token_heads = args.token_heads if args.token_heads is not None else args.readout == "axial"
+    if args.readout == "pooled":
+        vec, pooled_kind = pooled_embedding(emb)
+        p_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((len(vec), 1), dtype=bool)}
+        p_emb.pop("z", None)
+        print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp")
 
     def head_sets_for(task_s: TaskBundle, packs_s: dict) -> list[tuple[str, dict, list]]:
         """Fresh heads for one split (PCA readouts are refit on this split's training volumes)."""
+        if args.readout == "pooled":
+            sets = [(pooled_kind, ensure_val(split_xy(task_s, p_emb), seed=args.seed), pooled_heads(task_s, args.seed))]
+            if token_heads and grid is not None:
+                n_out = len(task_s.label_names) if multilabel else 1
+                sets.append(("tokens", packs_s, make_token_heads(
+                    emb["mus"].shape[-1], n_out, multilabel, args.seed, task_s.task_type == "regression",
+                    grid_zyx=grid)))
+            return sets
         if use_readout:
             views = token_readout_views(packs_s, seed=args.seed, grid_zyx=grid)
             print(f"[readout] grid={grid} pca={views['pca_dim']} explained={views['explained_variance']:.3f} "
                   f"plane={views['plane']['train']['mus'].shape} bins={views['grid']['train']['mus'].shape}")
             sets = readout_head_sets(task_s, views, args.seed)
-            if args.token_heads:
+            if token_heads:
                 n_out = len(task_s.label_names) if multilabel else 1
                 sets.append(("tokens", packs_s, make_token_heads(
                     emb["mus"].shape[-1], n_out, multilabel, args.seed, task_s.task_type == "regression",
@@ -309,11 +345,11 @@ def main() -> None:
               "ckpt": str(model.ckpt) if model.ckpt else None, "model_info": model.info(),
               "representation": emb["representation"], "slices_root": str(args.slices_root),
               "latent_dim": emb["latent_dim"], "heads": head_names,
-              "readout": "axial" if use_readout else "raw",
+              "readout": "pooled" if args.readout == "pooled" else "axial" if use_readout else "raw",
               "seed": args.seed, "window": args.window, "encoding": cache_tag() if model.is_checkpoint else "",
               "time_utc": datetime.now(timezone.utc).isoformat(),
               "started_utc": started, "volumes_csv": str(args.volumes_csv or DEFAULT_VOLUMES),
-              "token_heads": args.token_heads, "msd_target": args.msd_target if task.name == "msd" else None,
+              "token_heads": token_heads, "msd_target": args.msd_target if task.name == "msd" else None,
               "pretrain_overlap": overlap,
               "embed_cache": str(emb["cache_path"]), **split_sizes, "cv": cv_info}
     print(f"[ok] summary → {finalize_run(run_dir, config, all_metrics)}")

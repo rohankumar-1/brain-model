@@ -236,13 +236,13 @@ tasks:
     descriptions:
       - "Segment the tumor core: enhancing and necrotic tumor, without edema."
       - "Outline the solid and necrotic tumor core."
-    sources: [{source: brats_seg, families: [brats_gli, brats_men], ids: [1, 3]}]
+    sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 3]}]
   - id: enhancing_tumor
     type: segmentation
     descriptions:
       - "Segment the contrast-enhancing tumor."
       - "Outline the tumor tissue that enhances after gadolinium."
-    sources: [{source: brats_seg, families: [brats_gli, brats_men], ids: [3]}]
+    sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [3]}]
   - id: resection_cavity
     type: segmentation
     descriptions:
@@ -479,7 +479,7 @@ tasks:
     role: held_out
     type: segmentation
     descriptions: ["Segment the white matter hyperintensities."]
-    sources: [{source: downstream, task: wmh}]
+    sources: [{source: downstream, task: wmh, ignore: [2]}]     # WMH challenge label 2 = other pathology: not scored
   - id: ms_lesions
     role: held_out
     type: segmentation

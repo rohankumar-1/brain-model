@@ -177,9 +177,13 @@ def model_info(ckpt: Path | str | None, name: str | None = None, variant: str | 
     return info
 
 
-def pretrain_overlap(volume_ids, volumes) -> float | None:
+def pretrain_overlap(volume_ids, volumes, exclude=()) -> float | None:
     """Fraction of the task's volumes the encoder could have seen in SSL (``pretrain``, ``ssl_keep`` and the train
-    split: SSL reads only ``split == train``)."""
+    split: SSL reads only ``split == train``), less the datasets its pretraining left out (``exclude``: the run's
+    ``data.ssl_exclude``). A held-out scan (``pretrain`` false) counts as seen when another copy of the subject (same
+    ``dedup_key``, e.g. a UCSF-PDGM patient's BraTS 2021 scan) was."""
+    from brain.data.volumes import excluded
+
     if volumes is None or "pretrain" not in getattr(volumes, "columns", ()):
         return None
     df = volumes.set_index("volume_id") if "volume_id" in volumes.columns else volumes
@@ -191,7 +195,29 @@ def pretrain_overlap(volume_ids, volumes) -> float | None:
         seen &= rows["ssl_keep"].astype(bool)
     if "split" in rows.columns:
         seen &= rows["split"].astype(str).eq("train")
+    if exclude:
+        seen &= ~excluded(rows, exclude)
+    if "dedup_key" in rows.columns and not rows["pretrain"].astype(bool).all():
+        pool = df[df["pretrain"].astype(bool)]
+        if "ssl_keep" in pool.columns:
+            pool = pool[pool["ssl_keep"].astype(bool)]
+        if "split" in pool.columns:
+            pool = pool[pool["split"].astype(str).eq("train")]
+        if exclude:
+            pool = pool[~excluded(pool, exclude)]
+        seen |= ~rows["pretrain"].astype(bool) & rows["dedup_key"].isin(set(pool["dedup_key"]))
     return float(seen.mean())
+
+
+def ssl_exclude(ckpt) -> list[str]:
+    """The ``data.ssl_exclude`` of the run that wrote ``ckpt`` (its ``config.yaml``; multitask runs copy their SSL
+    source's), or none."""
+    import yaml
+
+    path = Path(ckpt).parent / "config.yaml"
+    if not path.exists():
+        return []
+    return list(((yaml.safe_load(path.read_text()) or {}).get("data") or {}).get("ssl_exclude") or [])
 
 
 # ----------------------------------------------------------------------------- writing

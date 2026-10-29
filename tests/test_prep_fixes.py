@@ -15,9 +15,9 @@ from brain.prep.pipeline import needs_n4
 
 def test_n4_rule_covers_structural_mri_but_not_diffusion_or_ct():
     for ds in ("brats2023_gli_t1n", "brats_goat_t2f", "msd_braintumor", "valdo_t2s", "ms3seg_flair", "fomo_hbn_t1w",
-               "brainmetshare_bravo", "ixi_t1"):
+               "brainmetshare_bravo", "ixi_t1", "rsna_ica_mra", "rsna_ica_t1c"):
         assert needs_n4(ds), ds
-    for ds in ("isles22_dwi", "isles22_adc", "oasis1", "rsna_ich", "cq500"):
+    for ds in ("isles22_dwi", "isles22_adc", "oasis1", "rsna_ich", "cq500", "rsna_ica_cta"):
         assert not needs_n4(ds), ds
 
 
@@ -88,3 +88,54 @@ def test_prep_skips_and_removes_listed_duplicates(tmp_path):
     img.write_bytes(b"x")
     todo, dropped = skip_hard_drops(tmp_path, [dup, keep])
     assert todo == [keep] and dropped == [dup] and not img.exists()
+
+
+def test_co_registered_sequences_reuse_their_references_fit(tmp_path):
+    """2026-10-29: a sequence with a stored reference takes that reference's transform (one fit per subject), and the
+    runner writes references first."""
+    from pathlib import Path
+
+    from brain.prep import native, store
+    from brain.prep.pipeline import shared_registration
+    from brain.prep.run import phases, with_ref_images
+    from brain.prep.sources import Case
+
+    tf = sitk.AffineTransform(3)
+    tf.SetMatrix((0.9, 0.1, 0.0, -0.1, 0.92, 0.0, 0.0, 0.0, 0.95))
+    tf.SetTranslation((3.0, -2.0, 7.0))
+    t1 = Case("ucsf_pdgm_t1n", "S-1_t1n", "mri", Path("/d/S-1_T1.nii.gz"))
+    t1c = Case("ucsf_pdgm_t1c", "S-1_t1c", "mri", Path("/d/S-1_T1c.nii.gz"), ref=t1.path)
+    lone = Case("ixi_t1", "IXI1", "mri", Path("/d/IXI1.nii.gz"))
+    todo = with_ref_images([t1c, lone], [t1, t1c, lone], tmp_path)    # the reference need not be in this run
+    assert todo[0].ref_image == store.paths(tmp_path, t1)[0] and todo[1].ref_image is None
+    assert [[c.case_id for c in p] for p in phases(todo)] == [["IXI1"], ["S-1_t1c"]]
+
+    assert shared_registration(todo[0]) is None                      # reference not written yet: fit as before
+    attrs = {"reg_affine": native._affine4(tf), "reg_method": "affine", "reg_scale": 0.92, "reg_mi": -0.6}
+    store.write_arrays(todo[0].ref_image, {"image": (np.zeros((4, 1, 4, 4), np.float16), attrs)})
+    got, info = shared_registration(todo[0])
+    assert np.allclose(native._affine4(got), attrs["reg_affine"])
+    assert info == {"reg_method": "affine", "reg_scale": 0.92, "reg_mi": -0.6, "reg_shared": t1.path.name}
+    p = (12.0, -5.0, 30.0)
+    assert np.allclose(got.TransformPoint(p), tf.TransformPoint(p))
+
+
+def test_ct_with_stored_hu_and_a_stale_rescale_header_is_undone():
+    from brain.prep.dicom import stored_is_hu
+
+    rng = np.random.default_rng(0)
+    hu = np.concatenate([np.full(5000, -1000.0), rng.normal(35, 10, 2000), np.full(1000, 700.0)])  # air, brain, bone
+    assert not stored_is_hu(hu, 1.0, -1024.0)                    # a correct GE header: tissue is already in range
+    assert stored_is_hu(hu - 1024, 1.0, -1024.0)                 # pixels already HU, header still shifts by -1024
+    assert stored_is_hu(hu * 10 - 10240, 10.0, -10240.0)         # the Siemens slope 10 / intercept -10240 case
+    assert not stored_is_hu(hu - 1024, 1.0, 0.0)                 # identity tags: nothing to undo
+
+
+def test_old_brats_numbering_is_stored_as_brats_2023():
+    from brain.prep.pipeline import remap_seg
+
+    m = np.array([0, 1, 2, 4], np.uint8)
+    assert remap_seg("ucsf_pdgm_t1n", "seg", m).tolist() == [0, 1, 2, 3]
+    assert remap_seg("upenn_gbm_t1n", "seg", m).tolist() == [0, 1, 2, 3]
+    assert remap_seg("brats2024_gli_t1n", "seg", m).tolist() == [0, 1, 2, 4]   # 4 is the resection cavity there
+    assert remap_seg("ucsf_pdgm_t1n", "brain", m).tolist() == [0, 1, 2, 4]

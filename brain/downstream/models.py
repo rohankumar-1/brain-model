@@ -99,10 +99,10 @@ class ModelRef:
     def pretrain_overlap(self, volume_ids, volumes) -> float | None:
         """Fraction of a task's volumes the model may have seen in pretraining. Ours: the SSL pool flags of the
         index; a registry model: volumes of the dataset families its entry declares (None when it declares none)."""
-        from brain.downstream.records import pretrain_overlap
+        from brain.downstream.records import pretrain_overlap, ssl_exclude
 
         if self.ckpt is not None:
-            return pretrain_overlap(volume_ids, volumes)
+            return pretrain_overlap(volume_ids, volumes, ssl_exclude(self.ckpt))
         fams = self.spec.get("pretrain_datasets")
         if fams is None or volumes is None or "dataset_family" not in getattr(volumes, "columns", ()):
             return None

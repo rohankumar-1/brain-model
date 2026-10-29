@@ -18,4 +18,4 @@ D="$BRAIN_REPO/runs/diagnostics/rsna_ica_pilot"
 export BRAIN_DICOM_READER=dcm2niix OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 "$PY" -u -m brain.prep.run --root "$D/store" --datasets rsna_ica --cases "$D/cases.txt" --workers 11 \
   --manifest manifest_pilot.jsonl --brain-mask auto --gpu-mask --mask-batch 4 --reg-backend "${REG_BACKEND:-sitk}" \
-  --template "$BRAIN_TEMPLATE" --template-brain "$BRAIN_TEMPLATE_BRAIN"
+  --template "$BRAIN_TEMPLATE" --template-brain "$BRAIN_TEMPLATE_BRAIN" ${EXTRA:-}

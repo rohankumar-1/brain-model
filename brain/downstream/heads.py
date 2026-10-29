@@ -316,6 +316,118 @@ class AttnEnsemble:
         return self._to_scores((lg * w[..., None]).sum(0) / w.sum(0)[:, None])
 
 
+class MLPProbe:
+    """BrainDINO's frozen-feature head (Wu et al. 2026, arXiv 2604.27277, Methods 4.3 and their runners/): LayerNorm ->
+    Linear(D, D) -> GELU -> Linear(D, K) on one pooled embedding per volume. Classification: K-way cross-entropy
+    (K = 2 for binary), Adam lr 1e-4, weight decay 1e-5; regression: MSE, AdamW lr 1e-3, weight decay 1e-4. Batch 4,
+    at most 8 epochs, the epoch with the best validation score kept (AUC; MAE for regression), stopped after 5 without
+    improvement. Deviations, for our tasks: multilabel tasks (no BrainDINO counterpart) use per-label BCE; regression
+    targets are z-scored on train (BrainDINO regresses raw years); two seeds, each validated on one half of the
+    validation set, so ``predict_val`` is cross-fitted like the other heads (test scores average the two)."""
+
+    def __init__(self, n_out: int, multilabel: bool, seed: int, regression: bool = False, n_seeds: int = 2,
+                 epochs: int = 8, patience: int = 5, batch_size: int = 4):
+        self.name, self.pool = "mlp", "mean"
+        self.n_out, self.multilabel, self.regression = n_out, multilabel, regression
+        self.seed, self.n_seeds, self.epochs, self.patience, self.bs = seed, n_seeds, epochs, patience, batch_size
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.models: list[nn.Module] = []
+        self.stop_half_: list[int] | None = None
+        self.y_mu, self.y_sd = 0.0, 1.0
+
+    def _k(self) -> int:
+        return self.n_out if (self.regression or self.multilabel) else 2
+
+    def _net(self, d: int) -> nn.Module:
+        return nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, self._k()))
+
+    def _scores(self, logits: torch.Tensor) -> np.ndarray:
+        if self.regression:
+            return (logits[:, 0] * self.y_sd + self.y_mu).double().cpu().numpy()
+        if self.multilabel:
+            return logits.sigmoid().double().cpu().numpy()
+        return logits.softmax(-1)[:, 1].double().cpu().numpy()
+
+    def _val(self, model: nn.Module, xv: torch.Tensor, yv: np.ndarray) -> float:
+        """Higher is better: AUC, or minus the MAE."""
+        model.eval()
+        with torch.no_grad():
+            s = self._scores(model(xv))
+        if self.regression:
+            return -float(np.mean(np.abs(s - yv.ravel())))
+        return _safe_auc(yv if self.multilabel else yv.ravel(), s)
+
+    def _fit_one(self, seed: int, x: torch.Tensor, y: torch.Tensor, xv: torch.Tensor, yv: np.ndarray) -> nn.Module:
+        torch.manual_seed(seed)
+        model = self._net(x.shape[1]).to(self.device)
+        if self.regression:
+            opt, loss_fn = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4), nn.MSELoss()
+        else:
+            opt = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
+            loss_fn = nn.BCEWithLogitsLoss() if self.multilabel else nn.CrossEntropyLoss()
+        g = torch.Generator(device="cpu").manual_seed(seed)
+        best, best_state, bad = -float("inf"), None, 0
+        for _ in range(self.epochs):
+            model.train()
+            for idx in torch.randperm(len(x), generator=g).split(self.bs):
+                idx = idx.to(self.device)
+                loss = loss_fn(model(x[idx]), y[idx])
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
+                opt.step()
+            v = self._val(model, xv, yv) if len(xv) else -float("inf")
+            if best_state is None or v > best:
+                best, bad = v, 0
+                best_state = {k: t.detach().clone() for k, t in model.state_dict().items()}
+            elif (bad := bad + 1) >= self.patience:
+                break
+        model.load_state_dict(best_state)
+        return model.eval()
+
+    def _x(self, x, mask) -> torch.Tensor:
+        return torch.as_tensor(mean_pool(np.asarray(x, np.float32), np.asarray(mask)), device=self.device)
+
+    def fit(self, x, y, mask, x_val, y_val, mask_val, z=None, z_val=None, val_half=None) -> None:
+        xt, xv = self._x(x, mask), self._x(x_val, mask_val)
+        y, y_val = np.asarray(y, np.float32), np.asarray(y_val, np.float32)
+        if self.regression:
+            self.y_mu, self.y_sd = float(y.mean()), float(y.std() or 1.0)
+            yt = torch.as_tensor(((y - self.y_mu) / self.y_sd).reshape(len(y), -1), device=self.device)
+        elif self.multilabel:
+            yt = torch.as_tensor(y.reshape(len(y), -1), device=self.device)
+        else:
+            yt = torch.as_tensor(y.ravel(), dtype=torch.long, device=self.device)
+        h = None if val_half is None else np.asarray(val_half)
+        self.stop_half_ = None
+        if h is None or len(np.unique(h)) < 2:
+            self.models = [self._fit_one(self.seed + i, xt, yt, xv, y_val) for i in range(self.n_seeds)]
+            return
+        self.stop_half_ = [i % 2 for i in range(self.n_seeds)]
+        self.models = [self._fit_one(self.seed + i, xt, yt, xv[torch.as_tensor(h == k, device=self.device)],
+                                     y_val[h == k]) for i, k in enumerate(self.stop_half_)]
+
+    @torch.no_grad()
+    def _all_logits(self, x, mask) -> torch.Tensor:
+        xt = self._x(x, mask)
+        return torch.stack([m(xt) for m in self.models])
+
+    def predict_scores(self, x, mask, z=None) -> np.ndarray:
+        lg = self._all_logits(x, mask)
+        if self.regression:
+            return self._scores(lg.mean(0))
+        return np.mean([self._scores(t) for t in lg], axis=0)        # average probabilities, not logits
+
+    def predict_val(self, x, mask, val_half, z=None) -> np.ndarray:
+        """Each validation volume scored by the seeds that stopped on the other half."""
+        if self.stop_half_ is None:
+            return self.predict_scores(x, mask, z)
+        lg, h = self._all_logits(x, mask), np.asarray(val_half)
+        per = np.stack([self._scores(t) for t in lg])                # (seeds, N[, L])
+        w = (np.asarray(self.stop_half_)[:, None] != h[None, :]).astype(np.float64)
+        w = w.reshape(w.shape + (1,) * (per.ndim - 2))
+        return (per * w).sum(0) / w.sum(0)
+
+
 def build_heads(*, latent_dim: int, n_out: int, multilabel: bool, seed: int, which: list[str],
                 task_type: str) -> list:
     """Heads valid for the task type, in the order requested."""

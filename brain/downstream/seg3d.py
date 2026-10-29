@@ -563,7 +563,7 @@ def train_decoder(dec, cache, task, split, *, steps, batch_size, lr, seed, eval_
 
 
 def main() -> None:
-    from brain.downstream.records import now_utc, pretrain_overlap
+    from brain.downstream.records import now_utc, pretrain_overlap, ssl_exclude
 
     started = now_utc()
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -690,7 +690,7 @@ def main() -> None:
               "eval_every": args.eval_every, "fine": args.fine, "started_utc": started,
               "slices_root": str(args.slices_root), "volumes_csv": str(DEFAULT_VOLUMES), "n_val": metrics["n_val"],
               "eval_slices": "64 bin-centre axial slices (dice_*) and the whole volume (dice_full_*)",
-              "pretrain_overlap": pretrain_overlap(task.volume_ids, volumes)}
+              "pretrain_overlap": pretrain_overlap(task.volume_ids, volumes, ssl_exclude(args.ckpt))}
     print(f"[seg3d] summary -> {finalize_run(run_dir, config, {head: metrics}, suite='seg3d')}")
     if not args.keep_cache:
         drop_token_cache(args.cache_dir, task.name, args.ckpt)

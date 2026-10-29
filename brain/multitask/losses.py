@@ -26,10 +26,14 @@ def seg_target(seg: torch.Tensor, stride: int = 2) -> torch.Tensor:
 
 
 def seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """(P,) BCE + soft Dice per slot. An empty target scores Dice on the background-free prediction (+1 smoothing)."""
+    """(P,) BCE + soft Dice per slot. An empty target scores Dice on the background-free prediction (+1 smoothing).
+    A 2-channel target is (target, validity): voxels with validity 0 are left out of both terms."""
     logits, target = logits.float(), target.float()
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none").mean(dim=(1, 2, 3, 4))
-    p = logits.sigmoid()
+    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
+    target = target[:, :1]
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    bce = (bce * w).sum(dim=(1, 2, 3, 4)) / w.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
+    p = logits.sigmoid() * w
     inter = (p * target).sum(dim=(1, 2, 3, 4))
     dice = 1 - (2 * inter + 1) / (p.sum(dim=(1, 2, 3, 4)) + target.sum(dim=(1, 2, 3, 4)) + 1)
     return bce + dice

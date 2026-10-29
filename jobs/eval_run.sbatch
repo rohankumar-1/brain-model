@@ -6,6 +6,8 @@
 #
 #   sbatch --export=ALL,CKPT=runs/x/last.pt,SUITE_TASKS="cq500 ixi_age" jobs/eval_run.sbatch
 #   EXTRA="--steps 3000" adds evaluator arguments (spaces, no commas: sbatch --export splits on commas).
+#   NO_TOKEN_TASKS="a b": these tasks skip the 3D-conv probe (--no-token-heads; brain.bench run: tasks whose pinned
+#   readout is another head).
 
 #SBATCH -p pi_dbertsim
 #SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
@@ -29,7 +31,10 @@ ok=() failed=()
 for task in "${TASKS[@]}"; do
   echo "[eval-run] ===== $task  $(date -Is)"
   # shellcheck disable=SC2086
-  if "$PY" -u -m brain.downstream.suite run --task "$task" --ckpt "$CKPT" -- ${EXTRA:-}; then ok+=("$task")
+  more=""
+  [[ " ${NO_TOKEN_TASKS:-} " == *" $task "* ]] && more="--no-token-heads"
+  # shellcheck disable=SC2086
+  if "$PY" -u -m brain.downstream.suite run --task "$task" --ckpt "$CKPT" -- ${EXTRA:-} $more; then ok+=("$task")
   else failed+=("$task"); echo "[eval-run] FAILED $task (continuing)"; fi
 done
 "$PY" -u -m brain.downstream.db ingest

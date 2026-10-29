@@ -26,6 +26,7 @@ import re
 import sys
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +57,8 @@ def discover(names: list[str]) -> list[sources.Case]:
              "wmh": sources.wmh, "isles24": sources.isles24, "instance": sources.instance, "bhsd": sources.bhsd, "hemseg": sources.hemseg, "rsna_ica": sources.rsna_ica,
              "ms3seg": sources.ms3seg, "valdo": sources.valdo,
              "aisd": sources.aisd, "brainmetshare": sources.brainmetshare, "fomo": sources.fomo,
-             "msd": sources.msd}  # SinoCT dropped: ~36 mm slabs that cannot be placed in a whole-head template
+             "msd": sources.msd, "ucsf_pdgm": sources.ucsf_pdgm,
+             "upenn_gbm": sources.upenn_gbm}  # SinoCT dropped: ~36 mm slabs that cannot be placed in a whole-head template
     return sorted((c for n in names for c in found[n]()), key=lambda c: (c.dataset, c.case_id))
 
 
@@ -87,6 +89,18 @@ def skip_hard_drops(root: Path, cases: list) -> tuple[list, list]:
         else:
             keep.append(c)
     return keep, dropped
+
+
+def with_ref_images(todo: list, found: list, root: Path) -> list:
+    """Point each co-registered sequence at its reference's stored volume (``pipeline.shared_registration``). The
+    lookup spans every discovered case, so a reference outside this run's filters or shard is still found."""
+    by_path = {c.path: c for c in found if c.path is not None}
+    return [replace(c, ref_image=store.paths(root, by_path[c.ref])[0]) if c.ref in by_path else c for c in todo]
+
+
+def phases(todo: list) -> list[list]:
+    """References first, then the sequences that reuse their registration (so it exists when they run)."""
+    return [p for p in ([c for c in todo if c.ref_image is None], [c for c in todo if c.ref_image is not None]) if p]
 
 
 def work(args) -> dict:
@@ -344,7 +358,8 @@ def main() -> None:
 
     opts = pipeline.options_from_args(a)
     i, n = map(int, a.shard.split("/"))
-    cases = [c for c in discover(names) if a.match in c.dataset]
+    found = discover(names)
+    cases = [c for c in found if a.match in c.dataset]
     if a.cases:
         wanted = {ln.strip() for ln in a.cases.read_text().splitlines() if ln.strip()}
         cases = [c for c in cases if c.case_id in wanted]
@@ -386,7 +401,9 @@ def main() -> None:
         with open(manifest, "a") as out:
             for c in dropped:
                 out.write(json.dumps({"dataset": c.dataset, "case_id": c.case_id, "status": "duplicate"}) + "\n")
-    print(f"[run] shard {i}/{n}: {len(cases)} cases, {len(done)} already done, {len(todo)} to do, "
+    todo = with_ref_images(todo, found, a.root)
+    print(f"[run] shard {i}/{n}: {len(cases)} cases, {len(done)} already done, {len(todo)} to do "
+          f"({sum(c.ref_image is not None for c in todo)} reusing a reference's registration), "
           f"{len(dropped)} known duplicates skipped", flush=True)
 
     def guard() -> bool:
@@ -406,10 +423,13 @@ def main() -> None:
     t0 = time.time()
     ctx = mp.get_context("spawn")                     # the parent may hold CUDA; never fork it
     with ctx.Pool(a.workers, maxtasksperchild=100) as pool, open(manifest, "a") as out:
-        if a.gpu_mask:
-            complete = run_gpu(pool, todo, a.root, a.z_anchor, opts, out, a.mask_batch, guard)
-        else:
-            complete = True
+        complete = True
+        for todo in phases(todo):
+            if not complete:
+                break
+            if a.gpu_mask:
+                complete = run_gpu(pool, todo, a.root, a.z_anchor, opts, out, a.mask_batch, guard)
+                continue
             for k, row in enumerate(pool.imap_unordered(work, [(c, a.root, a.z_anchor, opts) for c in todo]), 1):
                 out.write(json.dumps({**{k: _plain(v) for k, v in row.items()}, "written_at": time.time()}) + "\n")
                 out.flush()
