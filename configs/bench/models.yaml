@@ -38,6 +38,7 @@ models:
   BQ-R10-EMA:     {ckpt: runs/multitask/r10/last_ema.pt, note: "R10's weight average (decay 0.999) at step 30k"}
   BQ-R12:         {ckpt: runs/multitask/r12/last.pt, note: "R10 continued to 60k steps: labels v9 (tool-label QC), HL-Gauss regression, re-warmed WSD schedule (configs/multitask/r12.yaml)"}
   BQ-R13:         {ckpt: runs/multitask/r13/last.pt, note: "R12 at 50k + 25k steps: token maps (mask occupancy, RSNA slice and fastMRI+ box bags), fastMRI+ findings, 25% token gate, no aneurysm / RSNA-ICA (configs/multitask/r13.yaml)"}
+  BQ-R13-centergate: {ckpt: runs/multitask/r13/last_centergate.pt, note: "R13's weights read out with the centre-voxel token gate instead of its 25% gate (gate test)"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
   regional_stats:

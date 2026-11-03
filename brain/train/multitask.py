@@ -50,9 +50,11 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
                             checkpoint_blocks=bool(m.get("checkpoint", True)) and not synthetic)
         return enc.to(device).train().requires_grad_(True)
     if synthetic or not m.get("init_from"):
-        enc = BrainEncoder(size=m.get("size") or "test", patch_xyz=tuple(cfg["views"]["patch_xyz"]),
+        # the config records how the encoder was built (frozen evaluation rebuilds it from these, with other defaults)
+        m.update(size=m.get("size") or "test", qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32)
+        enc = BrainEncoder(size=m["size"], patch_xyz=tuple(cfg["views"]["patch_xyz"]),
                            in_chans=int(m.get("in_chans", 1)),
-                           qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
+                           qk_norm=True, n_cls=m["n_cls"], proj_dim=16, proj_hidden=32,
                            rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
                            n_meta=n_meta(m))
     else:
