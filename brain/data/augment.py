@@ -90,8 +90,10 @@ def bias_field(x: torch.Tensor, modality: torch.Tensor, cfg: dict, skip: torch.T
     return x
 
 
-def through_plane(x: torch.Tensor, cfg: dict, thick: tuple[torch.Tensor, torch.Tensor] | None) -> torch.Tensor:
-    """Blur along one axis so the effective slice thickness reaches a random target in ``fwhm_vox`` (mm = voxels)."""
+def through_plane(x: torch.Tensor, cfg: dict, thick: tuple[torch.Tensor, torch.Tensor] | None,
+                  skip: torch.Tensor | None = None) -> torch.Tensor:
+    """Blur along one axis so the effective slice thickness reaches a random target in ``fwhm_vox`` (mm = voxels).
+    ``skip`` rows are left sharp."""
     r, dev = x.shape[0], x.device
     lo, hi = cfg.get("fwhm_vox", (2.0, 6.0))
     if thick is None:
@@ -104,6 +106,8 @@ def through_plane(x: torch.Tensor, cfg: dict, thick: tuple[torch.Tensor, torch.T
     extra = (_uniform(r, lo, hi, dev).square() - native.square()).clamp_min(0).sqrt()
     sigma = extra * FWHM_TO_SIGMA
     on = (torch.rand(r, device=dev) < float(cfg["p"])) & (sigma > 0.25)
+    if skip is not None:
+        on &= ~skip.to(dev)
     for ax in (0, 1, 2):  # grid axis -> tensor dim: x is dim 4, y dim 3, z dim 2
         idx = (on & (axis == ax)).nonzero(as_tuple=True)[0]
         if idx.numel():
@@ -225,13 +229,16 @@ def histogram_match(x: torch.Tensor, modality: torch.Tensor, fg: torch.Tensor, v
 
 
 def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None,
-            skip_drift: torch.Tensor | None = None) -> torch.Tensor:
+            skip_drift: torch.Tensor | None = None, skip_blur: torch.Tensor | None = None) -> torch.Tensor:
     """Isotropic blur, a smooth additive drift, and noise, in windowed units. Each is drawn per row.
-    ``skip_noise`` marks rows that already got (Rician) noise in native units; ``skip_drift`` rows get no drift."""
+    ``skip_noise`` marks rows that already got (Rician) noise in native units; ``skip_drift`` rows get no drift;
+    ``skip_blur`` rows no blur."""
     r, device = x.shape[0], x.device
     n, bl, dr = (aug.get(k) or {} for k in ("noise", "blur", "drift"))
     if bl and float(bl.get("p", 0)) > 0:
         on = torch.rand(r, device=device) < float(bl["p"])
+        if skip_blur is not None:
+            on &= ~skip_blur.to(device)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
         x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)))
     if dr and float(dr.get("p", 0)) > 0:
@@ -254,21 +261,22 @@ def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None,
 def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
                thick: tuple[torch.Tensor, torch.Tensor] | None = None,
                vol: torch.Tensor | None = None, contrast: torch.Tensor | None = None,
-               quant: torch.Tensor | None = None, protect: torch.Tensor | None = None) -> torch.Tensor:
+               quant: torch.Tensor | None = None, protect: torch.Tensor | None = None,
+               sharp: torch.Tensor | None = None) -> torch.Tensor:
     """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
     ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching against another volume of the same contrast
     group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
-    measured on the unaugmented intensities)."""
+    measured on the unaugmented intensities); ``sharp`` rows no through-plane or isotropic blur (small targets)."""
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
     if (aug.get("window") or {}).get("mode") == "roles":
-        return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect)
+        return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp)
     if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
         x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"], skip=protect)
     if _enabled(aug.get("through_plane")):
-        x = through_plane(x, aug["through_plane"], thick)
+        x = through_plane(x, aug["through_plane"], thick, skip=sharp)
     noisy = None
     noise = aug.get("noise") or {}
     if _enabled(noise) and str(noise.get("kind", "gaussian")) == "rician":
@@ -276,10 +284,10 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     y = window_view(x, modality, aug)
     if _enabled(aug.get("curve")):
         y = mri_curve(y, modality, fg, aug["curve"])
-    return degrade(y, aug, skip_noise=noisy, skip_drift=protect)
+    return degrade(y, aug, skip_noise=noisy, skip_drift=protect, skip_blur=sharp)
 
 
-def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect) -> torch.Tensor:
+def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp=None) -> torch.Tensor:
     """``appearance`` for a three-channel encoder (``window.mode: roles``): every intensity augmentation in native units,
     then the three role windows (``windowing.role_windows``, jittered by ``window.jitter``) last, so CT channels keep
     their physical meaning (blood ~60 HU in each). The contrast curve re-renders MRI rows only. Returns (R, 3, ...), or
@@ -290,7 +298,7 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"], skip=protect)
     if _enabled(aug.get("through_plane")):
-        x = through_plane(x, aug["through_plane"], thick)
+        x = through_plane(x, aug["through_plane"], thick, skip=sharp)
     noise = aug.get("noise") or {}
     if _enabled(noise):
         x, noisy = rician_noise(x, modality, noise) if str(noise.get("kind", "gaussian")) == "rician" else (x, None)
@@ -304,6 +312,8 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
     bl = aug.get("blur") or {}
     if _enabled(bl):
         on = torch.rand(r, device=dev) < float(bl["p"])
+        if sharp is not None:
+            on &= ~sharp.to(dev)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
         x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
     win = aug.get("window") or {}

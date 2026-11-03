@@ -180,6 +180,25 @@ def src_rsna(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     return _rows(rows, rows[s["subtype"]])
 
 
+def src_rsna_ica(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """RSNA-ICA series labels: ``finding`` is ``Aneurysm Present`` or a side-merged location (tasks.RSNA_ICA_LOCATIONS)."""
+    from brain.downstream.tasks import rsna_ica_labels
+
+    rows = rsna_ica_labels(v)
+    return _rows(rows, rows[s["finding"]].astype(float))
+
+
+def src_fastmri_findings(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """fastMRI+ scan-level findings (labels/fastmri_findings.csv, brain.prep.fastmri_labels): 1 = the radiologist
+    labelled the finding, 0 = the file was reviewed without it."""
+    f = STORE / "labels" / "fastmri_findings.csv"
+    if not f.exists():
+        return _rows(v.iloc[:0], [])
+    lab = pd.read_csv(f)[["case_id", s["finding"]]]
+    rows = v[v["dataset"].astype(str).str.startswith("fastmri")].astype({"case_id": str}).merge(lab, on="case_id")
+    return _rows(rows, rows[s["finding"]].astype(float))
+
+
 def src_family_class(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     cls = {c: i for i, c in enumerate(task.classes)}
     rows = v[v["dataset_family"].isin(list(s["map"]))]
@@ -240,6 +259,16 @@ def src_brats_seg_volume(v: pd.DataFrame, task: Task, s: dict, workers: int = 8)
 def src_mask_column(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     rows = v[v["dataset_family"].isin(list(s["families"])) & v[s["column"]].notna()]
     return _rows(rows, np.nan, (rows[s["column"]].astype(str) + "|" + _ids(s)).to_numpy())
+
+
+def src_store_mask(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """A label mask written next to a stored volume (``<case>.<mask>.zip``, e.g. ``brain.prep.rsna_ica_vessels``):
+    the volumes of ``families`` that have one, ``ids`` the voxel values that count as the target."""
+    rows = v[v["dataset_family"].isin(list(s["families"]))]
+    rel = [store.path_for(Path(""), f, c, s["mask"]) for f, c in zip(rows["folder"], rows["case_id"].astype(str))]
+    have = np.asarray([(STORE / p).exists() for p in rel], dtype=bool)
+    refs = np.asarray([f"{p}|{_ids(s)}" for p, h in zip(rel, have) if h], dtype=object)
+    return _rows(rows[have], np.nan, refs)
 
 
 def src_cq500(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
@@ -326,10 +355,58 @@ def synthseg_volumes() -> pd.DataFrame:
     return m
 
 
-def _synthseg_rows(v: pd.DataFrame, need_fov: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+QC_MIN = 0.65            # SynthSeg 2.0 QC: a group score below this predicts a failed segmentation (Billot et al. 2023)
+# derived measures that combine structures: every QC group must pass
+# combined measures -> the QC groups they read (a failing cerebellum says nothing about a grey/white ratio)
+_GW, _CSF = ("general_white_matter", "general_grey_matter"), ("general_csf",)
+_COMBINED_QC = {"parenchymal_fraction": _GW + _CSF, "log_ventricle_brain_ratio": _GW + _CSF, "gm_wm_ratio": _GW,
+                "ct_gray_white": _GW, "evans_index": _GW + _CSF, "cortex_asym": ("general_grey_matter",),
+                "ventricle_asym": _CSF, "hippocampus_asym": ("hippocampus_amygdala",)}
+_MEASURE_GROUP = {"log_ventricles": "ventricles", "log_csf": "csf"}
+
+
+def synthseg_qc() -> pd.DataFrame:
+    """Per volume, SynthSeg 2.0 QC scores per structure group (``brain.prep.synthseg_qc``, labels/synthseg/qc_*.csv);
+    empty when not computed."""
+    import glob
+
+    files = sorted(glob.glob(str(SYNTHSEG / "qc_*.csv")))
+    if not files:
+        return pd.DataFrame()
+    return pd.concat([pd.read_csv(f) for f in files]).drop_duplicates("volume_id", keep="last").set_index("volume_id")
+
+
+def _qc_columns(structure: str | None) -> list[str]:
+    """The QC-score columns a target depends on: the groups of its FreeSurfer labels, those a combined measure reads
+    (``_COMBINED_QC``), or all for anything else."""
+    from brain.prep.synthseg import LABELS
+    from brain.prep.synthseg_qc import qc_groups
+
+    groups, names = qc_groups()
+    cols = [n.replace(" ", "_").replace("+", "_") for n in names]
+    if structure in _COMBINED_QC:
+        return list(_COMBINED_QC[structure])
+    if structure is None or structure not in SS_GROUPS:
+        return cols[1:]
+    lut = {int(lab): int(g) for lab, g in zip(LABELS, groups)}
+    got = sorted({cols[lut[i]] for i in SS_GROUPS[structure] if lut.get(i, 0) > 0})
+    return got or ["general_csf"]          # extra-ventricular CSF (label 24) is background to the QC network
+
+
+def _synthseg_rows(v: pd.DataFrame, need_fov: bool = False,
+                   structure: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """QC-passed SynthSeg volumes for a target on ``structure`` (an ``SS_GROUPS`` name or a measure). With QC scores
+    (``synthseg_qc``), a volume passes when every QC group of the target scores >= ``QC_MIN``; volumes without scores
+    fall back to the hand-set ``qc_ok``. ``need_fov``: the whole brain in view as well (volume targets)."""
     m = synthseg_volumes()
     if "qc_ok" in m:
-        m = m[m["qc_ok"] & (m["fov_ok"] if need_fov else True)]
+        ok = m["qc_ok"].copy()
+        q = synthseg_qc()
+        if len(q):
+            cols = _qc_columns(_MEASURE_GROUP.get(structure, structure))
+            scored = m.index.isin(q.index)
+            ok[scored] = (q.reindex(m.index[scored])[cols] >= QC_MIN).all(axis=1).to_numpy()
+        m = m[ok & (m["fov_ok"] if need_fov else True)]
     rows = v[v["volume_id"].isin(m.index)]
     return rows, m.loc[rows["volume_id"]]
 
@@ -338,7 +415,7 @@ def src_synthseg_seg(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     """Binary mask of a SynthSeg structure group (QC-passed volumes); the zip holds indices into ``LABELS``."""
     from brain.prep.synthseg import LABELS
 
-    rows, _ = _synthseg_rows(v)
+    rows, _ = _synthseg_rows(v, structure=s["group"])
     idx = ",".join(str(int(i)) for i in np.searchsorted(LABELS, SS_GROUPS[s["group"]]))
     refs = [f"{store.path_for(Path(''), f, c, 'synthseg')}|{idx}" for f, c in zip(rows["folder"], rows["case_id"].astype(str))]
     return _rows(rows, np.nan, np.asarray(refs, dtype=object))
@@ -351,7 +428,7 @@ def src_synthseg_scan_measure(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFr
     if not path.exists():
         return _rows(v.head(0), np.nan)
     meas = pd.read_csv(path).set_index("volume_id")[s["measure"]].dropna()
-    rows, _ = _synthseg_rows(v)
+    rows, _ = _synthseg_rows(v, structure=s["measure"])
     rows = rows[rows["volume_id"].isin(meas.index)]
     if s.get("modality"):
         rows = rows[rows["modality"].astype(str).str.lower().str.startswith(s["modality"])]
@@ -360,26 +437,99 @@ def src_synthseg_scan_measure(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFr
 
 def src_synthseg_measure(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     """A volume / ratio / asymmetry of QC-passed scans with the whole brain in the field of view."""
-    rows, m = _synthseg_rows(v, need_fov=True)
+    rows, m = _synthseg_rows(v, need_fov=True, structure=s["measure"])
     return _rows(rows, m[s["measure"]].to_numpy())
 
 
 def src_wmh(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
-    """log(1 + WMH ml) from ``labels/wmh`` (``brain.prep.wmh_run``; FLAIR / T2 outside tumour cohorts)."""
+    """log(1 + WMH ml) (``raw``: ml) from ``labels/wmh`` (``brain.prep.wmh_run``; FLAIR / T2 outside tumour cohorts).
+    ``contrasts`` keeps those input contrasts; ``min_age`` keeps scans of subjects with a known age (FOMO
+    participants) at least that. Checked 2026-11-01 (runs/diagnostics/wmh_validate.py, tool_label_quality): against
+    expert masks WMH-SynthSeg ranks burden (Spearman 0.84) but over-calls it 1.8x, site-dependently; in children it
+    calls developing white matter WMH (HBN: 80% > 5 ml, falling with age) and on T2 it does not track age."""
     import glob
+    from types import SimpleNamespace
 
     files = sorted(glob.glob(str(STORE / "labels" / "wmh" / "volumes_*.csv")))
     if not files:
         return _rows(v.head(0), np.nan)
     w = pd.concat([pd.read_csv(f) for f in files]).drop_duplicates("volume_id", keep="last").set_index("volume_id")
+    if s.get("contrasts"):
+        w = w[w["contrast"].astype(str).str.lower().isin([str(c).lower() for c in s["contrasts"]])]
     rows = v[v["volume_id"].isin(w.index)]
-    return _rows(rows, np.log1p(w.loc[rows["volume_id"], s.get("measure", "wmh_ml")].to_numpy()))
+    if s.get("min_age") is not None:
+        fams = [f for f in rows["dataset_family"].unique() if f in FOMO_PT]
+        ages = src_fomo_participants(v, SimpleNamespace(id=f"{task.id} ages"), {"families": fams, "field": "age"})
+        age = pd.to_numeric(ages.set_index("volume_id")["value"], errors="coerce")
+        rows = rows[rows["volume_id"].map(age) >= float(s["min_age"])]
+    ml = w.loc[rows["volume_id"], s.get("measure", "wmh_ml")].to_numpy()
+    return _rows(rows, ml if s.get("raw") else np.log1p(ml))
+
+
+# ------------------------------------------------------------------------------------------------ self-supervised
+def src_ssl_recon(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """Masked reconstruction: every label-pool volume (the loader hides tokens and keeps the image as the target)."""
+    return _rows(v, np.nan, "@recon")
+
+
+def _affine_key(path: str) -> str:
+    try:
+        a = store.read_attrs(STORE / path, "image").get("reg_affine")
+    except Exception:   # noqa: BLE001  unreadable attrs: no pair
+        return ""
+    return "" if a is None else ",".join(f"{x:.4f}" for x in np.asarray(a, dtype=float).ravel())
+
+
+def coregistered_pairs(v: pd.DataFrame, workers: int = 8, path: Path | None = None) -> pd.DataFrame:
+    """Volumes on one identical stored grid: same subject (``dedup_key``) and the same registration affine to 4
+    decimals (a sequence prepped through its reference's registration, ``Case.ref``: BraTS, UPENN-GBM, SynthRAD, whose
+    MR / CT / CBCT sit in separate store folders). Returns ``grid`` per volume (``volume_id, grid``; one id per group);
+    the affine read is cached (``pairs_affine.parquet``)."""
+    path = path or OUT_DIR / "pairs_affine.parquet"
+    cand = v[v.groupby("dedup_key")["volume_id"].transform("size") > 1]
+    old = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=["volume_id", "affine"])
+    todo = cand[~cand["volume_id"].isin(old["volume_id"])]
+    if len(todo):
+        with ProcessPoolExecutor(workers) as ex:
+            keys = list(ex.map(_affine_key, todo["image_path"].astype(str), chunksize=64))
+        old = pd.concat([old, pd.DataFrame({"volume_id": todo["volume_id"].to_numpy(), "affine": keys})])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old.to_parquet(path, index=False)
+    c = cand.merge(old, on="volume_id")
+    c = c[c["affine"].astype(str) != ""]
+    c["grid"] = c["dedup_key"].astype(str) + "|" + c["affine"].astype(str)
+    c = c[c.groupby("grid")["volume_id"].transform("size") > 1]
+    return c[["volume_id", "grid"]]
+
+
+_PAIRS: dict[int, pd.DataFrame] = {}
+
+
+def src_synth(v: pd.DataFrame, task: Task, s: dict, workers: int = 8, cache_dir: Path | None = None) -> pd.DataFrame:
+    """Contrast synthesis: each volume with another contrast ``s.contrast`` (``contrast_std``) on its identical grid
+    asks for that contrast; ``ref`` is ``@synth:<partner image path>|<partner modality>``. A cone-beam CT (SynthRAD
+    task 2) is never a target but asks for its CT (CBCT -> CT), although both count as contrast ``ct``."""
+    key = id(v)
+    if key not in _PAIRS:                         # one affine scan for all synth_* tasks of a build
+        _PAIRS[key] = coregistered_pairs(v, workers, cache_dir / "pairs_affine.parquet" if cache_dir else None)
+    g = _PAIRS[key].merge(v[["volume_id", "image_path", "modality", "contrast_std", "dataset"]], on="volume_id")
+    cbct = g["dataset"].astype(str).str.contains("cbct")
+    same = g["contrast_std"].astype(str) == str(s["contrast"])
+    target = g[same & ~cbct].drop_duplicates("grid")
+    pairs = g.merge(target[["grid", "volume_id", "image_path", "modality"]], on="grid", suffixes=("", "_tgt"))
+    other = pairs["contrast_std"].astype(str) != str(s["contrast"])
+    pairs = pairs[(pairs["volume_id"] != pairs["volume_id_tgt"])
+                  & (other | pairs["dataset"].astype(str).str.contains("cbct"))]
+    ref = "@synth:" + pairs["image_path_tgt"].astype(str) + "|" + pairs["modality_tgt"].astype(str).str.lower()
+    return _rows(pairs, np.nan, ref.to_numpy())
 
 
 SOURCES = {
-    "fomo_participants": src_fomo_participants, "rsna": src_rsna, "family_class": src_family_class,
+    "ssl_recon": src_ssl_recon, "synth": src_synth,
+    "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings,
+    "family_class": src_family_class,
     "brain_volume": src_brain_volume, "brain_mask": src_brain_mask, "live": src_live,
-    "brats_seg": src_brats_seg, "brats_seg_volume": src_brats_seg_volume, "mask_column": src_mask_column,
+    "brats_seg": src_brats_seg, "brats_seg_volume": src_brats_seg_volume, "mask_column": src_mask_column, "store_mask": src_store_mask,
     "cq500": src_cq500, "downstream": src_downstream,
     "synthseg_seg": src_synthseg_seg, "synthseg_measure": src_synthseg_measure,
     "synthseg_scan_measure": src_synthseg_scan_measure, "wmh": src_wmh,
@@ -411,9 +561,10 @@ def label_pool(volumes: pd.DataFrame) -> tuple[pd.DataFrame, set[str]]:
     image-quality reasons that do not touch study-level labels: DICOM-assembly QC failures (``ssl_qc_drop``: RSNA
     studies with stripes / missing posterior fossa) and the per-volume prep-QC drops (partial slabs, unscaled
     fallback registrations). Before 2026-10-25 those were silently out of every task too (the hemorrhage tasks lost
-    2,200 RSNA studies). Held-out families, dataset-level drops and cross-dataset duplicates stay out of everything.
+    2,200 RSNA studies). ``index.MULTITASK_FAMILIES`` (held out of SSL, multitask training cohorts) are in. Other
+    held-out families, dataset-level drops and cross-dataset duplicates stay out of everything.
     ``ssl_only_drop`` volumes lose their registration-sensitive and live (image-measured) rows in ``build``."""
-    from brain.prep.index import POOL_DROP_DATASETS
+    from brain.prep.index import MULTITASK_FAMILIES, POOL_DROP_DATASETS
 
     drop_dir = STORE / "labels" / "pool_drop"
     dups: set[str] = set()
@@ -431,8 +582,10 @@ def label_pool(volumes: pd.DataFrame) -> tuple[pd.DataFrame, set[str]]:
     bhsd = volumes["bhsd"].astype(bool) if "bhsd" in volumes else False
     ssl_qc = volumes["ssl_qc_drop"].astype(bool) if "ssl_qc_drop" in volumes else False
     ssl_only = (ssl_qc | vid.isin(qc_drops)) & ~pretrain
-    keep = (pretrain | bhsd | ssl_only) & ~volumes["held_out"].astype(bool) \
-        & ~volumes["dataset"].isin(POOL_DROP_DATASETS) & ~vid.isin(dups)
+    mt = volumes["dataset_family"].isin(MULTITASK_FAMILIES) if "dataset_family" in volumes else False
+    twin = volumes["twin_drop"].astype(bool) if "twin_drop" in volumes else False    # BraTS copies of UCSF / UPENN
+    keep = (pretrain | bhsd | ssl_only | mt) & (~volumes["held_out"].astype(bool) | mt) \
+        & ~volumes["dataset"].isin(POOL_DROP_DATASETS) & ~vid.isin(dups) & ~twin
     return volumes[keep], set(vid[keep & ssl_only])
 
 
@@ -477,10 +630,64 @@ def registration_qc(volumes: pd.DataFrame, workers: int = 8, path: Path | None =
 
 
 # ------------------------------------------------------------------------------------------------ build
-def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFrame | None = None) -> pd.DataFrame:
+def refine(f: pd.DataFrame, s: dict, volumes: pd.DataFrame) -> pd.DataFrame:
+    """Source options applied to any source's rows: ``modality`` keeps that modality's volumes (e.g. a SynthSeg
+    target that is noise on CT); ``ct_max_thick_mm`` drops CT volumes whose slices are thicker (unknown thickness
+    too); ``exclude_datasets`` (fnmatch patterns) drops those datasets' volumes; ``bins``
+    (ascending edges) turns a scalar into ordered classes 0..len(bins) (value < bins[0] is class 0); ``threshold``
+    turns it into a binary label (value >= threshold)."""
+    if s.get("modality") and "modality" not in f:
+        mod = dict(zip(volumes["volume_id"].astype(str), volumes["modality"].astype(str).str.lower()))
+        f = f[f["volume_id"].astype(str).map(mod).fillna("").str.startswith(str(s["modality"]))]
+    elif s.get("modality"):
+        f = f[f["modality"].astype(str).str.lower().str.startswith(str(s["modality"]))]
+    if s.get("ct_max_thick_mm") is not None:      # thick-slice CT out of the small-structure SynthSeg targets
+        u = volumes.drop_duplicates("volume_id")
+        vid = f["volume_id"].astype(str)
+        ct = vid.map(dict(zip(u["volume_id"].astype(str), u["modality"].astype(str).str.lower()))).fillna("").str.startswith("ct")
+        mm = pd.to_numeric(vid.map(dict(zip(u["volume_id"].astype(str), u["thick_mm"]))), errors="coerce")
+        f = f[~ct | (mm <= float(s["ct_max_thick_mm"]))]
+    if s.get("exclude_datasets"):                 # e.g. contrast CTA out of the non-contrast CT measures
+        from fnmatch import fnmatch
+
+        ds = dict(zip(volumes["volume_id"].astype(str), volumes["dataset"].astype(str)))
+        pats = list(s["exclude_datasets"])
+        f = f[~f["volume_id"].astype(str).map(lambda v: any(fnmatch(ds.get(v, ""), p) for p in pats))]
+    if "bins" in s or "threshold" in s:
+        x = pd.to_numeric(f["value"], errors="coerce")
+        f = f[x.notna()].copy()
+        x = x[x.notna()].to_numpy(dtype=float)
+        f["value"] = (np.digitize(x, np.asarray(s["bins"], dtype=float)) if "bins" in s
+                      else (x >= float(s["threshold"]))).astype(float)
+    return f
+
+
+# labels an external tool computed from the scan itself (SynthSeg, the WMH segmenter, SynthStrip's brain mask and the
+# measures taken inside it): wrong whenever the scan or its processing is broken. Human and study-level labels
+# (radiologist reads, expert masks, demographics) stay on such scans.
+TOOL_SOURCES = {"synthseg_seg", "synthseg_measure", "synthseg_scan_measure", "wmh", "live", "brain_volume", "brain_mask"}
+
+
+def _mirror_synthrad_ct(f: pd.DataFrame, volumes: pd.DataFrame) -> pd.DataFrame:
+    """SynthRAD task-1 CT copies of the paired T1 MR's rows (same case id, one stored grid: the CT was resampled
+    through the MR's registration), so an MR-derived target reaches CT without trusting CT SynthSeg."""
+    v = volumes.astype({"case_id": str})
+    mr = v[v["dataset"] == "synthrad_t1w"].set_index("volume_id")["case_id"]
+    ct = v[v["dataset"] == "synthrad_ct"].drop_duplicates("case_id").set_index("case_id")["volume_id"]
+    m = f[f["volume_id"].isin(mr.index)].copy()
+    m["volume_id"] = m["volume_id"].map(mr).map(ct)
+    m = m.dropna(subset=["volume_id"])
+    return pd.concat([f, m.drop(columns=["split"], errors="ignore")], ignore_index=True)
+
+
+def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFrame | None = None,
+          cache_dir: Path | None = None, qc_drop: str = "tool") -> pd.DataFrame:
+    """``qc_drop``: training rows on scans failing the index's brain-mask or registration check (``brain_ok`` /
+    ``reg_ok``) that are dropped: ``tool`` (labels from ``TOOL_SOURCES``), ``all``, or ``none``."""
     # training sources read the label pool (``label_pool``): the pretraining pool, BHSD, and the volumes kept out of
     # SSL only (split == train rows, like every other source)
     pool, ssl_only = label_pool(volumes)
+    _PAIRS.clear()
     split = dict(zip(volumes["volume_id"].astype(str), volumes["split"].astype(str)))
     frames = []
     for t in reg.tasks:
@@ -488,10 +695,15 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
             use = s.get("use", "train" if t.trained else "eval")
             fn = SOURCES[s["source"]]
             src = pool if use == "train" else volumes
-            kw = {"workers": workers} if fn is src_brats_seg_volume else {}
-            f = fn(src, t, s, **kw)
+            kw = {"workers": workers} if fn is src_brats_seg_volume else \
+                {"workers": workers, "cache_dir": cache_dir} if fn is src_synth else {}
+            f = refine(fn(src, t, s, **kw), s, src)
+            if s.get("mirror_synthrad_ct"):       # after refine, so a ``modality: mri`` filter does not drop the copies
+                f = _mirror_synthrad_ct(f, src)
+            f["tool"] = s["source"] in TOOL_SOURCES
             if "split" not in f:
                 f["split"] = f["volume_id"].map(split)
+            f["split"] = f["split"].fillna(f["volume_id"].astype(str).map(split))    # mirrored rows
             f["task"] = t.id
             f["use"] = use
             frames.append(f)
@@ -499,6 +711,15 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
                   f"splits={f['split'].value_counts().to_dict()}", flush=True)
     out = pd.concat(frames, ignore_index=True)
     out = out.drop_duplicates(["volume_id", "task"], keep="first")
+    if qc_drop != "none":                  # index QC (brain mask / registration) failures
+        ok = lambda c: volumes[c].astype(str).str.lower().isin(["true", "1", "1.0"]) if c in volumes \
+            else pd.Series(True, index=volumes.index)  # noqa: E731
+        failing = set(volumes.loc[~(ok("brain_ok") & ok("reg_ok")), "volume_id"].astype(str))
+        drop = (out["use"] == "train") & out["volume_id"].astype(str).isin(failing) & \
+            (out["tool"].astype(bool) if qc_drop == "tool" else True)
+        print(f"[labels] index QC: {len(failing)} volumes fail brain_ok / reg_ok; {int(drop.sum())} training rows "
+              f"dropped ({qc_drop} labels)", flush=True)
+        out = out[~drop]
     if qc is not None:                     # registration QC: failing volumes lose their alignment-dependent targets
         bad = set(qc.loc[~qc["ok"], "volume_id"])
         sensitive = out["task"].map(registration_sensitive).astype(bool)
@@ -584,6 +805,8 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=OUT_DIR)
     ap.add_argument("--live-sample", type=int, default=1500)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--qc-drop", choices=["tool", "all", "none"], default="tool",
+                    help="labels dropped on scans failing brain_ok / reg_ok (build's qc_drop)")
     a = ap.parse_args()
     reg = load_registry(a.registry)
     volumes = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
@@ -591,7 +814,7 @@ def main() -> None:
     qc = registration_qc(volumes, a.workers, path=a.out / "regqc.parquet")
     print("[labels] registration QC fail share per family:\n"
           + (1 - qc.groupby("dataset_family")["ok"].mean()).round(3).to_string(), flush=True)
-    labels = build(reg, volumes, a.workers, qc)
+    labels = build(reg, volumes, a.workers, qc, cache_dir=a.out, qc_drop=a.qc_drop)
     stats = regression_stats(reg, labels, volumes, a.live_sample, a.workers)
     a.out.mkdir(parents=True, exist_ok=True)
     labels.to_parquet(a.out / "labels.parquet", index=False)

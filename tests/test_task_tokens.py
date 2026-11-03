@@ -187,3 +187,23 @@ def test_frozen_transfer_encodes_with_the_trained_task_tokens():
     assert torch.allclose(got, want, atol=1e-4)
     assert not torch.allclose(bare, want, atol=1e-3)
     assert load_brain3d(ck, CPU, pretrained=False).task_tokens is None
+
+
+@torch.no_grad()
+def test_shared_token_members_read_one_token_through_their_own_offsets():
+    cfg, plain = _model()
+    torch.manual_seed(0)
+    cfg["model"]["task_tokens"] = {"enabled": True, "share": True}
+    shared = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
+    trained = [REG.index[t] for t in REG.train_ids(cfg["tasks"])]
+    shared.set_token_tasks(trained)
+    hem = [REG.index[f"hemorrhage_{k}"] for k in ("any", "epidural", "subdural")]
+    assert len({int(shared.tok_of[i]) for i in hem}) == 1 and int(shared.tok_of[hem[0]]) == hem[0]
+    assert int(shared.tt_write.sum()) < int(plain.tt_write.sum())           # fewer tokens in the sequence
+    assert not bool(plain.tok_shared.any()) and plain.tok_of.tolist() == list(range(len(REG)))   # off by default
+    b = _prepared(cfg)
+    task = torch.tensor([hem, hem])
+    enc = shared.encode(b["x"], b["keep"], task=task)
+    z = shared.member(shared.slots(enc, task, b["keep"]), task)
+    logits = shared.heads(z, task)["binary"]
+    assert not torch.allclose(logits[:, 0], logits[:, 1])                  # same token, different answers

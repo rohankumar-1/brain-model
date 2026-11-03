@@ -1,0 +1,105 @@
+# R7 (2026-10-29): the target revision after the probes and E1. E1's config (configs/archive/multitask/e1_enclr1.yaml:
+# arm B + encoder LR 1.0 / layer decay 0.75) with only the targets changed:
+#   * dropped: ct_gray_white_ratio (test R2 negative in both runs) and the 11 volume tasks that duplicate a SynthSeg
+#     segmentation task (vol_<structure>, vol_log_ventricles, vol_log_csf); kept volumes that add a ratio /
+#     asymmetry / composite (Evans, parenchymal fraction, ventricle-brain ratio, gm/wm, deep GM, asymmetries, WMH);
+#   * CT dropped from the amygdala / hippocampus / putamen / thalamus / pallidum segmentations (registry
+#     ``modality: mri``: CT test-retest ICC <= 0.5, runs/diagnostics/synthseg_ct_reliability.py);
+#   * new graded targets: mmse_grade, autism_grade (the scores stay excluded), ventriculomegaly (Evans > 0.3),
+#     wmh_grade (< 5 / 5-15 / > 15 ml); mmse_grade / autism_grade make the OASIS / ABIDE evals seen (benchmark seen map);
+#   * glioma option B: glioma_survival_12m back (TCGA + UPENN-GBM, index.MULTITASK_FAMILIES) and glioma_mgmt (UPENN);
+#     UCSF-PDGM stays the external glioma test (IDH, grade, MGMT, survival);
+#   * shared task tokens (model.task_tokens.share): the six RSNA hemorrhage findings read one token, the three nested
+#     tumour regions another (registry ``token``);
+#   * 2026-10-29: initialised from BQ-v4 (configs/lejepa3d/v4_scratch.yaml, the end of its cosine) instead of v3; the
+#     nine RSNA-ICA aneurysm tasks (one shared token) join; the BraTS copies of UCSF-PDGM / UPENN-GBM patients are out
+#     of the label pool (index ``twin_drop``). Labels: labels/multitask_v4 (LABELS_OUT=.../multitask_v4
+#     sbatch jobs/multitask_labels.sbatch after the 2026-10-29 index).
+#   * 2026-10-30: labels/multitask_v5 (the 2026-10-30 index: SynthRAD CT + T1 MR in the pool, cone-beam CTs dropped;
+#     ADNI / PPMI held out). v5 = v4's rows + SynthRAD's + the self-supervised rows, which R7 does not train
+#     (tasks.ssl off). The first R7 start (v4 labels) was stopped at step ~1.2k: runs/multitask/r7_targets_aborted_v4labels.
+# Keys inherited from the SSL init checkpoint (encoder size, views, ...) are left to it (BrainQuery's
+# init_from fills them). Needs the labels/multitask_v5 table (see above).
+#   sbatch -p pi_dbertsim -c 12 --mem=96G -t 24:00:00 -J r7-targets \
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=1,CONFIG=configs/multitask/r7_targets.yaml jobs/train.sbatch
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v5
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 12
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+model:
+  init_from: runs/v4/scratch_s42/last.pt
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: false
+  fp32_residual: false
+  meta: {enabled: true, drop: 0.2}
+  task_tokens: {enabled: true, share: true, write_bias: 10.0, write_ramp_steps: 2000}
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+tasks:
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  group_weights: {}
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf]
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3}
+loss: {balance: uncertainty, ema_decay: 0.99, seg_stride: 2, uncertainty_clamp: 1.0}
+optim:
+  lr: 0.0003
+  enc_lr_mult: 1.0
+  layer_decay: 0.75
+  weight_decay: 0.05
+  warmup_steps: 1000
+  freeze_steps: 0
+  clip_grad: 1.0
+  batch_size: 8
+  schedule: cosine
+  decay_steps: null
+  betas: [0.9, 0.999]
+train: {max_steps: 12000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 12000, stop_poll: 20, best_metric: loss,
+  keep_full: false}
+output: {out_dir: runs/multitask/r7_targets, resume_from: null}

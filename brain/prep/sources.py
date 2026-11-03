@@ -667,6 +667,87 @@ def rsna_ica(rsna_zip: Path = DATASETS / "rsna_ica" / "rsna-intracranial-aneurys
     return cases
 
 
+IDA_KIND = {"t1": "t1w", "t2": "t2w", "flair": "flair", "flair2d": "flair"}
+
+
+def ida_pick(project: str) -> pd.DataFrame:
+    """The baseline images picked for a LONI IDA project (``<project>/tables/<project>_baseline_pick.csv``, owner-only:
+    data use agreement)."""
+    p = DATASETS / project / "tables" / f"{project}_baseline_pick.csv"
+    return pd.read_csv(p, low_memory=False) if p.exists() else pd.DataFrame()
+
+
+def ida(project: str) -> list[Case]:
+    """ADNI / PPMI baseline scans (held out; data use agreements forbid redistribution, so pool, store and work dirs
+    stay owner-only) read straight from the IDA Advanced Download zips by byte offsets
+    (``<PROJECT>/<subject>/<description>/<date>/I<image id>/*.dcm``; prep runs with ``BRAIN_DICOM_READER=dcm2niix``).
+    case_id = IDA image ID; the subject comes from the pick table (``index.ida_subjects``). The member index is
+    cached under ``work/<project>``."""
+    import json
+    import zipfile
+
+    pick = ida_pick(project)
+    zips = sorted((DATASETS / project / "zips").glob(f"{project}_part_*.zip"))
+    if pick.empty or not zips:
+        return []
+    work = SCRATCH / "work" / project
+    work.mkdir(parents=True, exist_ok=True)
+    idx_path = work / "image_members.json"
+    if not idx_path.exists():
+        index: dict[str, list] = {}
+        for z in zips:
+            with zipfile.ZipFile(z) as zf:
+                for i in zf.infolist():
+                    parts = i.filename.split("/")
+                    if len(parts) > 2 and i.filename.lower().endswith(".dcm"):
+                        index.setdefault(parts[-2], [str(z), []])[1].append(
+                            [i.filename, i.header_offset, i.compress_size, i.compress_type])
+        idx_path.write_text(json.dumps(index))
+    index = json.loads(idx_path.read_text())
+    cases = []
+    for iid, kind in zip("I" + pick["Image ID"].astype(str).str.lstrip("I"), pick["kind"].astype(str)):
+        if iid in index and kind in IDA_KIND:
+            zip_path, members = index[iid]
+            cases.append(Case(f"{project}_{IDA_KIND[kind]}", iid, "mri", zip_path=zip_path,
+                              members=tuple(tuple(m) for m in sorted(members))))
+    return cases
+
+
+
+SYNTHRAD_ROOT = DATASETS / "synthrad2023"
+
+
+def fastmri(root: Path = DATASETS / "fastmri_brain" / "nifti") -> list[Case]:
+    """The 1,001 fastMRI+ annotated brain scans (NYU clinical 2D axial FLAIR / T1 / T1 post-contrast, 1.5 and 3 T,
+    0.69 mm in-plane, 5 mm slices covering ~70-80 mm), staged as images by ``brain.prep.fastmri`` (geometry by
+    convention, checked against the template) from the pool zips ``brain.prep.fastmri_fetch`` kept. Data use
+    agreement (NYU fastMRI): prep with umask 077 (jobs/prep_fastmri.sbatch)."""
+    from brain.prep.fastmri import DATASETS_OF
+
+    return [Case(ds, p.name.removesuffix(".nii.gz"), "mri", p)
+            for ds in DATASETS_OF.values() for p in sorted((root / ds).glob("*.nii.gz"))]
+
+
+def synthrad(root: Path = SYNTHRAD_ROOT) -> list[Case]:
+    """SynthRAD2023 brain training set (Zenodo 7260705, CC BY-NC 4.0; radiotherapy patients of three Dutch centres,
+    the centre is the id's third letter): task 1 = CT + 3D T1 MR (60 with gadolinium labelled, the rest RT-planning
+    TFE), task 2 = CT + cone-beam CT, rigidly co-registered by the challenge. Each patient's secondary scan takes the
+    primary's registration (``ref``) so both land on one store grid: task 1 on the MR (MR registers to the template
+    more reliably), task 2 on the CT. Read from ``Task{1,2}/brain/<id>/`` as extracted by jobs/prep_synthrad.sbatch
+    (the pool holds only the original zips); the body ``mask.nii.gz`` is not used."""
+    cases = []
+    for task, (ref_name, ref_ds, ref_mod), (sec_name, sec_ds) in (
+            ("Task1", ("mr", "synthrad_t1w", "mri"), ("ct", "synthrad_ct")),
+            ("Task2", ("ct", "synthrad_ct", "ct"), ("cbct", "synthrad_cbct"))):
+        for d in sorted((root / task / "brain").glob("[12]B*")):
+            ref, sec = d / f"{ref_name}.nii.gz", d / f"{sec_name}.nii.gz"
+            if not ref.exists():
+                continue
+            cases.append(Case(ref_ds, d.name, ref_mod, ref))
+            if sec.exists():
+                cases.append(Case(sec_ds, d.name, "ct", sec, ref=ref))
+    return cases
+
 def hemseg(root: Path = DATASETS / "hemseg" / "extracted",
            rsna_zip: Path = DATASETS / "rsna" / "rsna-ihd-dataset.zip") -> list[Case]:
     """HemSeg-500: 525 RSNA studies with voxel masks of their one bleed (352 IPH-only, 173 IVH-only by RSNA's labels,

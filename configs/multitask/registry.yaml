@@ -96,32 +96,118 @@ tasks:
                                      fomo_yale_mets: "brain metastasis"}}
 
   # ---------------------------------------------------------------- CT hemorrhage (RSNA, study level)
+  # The six findings share one task token (``token``, used with model.task_tokens.share): one token answers them all,
+  # each read through its own offset.
   - id: hemorrhage_any
+    token: hemorrhage_findings
     type: binary
     descriptions:
       - "Is there any intracranial hemorrhage on this head CT?"
       - "Detect bleeding inside the skull."
     sources: [{source: rsna, subtype: any}]
   - id: hemorrhage_epidural
+    fine: true
+    token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an epidural hematoma?", "Detect blood between the skull and the dura."]
     sources: [{source: rsna, subtype: epidural}]
   - id: hemorrhage_intraparenchymal
+    token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an intraparenchymal hemorrhage?", "Detect bleeding within the brain tissue."]
     sources: [{source: rsna, subtype: intraparenchymal}]
   - id: hemorrhage_intraventricular
+    token: hemorrhage_findings
     type: binary
     descriptions: ["Is there intraventricular hemorrhage?", "Detect blood inside the ventricles."]
     sources: [{source: rsna, subtype: intraventricular}]
   - id: hemorrhage_subarachnoid
+    token: hemorrhage_findings
     type: binary
     descriptions: ["Is there subarachnoid hemorrhage?", "Detect blood in the subarachnoid space and sulci."]
     sources: [{source: rsna, subtype: subarachnoid}]
   - id: hemorrhage_subdural
+    fine: true
+    token: hemorrhage_findings
     type: binary
     descriptions: ["Is there a subdural hematoma?", "Detect a crescent of blood between the dura and the brain."]
     sources: [{source: rsna, subtype: subdural}]
+
+  # ---------------------------------------------------------------- intracranial aneurysm (RSNA-ICA, 2026-10-29)
+  # CTA, TOF MRA, T2 and post-contrast T1 series; train split only (the test split is the downstream
+  # rsna_ica_{cta,mr}_aneurysm evaluation). Locations merge left and right (the loader flips scans); all nine share
+  # one task token.
+  - id: aneurysm_present
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an intracranial aneurysm?", "Detect a saccular aneurysm of the cerebral arteries."]
+    sources: [{source: rsna_ica, finding: Aneurysm Present}]
+  - id: aneurysm_ica_infraclinoid
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an aneurysm of the infraclinoid internal carotid artery?"]
+    sources: [{source: rsna_ica, finding: ica_infraclinoid}]
+  - id: aneurysm_ica_supraclinoid
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an aneurysm of the supraclinoid internal carotid artery?"]
+    sources: [{source: rsna_ica, finding: ica_supraclinoid}]
+  - id: aneurysm_mca
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there a middle cerebral artery aneurysm?"]
+    sources: [{source: rsna_ica, finding: mca}]
+  - id: aneurysm_acom
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an anterior communicating artery aneurysm?"]
+    sources: [{source: rsna_ica, finding: acom}]
+  - id: aneurysm_aca
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an anterior cerebral artery aneurysm?"]
+    sources: [{source: rsna_ica, finding: aca}]
+  - id: aneurysm_pcom
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there a posterior communicating artery aneurysm?"]
+    sources: [{source: rsna_ica, finding: pcom}]
+  - id: aneurysm_basilar_tip
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an aneurysm at the basilar tip?"]
+    sources: [{source: rsna_ica, finding: basilar_tip}]
+  - id: aneurysm_posterior_other
+    fine: true
+    token: aneurysm_findings
+    type: binary
+    descriptions: ["Is there an aneurysm elsewhere in the posterior circulation?"]
+    sources: [{source: rsna_ica, finding: posterior_other}]
+  # Where (2026-10-31; brain.prep.rsna_ica_vessels, masks on the stored grid through each scan's registration): a 4 mm
+  # ball per annotated aneurysm (train_localizers.csv; empty for scans without one) and the organisers' vessel masks
+  # (178 series, 13 vessel labels merged: the label-to-vessel map is unverified, and sided labels would swap under the
+  # flip). ``fine``: small targets, kept sharp under aug.task_aware.
+  - id: aneurysm_location
+    token: aneurysm_findings
+    type: segmentation
+    fine: true
+    sparse: true           # R10's plain BCE + Dice collapsed to an empty map: losses.sparse_seg_loss (2026-11-01)
+    descriptions: ["Mark each intracranial aneurysm.", "Where are the saccular aneurysms of the cerebral arteries?"]
+    sources: [{source: store_mask, families: [rsna_ica], mask: aneurysm, ids: [1, 2, 3, 4, 5, 6, 7, 8]}]
+  - id: seg_vessels
+    type: segmentation
+    group: vessels
+    fine: true
+    descriptions: ["Segment the arteries of the circle of Willis.", "Outline the major intracranial arteries."]
+    sources: [{source: store_mask, families: [rsna_ica], mask: cow, ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]}]
 
   # ---------------------------------------------------------------- lesion segmentation
   # BHSD: 192 RSNA studies with voxel masks (1 EDH, 2 IPH, 3 IVH, 4 SAH, 5 SDH); HemSeg-500: 519 more (IPH- or
@@ -172,21 +258,21 @@ tasks:
     descriptions:
       - "Estimate the fraction of the intracranial space occupied by cerebrospinal fluid on CT."
       - "How enlarged are the ventricles and sulci (CSF fraction) on this head CT?"
-    sources: [{source: live, name: ct_csf_frac, modality: ct}]
+    sources: [{source: live, name: ct_csf_frac, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   - id: ct_brain_density
     type: regression
     descriptions:
       - "Estimate the mean attenuation of brain tissue in Hounsfield units."
       - "What is the typical CT density of the brain parenchyma?"
-    sources: [{source: live, name: ct_brain_hu, modality: ct}]
+    sources: [{source: live, name: ct_brain_hu, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   - id: ct_calcification
     type: regression
     descriptions:
       - "Estimate the burden of intracranial calcification on this head CT."
       - "How much calcification is there in the basal ganglia, pineal, choroid plexus and vessels?"
-    sources: [{source: live, name: ct_calcification, modality: ct}]
+    sources: [{source: live, name: ct_calcification, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   - id: ct_skull_density
     type: regression
@@ -194,7 +280,7 @@ tasks:
     descriptions:
       - "Estimate the density of the skull bone in Hounsfield units."
       - "How dense is the calvarium (opportunistic bone density)?"
-    sources: [{source: live, name: ct_skull_hu, modality: ct}]
+    sources: [{source: live, name: ct_skull_hu, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   # ---------------------------------------------------------------- clinical measures from SynthSeg (brain.multitask.measures)
   - id: evans_index
@@ -203,16 +289,36 @@ tasks:
     descriptions:
       - "Estimate the Evans index: frontal horn width over maximal brain width."
       - "How enlarged are the frontal horns of the lateral ventricles (ventriculomegaly)?"
-    sources: [{source: synthseg_scan_measure, measure: evans_index}]
+    sources: [{source: synthseg_scan_measure, measure: evans_index, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
 
-  # WMH-SynthSeg soft volume, FLAIR / T2 only (T1 does not show WMH; tumour cohorts excluded: oedema reads as WMH).
-  # Pilot: age rho 0.52 on FLAIR; BrainLat MS > AD > FTD > CN. The WMH challenge stays held out for evaluation.
+  # WMH-SynthSeg soft volume (tumour cohorts excluded: oedema reads as WMH). 2026-11-01: adult FLAIR only. Against the
+  # WMH challenge's expert masks it ranks burden (Spearman 0.84) but over-calls it 1.8x, site-dependently; it calls
+  # children's developing white matter WMH and on T2 does not track age (runs/diagnostics/wmh_validate.py).
   - id: vol_wmh
     type: regression
     descriptions:
       - "Estimate the white matter hyperintensity burden (log volume)."
       - "How much small-vessel white matter disease is visible on this FLAIR or T2 scan?"
-    sources: [{source: wmh}]
+    sources: [{source: wmh, contrasts: [flair, t2f], min_age: 18}]
+
+  # Graded clinical thresholds of scalar targets (labels.refine: ``threshold`` / ``bins``).
+  - id: ventriculomegaly
+    type: binary
+    group: anatomy_volume
+    descriptions:
+      - "Are the lateral ventricles enlarged (Evans index above 0.3)?"
+      - "Is there ventriculomegaly, as in hydrocephalus or marked atrophy?"
+    sources: [{source: synthseg_scan_measure, measure: evans_index, threshold: 0.3, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
+  - id: wmh_grade
+    type: multiclass
+    group: anatomy_volume
+    classes: ["minimal (< 5 ml)", "moderate (5-15 ml)", "severe (> 15 ml)"]
+    descriptions:
+      - "Grade the white matter hyperintensity burden on this FLAIR or T2 scan."
+      - "How much small-vessel white matter disease is there: minimal, moderate or severe?"
+    # NOT TRAINED from R11 (excluded): fixed ml cut-offs on a tool that over-calls 1.8x put half the scans in the wrong
+    # grade (51% agreement with expert masks); kept here so R7-R10 checkpoints still load
+    sources: [{source: wmh, raw: true, bins: [5, 15], contrasts: [flair, t2f], min_age: 18}]
 
   - id: ct_gray_white_ratio
     type: regression
@@ -220,10 +326,11 @@ tasks:
     descriptions:
       - "Estimate the grey-to-white matter attenuation ratio on this head CT."
       - "How well preserved is grey-white matter differentiation (loss suggests ischaemia or hypoxia)?"
-    sources: [{source: synthseg_scan_measure, measure: ct_gray_white, modality: ct}]
+    sources: [{source: synthseg_scan_measure, measure: ct_gray_white, modality: ct, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
 
   # ---------------------------------------------------------------- tumour (BraTS subject segmentations)
   - id: whole_tumor
+    token: tumor_regions
     type: segmentation
     descriptions:
       - "Segment the whole tumor including the surrounding edema."
@@ -232,12 +339,14 @@ tasks:
       - {source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 2, 3]}
       - {source: mask_column, families: [msd_braintumor], column: mask_seg, ids: [1, 2, 3], use: eval}
   - id: tumor_core
+    token: tumor_regions
     type: segmentation
     descriptions:
       - "Segment the tumor core: enhancing and necrotic tumor, without edema."
       - "Outline the solid and necrotic tumor core."
     sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 3]}]
   - id: enhancing_tumor
+    token: tumor_regions
     type: segmentation
     descriptions:
       - "Segment the contrast-enhancing tumor."
@@ -264,7 +373,17 @@ tasks:
     descriptions:
       - "Will this glioma patient survive beyond one year?"
       - "Predict 12-month overall survival from the pre-operative tumor appearance."
-    sources: [{source: downstream, task: gli_survival_12m}]
+    sources:
+      - {source: downstream, task: gli_survival_12m}
+      - {source: downstream, task: upenn_survival_12m}       # glioma option B: UPENN-GBM trains, UCSF-PDGM tests
+
+  - id: glioma_mgmt
+    type: binary
+    group: tumor
+    descriptions:
+      - "Is the MGMT promoter of this glioblastoma methylated?"
+      - "Predict MGMT methylation status from the pre-operative imaging."
+    sources: [{source: downstream, task: upenn_mgmt}]
 
   - id: glioma_lower_grade
     type: binary
@@ -282,6 +401,129 @@ tasks:
       - "Predict the IDH mutation status of the tumor from imaging."
     sources: [{source: downstream, task: gli_idh}]
 
+  # ---------------------------------------------------------------- self-supervised (2026-10-29, phase 1)
+  # Targets computed from the scan itself (``ssl: true``; trained only with ``tasks.ssl``). Dense maps from the shared
+  # decoder (``type: dense``, Huber on the canonical-window intensities at the decoder stride). masked_recon: a share
+  # ``tasks.mask_p`` of the samples hide ``tasks.mask_ratio`` of their foreground tokens (blanked voxels, SimMIM-style)
+  # and ask only self-supervised tasks; the hidden voxels are the target. synth_*: another contrast of the same
+  # session on the identical grid (shared registration: BraTS, UPENN-GBM; SynthRAD CT / MR), as stored.
+  - id: masked_recon
+    ssl: true
+    type: dense
+    descriptions:
+      - "Reconstruct the hidden regions of this scan."
+      - "Fill in the masked parts of the image."
+    sources: [{source: ssl_recon}]
+  - id: synth_t1
+    ssl: true
+    type: dense
+    token: contrast_synthesis
+    descriptions: ["Synthesise the T1-weighted image of this session.", "What would the native T1 scan look like?"]
+    sources: [{source: synth, contrast: t1}]
+  - id: synth_t1c
+    ssl: true
+    type: dense
+    token: contrast_synthesis
+    descriptions: ["Synthesise the post-contrast T1-weighted image of this session.", "What would the contrast-enhanced T1 look like?"]
+    sources: [{source: synth, contrast: t1c}]
+  - id: synth_t2
+    ssl: true
+    type: dense
+    token: contrast_synthesis
+    descriptions: ["Synthesise the T2-weighted image of this session.", "What would the T2 scan look like?"]
+    sources: [{source: synth, contrast: t2}]
+  - id: synth_flair
+    ssl: true
+    type: dense
+    token: contrast_synthesis
+    descriptions: ["Synthesise the FLAIR image of this session.", "What would the FLAIR scan look like?"]
+    sources: [{source: synth, contrast: flair}]
+  - id: synth_ct
+    ssl: true
+    type: dense
+    token: contrast_synthesis
+    descriptions: ["Synthesise the CT of this head.", "What would a non-contrast CT of this head look like?"]
+    sources: [{source: synth, contrast: ct}]
+
+  # ---------------------------------------------------------------- radiology findings (fastMRI+, 2026-11-02)
+  # Clinical 2D NYU MRI read by subspecialty radiologists (github.com/microsoft/fastmri-plus): 1 = the file carries
+  # one of the finding's labels, 0 = reviewed without them (brain.prep.fastmri_labels). Focal findings also train
+  # the token map on their boxes (data.fastmri_boxes, loss.box_weight; data.BOX_TASKS).
+  - id: mri_normal_for_age
+    group: radiology
+    token: radiology_findings
+    type: binary
+    descriptions:
+      - "Is this brain MRI normal for the patient's age?"
+      - "Read the scan as a radiologist: anything beyond age-expected change?"
+    sources: [{source: fastmri_findings, finding: mri_normal_for_age}]
+  - id: mri_small_vessel_disease
+    group: radiology
+    token: radiology_findings
+    type: binary
+    descriptions:
+      - "Are there chronic small-vessel ischemic white-matter changes?"
+      - "Is there global chronic white matter ischemic change?"
+    sources: [{source: fastmri_findings, finding: mri_small_vessel_disease}]
+  - id: mri_wm_lesion
+    group: radiology
+    token: radiology_findings
+    fine: true
+    type: binary
+    descriptions:
+      - "Are there focal white-matter lesions?"
+      - "Find nonspecific white matter hyperintensities or lesions."
+    sources: [{source: fastmri_findings, finding: mri_wm_lesion}]
+  - id: mri_postop
+    group: radiology
+    token: radiology_findings
+    needs_skull: true
+    type: binary
+    descriptions:
+      - "Has this patient had brain surgery or treatment (craniotomy, resection, post-treatment change)?"
+      - "Are there post-surgical or post-treatment changes?"
+    sources: [{source: fastmri_findings, finding: mri_postop}]
+  - id: mri_mass
+    group: radiology
+    token: radiology_findings
+    type: binary
+    descriptions:
+      - "Is there an intra- or extra-axial mass?"
+      - "Detect a mass lesion in or around the brain."
+    sources: [{source: fastmri_findings, finding: mri_mass}]
+  - id: mri_edema
+    group: radiology
+    token: radiology_findings
+    type: binary
+    descriptions:
+      - "Is there brain edema?"
+      - "Detect vasogenic or cytotoxic edema."
+    sources: [{source: fastmri_findings, finding: mri_edema}]
+  - id: mri_enlarged_ventricles
+    group: radiology
+    token: radiology_findings
+    type: binary
+    descriptions:
+      - "Are the ventricles enlarged?"
+      - "Is there ventriculomegaly on this MRI?"
+    sources: [{source: fastmri_findings, finding: mri_enlarged_ventricles}]
+  - id: mri_infarct
+    group: radiology
+    token: radiology_findings
+    fine: true
+    type: binary
+    descriptions:
+      - "Is there an old infarct (lacune or encephalomalacia)?"
+      - "Detect lacunar infarcts or encephalomalacia."
+    sources: [{source: fastmri_findings, finding: mri_infarct}]
+  - id: mri_artifact
+    group: radiology
+    token: radiology_findings
+    type: binary
+    descriptions:
+      - "Is there an image artifact (motion or other)?"
+      - "Is this scan degraded by artifact?"
+    sources: [{source: fastmri_findings, finding: mri_artifact}]
   # ---------------------------------------------------------------- clinical scores (pretraining-pool cohorts)
   - id: mmse
     type: regression
@@ -293,6 +535,24 @@ tasks:
       - {source: downstream, task: oasis1_mmse}
       - {source: downstream, task: oasis2_mmse}
 
+  - id: mmse_grade
+    type: multiclass
+    group: clinical_scores
+    classes: ["dementia range (MMSE <= 20)", "mild impairment (MMSE 21-26)", "normal (MMSE >= 27)"]
+    descriptions:
+      - "Grade global cognition: normal, mildly impaired, or in the dementia range."
+      - "Which MMSE band is this person likely in?"
+    sources:
+      - {source: downstream, task: oasis1_mmse, bins: [21, 27]}
+      - {source: downstream, task: oasis2_mmse, bins: [21, 27]}
+  - id: autism_grade
+    type: multiclass
+    group: clinical_scores
+    classes: ["low (ADOS CSS <= 5)", "moderate (CSS 6-7)", "high (CSS 8-10)"]
+    descriptions:
+      - "Grade this autistic participant's symptom severity: low, moderate or high."
+      - "Which ADOS calibrated-severity band fits this person?"
+    sources: [{source: downstream, task: abide_ados, bins: [6, 8]}]
   - id: autism_severity
     type: regression
     group: clinical_scores
@@ -305,126 +565,131 @@ tasks:
   # ---------------------------------------------------------------- SynthSeg-robust 2.0 (brain.prep.synthseg)
   # Structure masks (left + right merged) and template-space volumes / ratios / asymmetries of QC-passed scans.
   # Template space = affine-registered, so volumes are already normalised for head size.
+  # SynthRAD CT (2026-11-01): every SynthSeg target comes from the paired T1 MR on the same grid (mirror_synthrad_ct),
+  # never from CT SynthSeg, which failed on some SynthRAD CTs (CT-vs-MR Dice down to 0 per structure).
+  # Small structures (hippocampus, amygdala, thalamus, basal ganglia, deep GM) drop CT thicker than 2 mm (2026-10-30):
+  # on ~5 mm RSNA CT their test-retest ICC is 0.2-0.8, while on 1 mm SynthRAD CT the masks match the same head's MR
+  # SynthSeg (median Dice 0.79-0.92; runs/diagnostics/synthrad_ct_synthseg.py).
   - id: seg_ventricles
     type: segmentation
     descriptions: ["Segment the ventricular system (lateral, third and fourth ventricles).", "Outline the cerebrospinal-fluid-filled ventricles of the brain."]
-    sources: [{source: synthseg_seg, group: ventricles}]
+    sources: [{source: synthseg_seg, group: ventricles, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: seg_hippocampus
     type: segmentation
     descriptions: ["Segment both hippocampi.", "Outline the hippocampal formation in the medial temporal lobes."]
-    sources: [{source: synthseg_seg, group: hippocampus}]
+    sources: [{source: synthseg_seg, group: hippocampus, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]   # thick CT: test-retest ICC <= 0.5
   - id: seg_amygdala
     type: segmentation
     descriptions: ["Segment both amygdalae.", "Outline the amygdala in each medial temporal lobe."]
-    sources: [{source: synthseg_seg, group: amygdala}]
+    sources: [{source: synthseg_seg, group: amygdala, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]   # thick CT: test-retest ICC <= 0.5
   - id: seg_thalamus
     type: segmentation
     descriptions: ["Segment both thalami.", "Outline the thalamus on each side of the third ventricle."]
-    sources: [{source: synthseg_seg, group: thalamus}]
+    sources: [{source: synthseg_seg, group: thalamus, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]   # thick CT: test-retest ICC <= 0.5
   - id: seg_caudate
     type: segmentation
     descriptions: ["Segment the caudate nuclei.", "Outline the caudate nucleus beside each lateral ventricle."]
-    sources: [{source: synthseg_seg, group: caudate}]
+    sources: [{source: synthseg_seg, group: caudate, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: seg_putamen
     type: segmentation
     descriptions: ["Segment the putamen on both sides.", "Outline the putamen of the basal ganglia."]
-    sources: [{source: synthseg_seg, group: putamen}]
+    sources: [{source: synthseg_seg, group: putamen, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]   # thick CT: test-retest ICC <= 0.5
   - id: seg_pallidum
     type: segmentation
     descriptions: ["Segment the globus pallidus on both sides.", "Outline the pallidum medial to the putamen."]
-    sources: [{source: synthseg_seg, group: pallidum}]
+    sources: [{source: synthseg_seg, group: pallidum, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]   # thick CT: test-retest ICC <= 0.5
   - id: seg_cortex
     type: segmentation
     descriptions: ["Segment the cerebral cortex (grey matter).", "Outline the cortical grey-matter ribbon of both hemispheres."]
-    sources: [{source: synthseg_seg, group: cortex}]
+    sources: [{source: synthseg_seg, group: cortex, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: seg_white_matter
     type: segmentation
     descriptions: ["Segment the cerebral white matter.", "Outline the white matter of both cerebral hemispheres."]
-    sources: [{source: synthseg_seg, group: white_matter}]
+    sources: [{source: synthseg_seg, group: white_matter, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: seg_cerebellum
     type: segmentation
     descriptions: ["Segment the cerebellum.", "Outline the cerebellar cortex and white matter."]
-    sources: [{source: synthseg_seg, group: cerebellum}]
+    sources: [{source: synthseg_seg, group: cerebellum, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: seg_brainstem
     type: segmentation
     descriptions: ["Segment the brainstem.", "Outline the midbrain, pons and medulla."]
-    sources: [{source: synthseg_seg, group: brainstem}]
+    sources: [{source: synthseg_seg, group: brainstem, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: seg_csf
     type: segmentation
     descriptions: ["Segment the extraventricular cerebrospinal fluid.", "Outline the CSF in the sulci and cisterns outside the ventricles."]
-    sources: [{source: synthseg_seg, group: csf}]
+    sources: [{source: synthseg_seg, group: csf, modality: mri, mirror_synthrad_ct: true}]   # CT CSF: Dice 0.47 vs MR even at 1 mm; SynthRAD CT gets its MR's mask
   - id: vol_log_ventricles
     type: regression
     descriptions: ["Estimate the (log) volume of the ventricles, normalised for head size.", "How enlarged are the ventricles?"]
-    sources: [{source: synthseg_measure, measure: log_ventricles}]
+    sources: [{source: synthseg_measure, measure: log_ventricles, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_log_csf
     type: regression
     descriptions: ["Estimate the (log) volume of extraventricular CSF, normalised for head size.", "How much CSF fills the sulci and cisterns?"]
-    sources: [{source: synthseg_measure, measure: log_csf}]
+    sources: [{source: synthseg_measure, measure: log_csf, modality: mri, mirror_synthrad_ct: true}]
   - id: vol_hippocampus
     type: regression
     descriptions: ["Estimate the volume of the hippocampi, normalised for head size.", "How large are the hippocampi (atrophy)?"]
-    sources: [{source: synthseg_measure, measure: hippocampus}]
+    sources: [{source: synthseg_measure, measure: hippocampus, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_amygdala
     type: regression
     descriptions: ["Estimate the volume of the amygdalae, normalised for head size.", "How large are the amygdalae?"]
-    sources: [{source: synthseg_measure, measure: amygdala}]
+    sources: [{source: synthseg_measure, measure: amygdala, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_thalamus
     type: regression
     descriptions: ["Estimate the volume of the thalami, normalised for head size.", "How large are the thalami?"]
-    sources: [{source: synthseg_measure, measure: thalamus}]
+    sources: [{source: synthseg_measure, measure: thalamus, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_caudate
     type: regression
     descriptions: ["Estimate the volume of the caudate nuclei, normalised for head size.", "How large are the caudate nuclei?"]
-    sources: [{source: synthseg_measure, measure: caudate}]
+    sources: [{source: synthseg_measure, measure: caudate, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_putamen
     type: regression
     descriptions: ["Estimate the volume of the putamen, normalised for head size.", "How large is the putamen?"]
-    sources: [{source: synthseg_measure, measure: putamen}]
+    sources: [{source: synthseg_measure, measure: putamen, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_cortex
     type: regression
     descriptions: ["Estimate the cerebral cortical grey-matter volume, normalised for head size.", "How much cortical grey matter is there?"]
-    sources: [{source: synthseg_measure, measure: cortex}]
+    sources: [{source: synthseg_measure, measure: cortex, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_white_matter
     type: regression
     descriptions: ["Estimate the cerebral white-matter volume, normalised for head size.", "How much cerebral white matter is there?"]
-    sources: [{source: synthseg_measure, measure: white_matter}]
+    sources: [{source: synthseg_measure, measure: white_matter, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_cerebellum
     type: regression
     descriptions: ["Estimate the cerebellar volume, normalised for head size.", "How large is the cerebellum?"]
-    sources: [{source: synthseg_measure, measure: cerebellum}]
+    sources: [{source: synthseg_measure, measure: cerebellum, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_brainstem
     type: regression
     descriptions: ["Estimate the brainstem volume, normalised for head size.", "How large is the brainstem?"]
-    sources: [{source: synthseg_measure, measure: brainstem}]
+    sources: [{source: synthseg_measure, measure: brainstem, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_deep_gm
     type: regression
     descriptions: ["Estimate the deep grey-matter volume (basal ganglia, thalamus, ventral diencephalon), normalised for head size.", "How much deep grey matter is there?"]
-    sources: [{source: synthseg_measure, measure: deep_gm}]
+    sources: [{source: synthseg_measure, measure: deep_gm, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_parenchymal_fraction
     type: regression
     descriptions: ["Estimate the brain parenchymal fraction: brain tissue over brain plus CSF.", "What fraction of the intracranial space is brain tissue?"]
-    sources: [{source: synthseg_measure, measure: parenchymal_fraction}]
+    sources: [{source: synthseg_measure, measure: parenchymal_fraction, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_log_ventricle_brain_ratio
     type: regression
     descriptions: ["Estimate the ventricle-to-brain volume ratio (log).", "How large are the ventricles relative to the brain?"]
-    sources: [{source: synthseg_measure, measure: log_ventricle_brain_ratio}]
+    sources: [{source: synthseg_measure, measure: log_ventricle_brain_ratio, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_gm_wm_ratio
     type: regression
     descriptions: ["Estimate the grey-to-white matter volume ratio.", "What is the ratio of grey matter to white matter?"]
-    sources: [{source: synthseg_measure, measure: gm_wm_ratio}]
+    sources: [{source: synthseg_measure, measure: gm_wm_ratio, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_hippocampus_asym
     type: regression
     descriptions: ["Quantify left-right asymmetry of hippocampal volume.", "How different are the left and right hippocampi in size?"]
-    sources: [{source: synthseg_measure, measure: hippocampus_asym}]
+    sources: [{source: synthseg_measure, measure: hippocampus_asym, ct_max_thick_mm: 2.0, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_ventricle_asym
     type: regression
     descriptions: ["Quantify left-right asymmetry of the lateral ventricles.", "How different are the left and right lateral ventricles in size?"]
-    sources: [{source: synthseg_measure, measure: ventricle_asym}]
+    sources: [{source: synthseg_measure, measure: ventricle_asym, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
   - id: vol_cortex_asym
     type: regression
     descriptions: ["Quantify left-right asymmetry of cortical volume.", "How different are the cortical volumes of the two hemispheres?"]
-    sources: [{source: synthseg_measure, measure: cortex_asym}]
+    sources: [{source: synthseg_measure, measure: cortex_asym, exclude_datasets: [synthrad_ct], mirror_synthrad_ct: true}]
 
   # ================================================================ held out (never trained; few-shot evaluation)
   - id: cq500_hemorrhage

@@ -17,6 +17,7 @@ from brain.downstream.tasks import (
     FROZEN_TASKS,
     ICH_REGIONS,
     REGRESSION_TASKS,
+    RSNA_ICA_LOCATIONS,
     RSNA_LABELS,
     SEGMENTATION_TASKS,
     TASK_NAMES,
@@ -24,6 +25,7 @@ from brain.downstream.tasks import (
     load_msd_task,
     load_rsna_task,
     load_task,
+    rsna_ica_labels,
     msd_join_key,
 )
 
@@ -74,12 +76,16 @@ TASK_DATASETS = {
     "abide_ados": {"abide1"},
     "atlas_lesion_volume": {"atlas"},
     "atlas_lesion_side": {"atlas"},
+    **{t: {"instance"} for t in ("instance_large_ich", "instance_ivh", "instance_infratentorial", "instance_side")},
     "atlas_days_post_stroke": {"atlas"},
     "ms3seg_lesion_load": {"ms3seg_flair"},
     "gli_survival_12m": {"brats2023_gli_t1c"},
     "gli_lgg": {"brats2023_gli_t1c"},
     "gli_idh": {"brats2023_gli_t1c"},
     **{t: {"ucsf_pdgm_t1c"} for t in ("ucsf_survival_12m", "ucsf_lgg", "ucsf_idh", "ucsf_mgmt")},
+    **{t: {"upenn_gbm_t1c"} for t in ("upenn_survival_12m", "upenn_mgmt")},
+    "rsna_ica_cta_aneurysm": {"rsna_ica_cta"},
+    "rsna_ica_mr_aneurysm": {"rsna_ica_mra", "rsna_ica_t2w"},
 }
 
 TASK_TYPES = {
@@ -150,6 +156,12 @@ def _volumes() -> pd.DataFrame:
         _row("brats2023_gli_t1c", "mri:BraTS-GLI-00100-000-t1c", case_id="BraTS-GLI-00100-000-t1c"),
         _row("ucsf_pdgm_t1c", "ucsf_pdgm_t1c:UCSF-PDGM-0004_t1c", case_id="UCSF-PDGM-0004_t1c"),
         _row("ucsf_pdgm_t1c", "ucsf_pdgm_t1c:UCSF-PDGM-0429_FU003d_t1c", case_id="UCSF-PDGM-0429_FU003d_t1c"),
+        _row("upenn_gbm_t1c", "upenn_gbm_t1c:UPENN-GBM-00001_11_t1c", case_id="UPENN-GBM-00001_11_t1c"),
+        _row("upenn_gbm_t1c", "upenn_gbm_t1c:UPENN-GBM-00001_21_t1c", case_id="UPENN-GBM-00001_21_t1c"),
+        _row("upenn_gbm_t1c", "upenn_gbm_t1c:UPENN-GBM-00002_11_t1c", case_id="UPENN-GBM-00002_11_t1c"),
+        _row("rsna_ica_cta", "rsna_ica_cta:1.2.1", modality="ct"),
+        _row("rsna_ica_mra", "rsna_ica_mra:1.2.2"),
+        _row("rsna_ica_t2w", "rsna_ica_t2w:1.2.3"),
     ]
     for name, (col, path) in SEG_MASK.items():
         ds = next(iter(TASK_DATASETS[name]))
@@ -221,6 +233,10 @@ def _write_clinical(root: Path) -> Path:
                   "right_ml": [10.0]}).to_csv(root / "atlas" / "mask_stats.tsv", sep="\t", index=False)
     pd.DataFrame({"participant_id": ["v0"], "DAYS_POST_STROKE": [400.0], "SITE": ["R001"]}).to_csv(
         root / "atlas" / "metadata.tsv", sep="\t", index=False)
+    (root / "instance").mkdir()
+    pd.DataFrame({"volume_id": ["instance:v0"], "case_id": ["v0"], "ich_ml": [40.0], "left_ml": [40.0],
+                  "right_ml": [0.0], "ventricle_ml": [2.0], "posterior_fossa_ml": [0.0]}).to_csv(
+        root / "instance" / "mask_stats.tsv", sep="\t", index=False)
     (root / "aisd").mkdir()
     pd.DataFrame({"volume_id": ["aisd:v0"], "case_id": ["v0"], **{f"code{c}_ml": [1.0] for c in range(1, 6)}}).to_csv(
         root / "aisd" / "mask_stats.tsv", sep="\t", index=False)
@@ -233,6 +249,21 @@ def _write_clinical(root: Path) -> Path:
                   "Final pathologic diagnosis (WHO 2021)": ["Glioblastoma, IDH-wildtype"] * 2,
                   "MGMT status": ["positive", "negative"], "1-dead 0-alive": [1, 1], "OS": [200, 200]}).to_csv(
         root / "ucsf_pdgm" / "meta" / "UCSF-PDGM-metadata_v5.csv", index=False)
+    (root / "upenn_gbm" / "meta").mkdir(parents=True)
+    pd.DataFrame({"ID": ["UPENN-GBM-00001_11", "UPENN-GBM-00001_21", "UPENN-GBM-00002_11"],
+                  "Survival_from_surgery_days_UPDATED": ["500", "500", "Not Available"],
+                  "Survival_Status": ["Deceased", "Deceased", "Alive"], "Survival_Censor": ["Not Available"] * 2 + ["100"],
+                  "MGMT": ["Methylated", "Methylated", "Indeterminate"]}).to_csv(
+        root / "upenn_gbm" / "meta" / "UPENN-GBM_clinical_info_v2.1.csv", index=False)
+    (root / "rsna_ica").mkdir(parents=True)
+    ica = pd.DataFrame({"SeriesInstanceUID": ["1.2.1", "1.2.2", "1.2.3"], "Modality": ["CTA", "MRA", "MRI T2"],
+                        "Aneurysm Present": [1, 0, 1]})
+    for cols in RSNA_ICA_LOCATIONS.values():
+        for c in cols:
+            ica[c] = 0
+    ica.loc[0, "Right Middle Cerebral Artery"] = 1
+    ica.loc[2, "Anterior Communicating Artery"] = 1
+    ica.to_csv(root / "rsna_ica" / "train.csv", index=False)
     msd = root / "msd_volume_labels.csv"
     pd.DataFrame({"volume_id": ["msd:1"], "enhancing_high": [1]}).to_csv(msd, index=False)
     return msd
@@ -293,6 +324,21 @@ def test_ucsf_tasks_use_one_baseline_scan_per_patient(tmp_path):
             task = load_task(name, _volumes(), msd_labels=msd)
             assert task.volume_ids == ["ucsf_pdgm_t1c:UCSF-PDGM-0004_t1c"], name
         assert load_task("ucsf_mgmt", _volumes(), msd_labels=msd).y.tolist() == [1]
+        for name in ("upenn_survival_12m", "upenn_mgmt"):        # baseline only; alive < 12 m and indeterminate dropped
+            task = load_task(name, _volumes(), msd_labels=msd)
+            assert task.volume_ids == ["upenn_gbm_t1c:UPENN-GBM-00001_11_t1c"] and task.y.tolist() == [1], name
+
+
+def test_rsna_ica_aneurysm_tasks_split_cta_from_mr_and_merge_sides(tmp_path):
+    msd = _write_clinical(tmp_path)
+    with (patch("brain.downstream.tasks.DATASETS", tmp_path),
+          patch("brain.downstream.tasks.LABEL_SOURCES", tmp_path / "_not_synced")):
+        cta = load_task("rsna_ica_cta_aneurysm", _volumes(), msd_labels=msd)
+        mr = load_task("rsna_ica_mr_aneurysm", _volumes(), msd_labels=msd)
+        lab = rsna_ica_labels(_volumes()).set_index("case_id")
+    assert cta.volume_ids == ["rsna_ica_cta:1.2.1"] and cta.y.tolist() == [1]
+    assert mr.volume_ids == ["rsna_ica_mra:1.2.2", "rsna_ica_t2w:1.2.3"] and mr.y.tolist() == [0, 1]
+    assert lab.loc["1.2.1", "mca"] == 1 and lab.loc["1.2.3", "acom"] == 1 and lab.loc["1.2.2", "mca"] == 0
 
 
 def test_rsna_is_one_task_named_rsna_ich():

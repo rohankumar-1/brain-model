@@ -136,8 +136,13 @@ def test_pipeline_end_to_end_nifti(tmp_path):
     assert res.info["center_method"] == "brain" and res.info["shift_mm"] > 30
 
 
-def test_z_anchor_covers_brain_when_head_is_off_center_in_z(tmp_path):
+def test_z_anchor_covers_brain_when_head_is_off_center_in_z(tmp_path, monkeypatch):
     from pathlib import Path
+
+    from brain.prep import geometry
+
+    # a 300 mm phantom: the long-CT head crop (geometry.crop_to_head) would hide the z-anchor behaviour tested here
+    monkeypatch.setattr(geometry, "crop_to_head", lambda img: (img, {}))
 
     d = tmp_path
     path = Path(d) / "CT.nii.gz"

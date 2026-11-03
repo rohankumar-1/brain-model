@@ -24,6 +24,8 @@ def main() -> None:
                    help="BrainQuery checkpoints: also segmentation transfer, token probes, own heads, few-shot")
     r.add_argument("--submit", action="store_true", help="one Slurm job (jobs/eval_run.sbatch) instead of here")
     r.add_argument("--dependency", default=None, help="Slurm dependency for --submit, e.g. afterok:123")
+    r.add_argument("--jobs", type=int, default=4, help="parallel GPU jobs for --submit (1: the tasks run in turn, "
+                   "for big token caches such as ADNI's)")
     cd = sub.add_parser("card", help="every recorded number for one model -> runs/bench/cards/<name>.md")
     cd.add_argument("--model", required=True)
     cp = sub.add_parser("compare", help="every model x every task in the task's metric -> runs/bench/compare_v*.md")
@@ -54,7 +56,7 @@ def main() -> None:
     elif a.cmd == "run":
         from brain.bench.run import run
 
-        run(a.model, tasks=a.tasks, full=a.full, submit=a.submit, dependency=a.dependency, extra=extra)
+        run(a.model, tasks=a.tasks, full=a.full, submit=a.submit, dependency=a.dependency, extra=extra, jobs=a.jobs)
     elif a.cmd == "compare":
         from brain.bench.compare import compare
 

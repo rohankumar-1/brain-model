@@ -226,6 +226,106 @@ def test_trainer_runs_on_phantoms(tmp_path):
                 "--set", "optim.freeze_steps=1", "--set", "model.task_tokens.enabled=false"])
 
 
+def test_weight_average_is_saved_evaluated_and_resumed(tmp_path, monkeypatch):
+    """train.ema_decay: last_ema.pt holds averaged weights (not the live ones), every eval logs the average too, and a
+    resume restores the average with its update count."""
+    from brain.train import engine
+
+    monkeypatch.setenv("BRAIN_PERSIST_SYNTHETIC", "1")
+    args = ["multitask", "--synthetic", "--log-every", "1", "--out-dir", str(tmp_path), "--set", "train.ema_decay=0.9",
+            "--set", "train.eval_every=2", "--set", "train.ckpt_every=2", "--set", "train.keep_every=2",
+            "--set", "aug.task_aware=true"]
+    engine.run(args + ["--max-steps", "4"])
+    last, avg = (torch.load(tmp_path / n, map_location="cpu", weights_only=False) for n in ("last.pt", "last_ema.pt"))
+    assert last["ema"]["n"] == 4 and "ema" not in avg
+    k = next(k for k, v in last["multitask"].items() if v.is_floating_point() and "patch_embed" in k)
+    assert not torch.equal(last["multitask"][k], avg["multitask"][k])
+    assert torch.allclose(last["ema"]["avg"][k], avg["multitask"][k].float())
+    assert all("ema" in h for h in last["history"])
+    engine.run(args + ["--max-steps", "6", "--reset-schedule"])
+    last = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert last["ema"]["n"] == 6 and last["schedule"]["start"] == 4
+
+
+def test_hl_gauss_target_and_loss():
+    from brain.multitask.losses import hl_gauss_loss
+
+    edges = torch.linspace(-5, 5, 81)
+    centres = (edges[1:] + edges[:-1]) / 2
+    y = torch.tensor([-1.3, 0.0, 2.2, 9.0])                         # the last is clipped to the range
+    near = -((centres - y.clamp(-5, 5)[:, None]) ** 2) / (2 * 0.094 ** 2)
+    good, flat = hl_gauss_loss(near, y, edges, 0.094), hl_gauss_loss(torch.zeros(4, 80), y, edges, 0.094)
+    assert (good < 0.05).all() and (flat > 2).all()
+    mean = (near.softmax(-1) * centres).sum(-1)
+    assert torch.allclose(mean[:3], y[:3], atol=0.02)
+
+
+def test_switch_resumed_run_to_hl_gauss(tmp_path, monkeypatch):
+    """A scalar-regression run resumed with model.regression.kind=hlgauss gains the bin head (fresh optimizer)."""
+    from brain.train import engine
+
+    monkeypatch.setenv("BRAIN_PERSIST_SYNTHETIC", "1")
+    args = ["multitask", "--synthetic", "--log-every", "1", "--out-dir", str(tmp_path), "--set", "train.eval_every=100",
+            "--set", "train.ckpt_every=2", "--set", "train.ema_decay=0.9"]
+    engine.run(args + ["--max-steps", "2"])
+    engine.run(args + ["--max-steps", "4", "--reset-schedule", "--set", "model.regression.kind=hlgauss"])
+    last = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert last["schedule"]["start"] == 2 and any(k.startswith("regress_bins.") for k in last["ema"]["avg"])
+    last = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert last["step"] == 4 and any(k.startswith("regress_bins.") for k in last["multitask"])
+
+
+def test_bins_from_scalar_keeps_predictions():
+    from brain.multitask.model import BrainQuery
+    from brain.multitask.registry import load_registry
+    from brain.train.multitask import build_encoder
+    from brain.train.defaults import default_config
+
+    cfg = default_config("multitask")
+    cfg["model"]["regression"]["kind"] = "hlgauss"
+    reg = load_registry(None)
+    m = BrainQuery(build_encoder(cfg, torch.device("cpu"), synthetic=True), reg, cfg["model"])
+    z = torch.randn(3, 2, m.binary[0].in_features)
+    m.bins_from_scalar()
+    scalar = m.regress(z)[..., 0]
+    out = m.heads(z, torch.zeros(3, 2, dtype=torch.long))
+    assert torch.allclose(out["regression"], scalar.clamp(-4, 4), atol=1e-3)
+
+
+def test_reset_schedule_rewarms_from_resume_step():
+    from brain.train.engine import lr_of
+
+    s = {"lr": 1e-3, "warmup_steps": 10, "max_steps": 60, "floor": 0.01, "kind": "wsd", "decay_steps": 10, "start": 30}
+    assert lr_of(30, s) == 1e-4                         # first warmup step, not the peak
+    assert lr_of(45, s) == 1e-3                         # stable phase
+    assert abs(lr_of(60, s) - 1e-5) < 1e-12             # cooled down at max_steps
+    assert lr_of(5, {**s, "start": 0}) == lr_of(35, s)  # same shape, shifted
+
+
+def test_reset_schedule_is_idempotent_across_requeues():
+    from brain.train.engine import resume_schedule
+
+    old = {"lr": 6e-4, "warmup_steps": 1500, "max_steps": 30000, "floor": 0.01, "kind": "cosine", "decay_steps": None}
+    new = {"lr": 3e-4, "warmup_steps": 1000, "max_steps": 60000, "floor": 0.01, "kind": "wsd", "decay_steps": 6000}
+    first = resume_schedule(old, new, 30000, reset=True)
+    assert first == {**new, "start": 30000}
+    assert resume_schedule(first, new, 41000, reset=True) == first        # requeued chunk: no second re-warm
+    assert resume_schedule(first, new, 41000, reset=False) == first
+    assert resume_schedule(old, new, 30000, reset=False) == old
+
+
+def test_sharp_rows_skip_blur_and_fov_cut():
+    from brain.data.augment import degrade, through_plane
+
+    x = torch.zeros(2, 1, 9, 9, 9)
+    x[:, :, 4, 4, 4] = 1.0
+    sharp = torch.tensor([True, False])
+    tp = through_plane(x.clone(), {"p": 1.0, "fwhm_vox": [6.0, 6.0]}, None, skip=sharp)
+    bl = degrade(x.clone(), {"blur": {"p": 1.0, "sigma_vox": [1.0, 1.0]}}, skip_blur=sharp)
+    for y in (tp, bl):
+        assert torch.equal(y[0], x[0]) and y[1, 0, 4, 4, 4] < 1.0
+
+
 def test_registration_qc_only_drops_alignment_dependent_targets():
     from brain.multitask.labels import registration_sensitive
 
@@ -293,3 +393,50 @@ def test_tasks_asked_alone_do_not_see_each_other_and_match_a_single_task_query()
     for head in ("binary", "regression"):
         assert torch.allclose(alone[head][:, 0], first[head][:, 0], atol=1e-5)
         assert torch.allclose(alone[head][:, 0], dropped[head][:, 0], atol=1e-5)
+
+
+def test_sparse_seg_loss_does_not_reward_an_empty_map():
+    """An all-background map scores near zero on a scan without a target but pays the voxel, cell and scan terms on one
+    with a target; the plain loss prices the two cases alike enough to collapse (R10's aneurysm_location)."""
+    from brain.multitask.losses import sparse_seg_loss
+
+    empty = torch.full((2, 1, 8, 16, 16), -12.0)
+    tgt = torch.zeros(2, 1, 8, 16, 16)
+    tgt[1, 0, 3:5, 6:9, 6:9] = 1.0                                  # a small ball on the second scan only
+    loss = sparse_seg_loss(empty, tgt, (4, 8, 8))
+    assert loss[0] < 1e-3 and loss[1] > 5.0
+    hot = empty.clone()
+    hot[1, 0, 3:5, 6:9, 6:9] = 8.0                                  # the map lights up where the target is
+    assert sparse_seg_loss(hot, tgt, (4, 8, 8))[1] < 0.5 * loss[1]
+
+
+def test_slot_losses_route_sparse_tasks():
+    from brain.multitask.data import TYPE_ID
+    from brain.multitask.losses import seg_loss, slot_losses, sparse_seg_loss
+
+    task = torch.tensor([[0, 1]])
+    task_type = torch.tensor([TYPE_ID["segmentation"], TYPE_ID["segmentation"]])
+    seg = torch.zeros(2, 1, 16, 32, 32)
+    seg[0, 0, 4:8, 8:12, 8:12] = 1.0
+    logits = torch.randn(2, 1, 8, 16, 16)
+    out = {"seg": logits}
+    pair = torch.tensor([[0, 0], [0, 1]])
+    loss, has = slot_losses(out, task, torch.full((1, 2), float("nan")), task_type, seg, pair, 2,
+                            sparse=torch.tensor([False, True]), cell_zyx=(4, 8, 8))
+    t = torch.nn.functional.avg_pool3d(seg, 2)
+    assert torch.allclose(loss[0, 0], seg_loss(logits[:1], t[:1])[0])
+    assert torch.allclose(loss[0, 1], sparse_seg_loss(logits[1:], t[1:], (4, 8, 8))[0]) and has.all()
+
+
+def test_synthrad_ct_mirrors_its_mr_rows():
+    import pandas as pd
+
+    from brain.multitask.labels import _mirror_synthrad_ct
+
+    v = pd.DataFrame({"volume_id": ["mr1", "ct1", "mr2", "ct9"], "case_id": ["1B001", "1B001", "1B002", "2B009"],
+                      "dataset": ["synthrad_t1w", "synthrad_ct", "synthrad_t1w", "synthrad_ct"]})
+    f = pd.DataFrame({"volume_id": ["mr1", "mr2", "other"], "value": [1.0, 2.0, 3.0], "ref": ["a", "b", "c"],
+                      "split": ["train", "val", "train"]})
+    out = _mirror_synthrad_ct(f, v)
+    ct = out[out.volume_id == "ct1"]
+    assert len(out) == 4 and len(ct) == 1 and ct.value.iloc[0] == 1.0 and ct.ref.iloc[0] == "a"   # mr2 has no CT

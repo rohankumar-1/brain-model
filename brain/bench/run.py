@@ -67,7 +67,7 @@ def plan(model, ref, b, *, tasks: list[str] | None, full: bool) -> tuple[list[st
 
 
 def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submit: bool = False,
-        dependency: str | None = None, extra: list[str] | None = None) -> None:
+        dependency: str | None = None, extra: list[str] | None = None, jobs: int = SUITE_JOBS) -> None:
     from brain.bench.spec import load
     from brain.downstream.models import resolve_model
     from brain.downstream.suite import command
@@ -84,12 +84,12 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
           + (f"; not applicable or seen: {', '.join(skipped)}" if skipped else ""), flush=True)
     dep = [f"--dependency={dependency}", "--kill-on-invalid-dep=no"] if dependency else []
     if submit:
-        jobs = []
+        n_jobs, jobs = jobs, []
         # the jobs run this checkout's code (jobs/_env.sh defaults to the main checkout)
         base_env = {**os.environ, "BRAIN_REPO": str(REPO_ROOT)}
         no_tok = " ".join(no_token_tasks(b, todo))
-        for part in shards(todo, SUITE_JOBS, {*b.seg_tasks, "probe3d"}):
-            hours = min(24, 1 + len(part) // 3 + (3 * sum(t in b.seg_tasks for t in part)) + 2 * ("probe3d" in part))
+        for part in shards(todo, n_jobs, {*b.seg_tasks, "probe3d"}):
+            hours = min(24, 2 + len(part) // 3 + (3 * sum(t in b.seg_tasks for t in part)) + 2 * ("probe3d" in part))
             env = {**base_env, "CKPT": model, "SUITE_TASKS": " ".join(part), "EXTRA": " ".join(extra or []),
                    "NO_TOKEN_TASKS": no_tok}
             cmd = ["sbatch", "--parsable", "--export=ALL", "-t", f"{hours:02d}:00:00",

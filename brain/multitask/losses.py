@@ -1,7 +1,8 @@
 """Typed, masked multitask losses and their balancing.
 
 Every slot with a label gets the loss of its task's type: binary cross-entropy, Huber on the standardised value,
-cross-entropy over the task's classes, BCE + soft Dice for a segmentation slot (soft targets at the decoder's stride).
+cross-entropy over the task's classes, BCE + soft Dice for a segmentation slot (soft targets at the decoder's stride),
+voxel-weighted Huber for a dense slot (``dense_loss``; targets and weights from ``data.prepare``).
 Slots are averaged per task first (a task asked in many slots of the batch is still one task), each task's loss is
 then scaled by the balancing mode, averaged over the tasks of its group, and the groups present are averaged (with
 the group weights), so a group of many tasks (SynthSeg) weighs as one group:
@@ -39,9 +40,104 @@ def seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return bce + dice
 
 
+def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[int, int, int],
+                    pos_weight: float = 20.0) -> torch.Tensor:
+    """(P,) loss for a tiny target that many scans lack (registry ``sparse``: aneurysm balls of a few hundred voxels,
+    no target on 58% of scans), where ``seg_loss`` collapses to an empty map (R10's aneurysm_location: peak logit
+    <= -3.9 on every test scan). Four terms:
+
+    * voxel BCE with ``pos_weight`` on target voxels;
+    * soft Dice on scans that have a target only (on an empty one it rewards predicting nothing);
+    * cell BCE: logits and target max-pooled to the encoder's token grid (``cell_zyx`` output voxels per token), i.e.
+      "is it in this 16 mm cell", the coarse finder signal a find -> refine pass would pick cells from;
+    * scan BCE: the map's peak logit against "this scan has a target", so the peak works as a detector."""
+    logits, target = logits.float(), target[:, :1].float()
+    dims = (1, 2, 3, 4)
+    pw = torch.tensor(float(pos_weight), device=logits.device)
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw).mean(dims)
+    p = logits.sigmoid()
+    has = target.amax(dims) > 0.5
+    dice = (1 - (2 * (p * target).sum(dims) + 1) / (p.sum(dims) + target.sum(dims) + 1)) * has.float()
+    lc = F.max_pool3d(logits, cell_zyx, ceil_mode=True)
+    tc = F.max_pool3d(target, cell_zyx, ceil_mode=True)
+    cell = F.binary_cross_entropy_with_logits(lc, (tc > 0.5).float(), reduction="none", pos_weight=pw).mean(dims)
+    scan = F.binary_cross_entropy_with_logits(logits.amax(dims), has.float(), reduction="none")
+    return bce + dice + cell + scan
+
+
+def dense_loss(pred: torch.Tensor, target: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """(D,) Huber between predicted and target intensities (window units), averaged over each slot's weighted voxels;
+    a slot with no weight (nothing hidden / an empty target) scores 0."""
+    err = F.smooth_l1_loss(pred.float(), target.float(), reduction="none", beta=0.1)
+    return (err * w).sum(dim=(1, 2, 3, 4)) / w.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
+
+
+def hl_gauss_loss(logits: torch.Tensor, y: torch.Tensor, edges: torch.Tensor, sigma: float) -> torch.Tensor:
+    """(N,) HL-Gauss: KL from the Gaussian around ``y`` (clipped into ``edges``), integrated over each bin, to the
+    predicted bin distribution. Cross-entropy minus the target's entropy: same gradients, but 0 at a perfect fit, so
+    the loss sits on the scale of the other types' losses for the balancer."""
+    y = y.clamp(float(edges[0]), float(edges[-1])).unsqueeze(-1)
+    cdf = torch.special.ndtr((edges.float() - y) / sigma)
+    q = (cdf[..., 1:] - cdf[..., :-1]).clamp_min(0)
+    q = q / q.sum(-1, keepdim=True).clamp_min(1e-12)
+    logp = logits.float().log_softmax(-1)
+    return (q * (q.clamp_min(1e-12).log() - logp)).sum(-1)
+
+
+def token_occupancy(seg: torch.Tensor, patch_zyx: tuple[int, int, int]) -> tuple[torch.Tensor, torch.Tensor]:
+    """Segmentation targets (P, C, Z, Y, X) (channel 1, when present, the validity of each voxel) -> per encoder token
+    (P, N), (z, y, x) order: whether the mask reaches into it, and whether the token counts (at least half valid)."""
+    occ = F.max_pool3d(seg[:, :1].float(), patch_zyx).flatten(1) > 0.5
+    if seg.shape[1] > 1:
+        valid = F.avg_pool3d(seg[:, 1:2].float(), patch_zyx).flatten(1) >= 0.5
+    else:
+        valid = torch.ones_like(occ)
+    return occ.float(), valid
+
+
+def token_occupancy_loss(logits: torch.Tensor, target: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+    """(P,) class-balanced token BCE: the mean over occupied tokens and the mean over empty ones, averaged (only the
+    empty term on a slot without the structure), so a few occupied tokens are not outvoted by thousands of empty ones
+    (the collapse R10's aneurysm map showed)."""
+    bce = F.binary_cross_entropy_with_logits(logits.float(), target, reduction="none")
+    pos, neg = (target > 0.5) & valid, (target <= 0.5) & valid
+    n_pos, n_neg = pos.sum(1), neg.sum(1)
+    lp = (bce * pos).sum(1) / n_pos.clamp_min(1)
+    ln = (bce * neg).sum(1) / n_neg.clamp_min(1)
+    w_pos, w_neg = (n_pos > 0).float(), (n_neg > 0).float()
+    return (lp * w_pos + ln * w_neg) / (w_pos + w_neg).clamp_min(1)
+
+
+def slab_mil_loss(logits: torch.Tensor, lab: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
+    """(Q,) multiple-instance loss from slice labels on the token grid: ``lab`` (Q, N) per token -1 unlabelled, 0 in
+    slices without the finding, r >= 1 in the r-th run of consecutive positive slices. Each run is a bag whose most
+    confident (foreground, ``keep``) token should fire; every token in negative slices should not. Bag and negative
+    terms averaged as in ``token_occupancy_loss``."""
+    lg = logits.float()
+    pos_sum = torch.zeros(lg.shape[0], device=lg.device)
+    n_runs = torch.zeros_like(pos_sum)
+    for r in range(1, int(lab.max().clamp_min(0)) + 1):
+        m = (lab == r) & keep
+        has = m.any(1)
+        if not has.any():
+            continue
+        top = lg.masked_fill(~m, -1e4).amax(1)
+        pos_sum += F.binary_cross_entropy_with_logits(top, torch.ones_like(top), reduction="none") * has
+        n_runs += has.float()
+    neg = (lab == 0) & keep
+    n_neg = neg.sum(1)
+    ln = (F.binary_cross_entropy_with_logits(lg, torch.zeros_like(lg), reduction="none") * neg).sum(1) \
+        / n_neg.clamp_min(1)
+    w_pos, w_neg = (n_runs > 0).float(), (n_neg > 0).float()
+    return (pos_sum / n_runs.clamp_min(1) * w_pos + ln * w_neg) / (w_pos + w_neg).clamp_min(1)
+
+
 def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch.Tensor, seg: torch.Tensor,
-                seg_pair: torch.Tensor, stride: int = 2) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-slot loss (B, K) and a mask of slots that carry one."""
+                seg_pair: torch.Tensor, stride: int = 2, dense: dict | None = None, sparse: torch.Tensor | None = None,
+                cell_zyx: tuple[int, int, int] | None = None, pos_weight: float = 20.0) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-slot loss (B, K) and a mask of slots that carry one. ``dense``: the prepared batch (``dense_pair``,
+    ``dense_tgt``, ``dense_w``) when it has dense slots. ``sparse`` (n_tasks bool, registry ``sparse``) with
+    ``cell_zyx`` (output voxels per encoder token): those segmentation slots take ``sparse_seg_loss``."""
     tt = torch.where(task >= 0, task_type[task.clamp_min(0)], torch.full_like(task, -1))
     loss = torch.zeros_like(y, dtype=torch.float32)
     has = torch.zeros_like(task, dtype=torch.bool)
@@ -52,16 +148,31 @@ def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch
         has |= m
     m = (tt == TYPE_ID["regression"]) & lab
     if m.any():
-        loss[m] = F.smooth_l1_loss(out["regression"][m].float(), y[m], reduction="none")
+        if "regression_hl" in out:
+            lg, edges, sigma = out["regression_hl"]
+            loss[m] = hl_gauss_loss(lg[m], y[m], edges, sigma)
+        else:
+            loss[m] = F.smooth_l1_loss(out["regression"][m].float(), y[m], reduction="none")
         has |= m
     m = (tt == TYPE_ID["multiclass"]) & lab
     if m.any():
         loss[m] = F.cross_entropy(out["multiclass"][m].float(), y[m].long(), reduction="none")
         has |= m
     if out.get("seg") is not None and len(seg_pair):
-        sl = seg_loss(out["seg"], seg_target(seg, stride))
+        tgt = seg_target(seg, stride)
+        sl = seg_loss(out["seg"], tgt)
+        if sparse is not None and cell_zyx is not None:
+            sp = sparse.to(task.device)[task[seg_pair[:, 0], seg_pair[:, 1]]]
+            if sp.any():
+                sl = sl.clone()
+                sl[sp] = sparse_seg_loss(out["seg"][sp], tgt[sp], cell_zyx, pos_weight)
         loss = loss.index_put((seg_pair[:, 0], seg_pair[:, 1]), sl)
         has = has.index_put((seg_pair[:, 0], seg_pair[:, 1]), torch.ones_like(sl, dtype=torch.bool))
+    if out.get("dense") is not None and dense is not None and len(dense["dense_pair"]):
+        dp = dense["dense_pair"]
+        dl = dense_loss(out["dense"], dense["dense_tgt"], dense["dense_w"])
+        loss = loss.index_put((dp[:, 0], dp[:, 1]), dl)
+        has = has.index_put((dp[:, 0], dp[:, 1]), torch.ones_like(dl, dtype=torch.bool))
     return loss, has
 
 

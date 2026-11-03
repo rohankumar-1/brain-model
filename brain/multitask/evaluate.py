@@ -2,13 +2,16 @@
 
 Each volume is asked every labelled task it has, each task on its own (``alone``: no slot sees another, as at
 deployment; the scan is encoded once). Metrics per task: binary AUROC, regression R2 and MAE (original units),
-multiclass balanced accuracy, segmentation mean Dice (decoder stride, threshold 0.5). ``loss`` is the unweighted mean
-over tasks of the per-task mean loss; ``score`` the mean over task groups of the tasks' skill (``brain.eval.skill``:
-0 = chance, 1 = perfect), with ``group_<g>`` per group.
+multiclass balanced accuracy, segmentation mean Dice (decoder stride, threshold 0.5), dense (synthesis) mean absolute
+error in window units over the target's foreground (``<task>_mae``; not part of ``score``, which stays comparable with
+runs without self-supervised tasks). ``loss`` is the unweighted mean over tasks of the per-task mean loss; ``score``
+the mean over task groups of the tasks' skill (``brain.eval.skill``: 0 = chance, 1 = perfect), with ``group_<g>`` per
+group.
 """
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 
 import numpy as np
@@ -42,8 +45,9 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     for raw in loader:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
-            out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=alone, meta=b.get("meta"))
-        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"])
+            out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=alone, meta=b.get("meta"),
+                        dense_pair=b.get("dense_pair"))
+        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b)
         task, y = b["task"], b["y"]
         for i, j in has.nonzero().tolist():
             losses[int(task[i, j])].append(float(loss[i, j]))
@@ -62,6 +66,12 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             d = dice(out["seg"].float().masked_fill(t[:, -1:] < 0.5, -1.0) if t.shape[1] == 2 else out["seg"].float(),
                      t[:, :1])                                    # ignored voxels count as predicted background
             for (i, j), v in zip(b["seg_pair"].tolist(), d.tolist()):
+                preds[int(task[i, j])].append((1.0, v, str(raw["volume_id"][i])))
+        if out.get("dense") is not None:
+            w = b["dense_w"]
+            mae = ((out["dense"].float() - b["dense_tgt"]).abs() * w).sum(dim=(1, 2, 3, 4)) \
+                / w.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
+            for (i, j), v in zip(b["dense_pair"].tolist(), mae.tolist()):
                 preds[int(task[i, j])].append((1.0, v, str(raw["volume_id"][i])))
     model.train(was)
     res: dict[str, float] = {}
@@ -88,7 +98,54 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
         elif task.type == "segmentation":
             res[f"{task.id}_dice"] = float(p.mean())
             skills.append((task.group, res[f"{task.id}_dice"]))
+        elif task.type == "dense":
+            res[f"{task.id}_mae"] = float(p.mean())
     per_task = [np.mean(v) for v in losses.values() if v]
     res["loss"] = float(np.mean(per_task)) if per_task else float("nan")
     res.update(summarize(skills))
     return (res, dict(preds)) if return_preds else res
+
+
+METRICS = ("auc", "r2", "mae", "bacc", "dice")
+
+
+def format_eval(vals: dict[str, float], reg, width: int = 150) -> list[str]:
+    """``run_eval`` results (keys with or without the trainer's ``val_`` prefix) as log lines: ``score`` and ``loss``,
+    then one line per task group (registry order): the group's skill (``brain.eval.skill``: mean over its tasks of the
+    metric rescaled to 0 = chance, 1 = perfect, e.g. AUC 0.85 -> 0.70), then each task's raw metric, named once after
+    the bar when the whole group shares it. The group's shared prefix is dropped from task names
+    (``hemorrhage_subdural`` -> ``subdural``); long groups wrap under their first task."""
+    v = {k.removeprefix("val_"): x for k, x in vals.items()}
+    head = "  ".join(f"{k} {v[k]:.4f}" for k in ("score", "loss") if k in v)
+    per_task: dict[str, list[str]] = {}
+    used = {"score", "loss"}
+    for t in reg.tasks:
+        cells = [f"{m} {v[f'{t.id}_{m}']:.{2 if m == 'mae' else 3}f}" for m in METRICS if f"{t.id}_{m}" in v]
+        if cells:
+            used |= {f"{t.id}_{m}" for m in METRICS}
+            per_task.setdefault(t.group, []).append((t.id, cells))
+    lines = [head]
+    gw = max((len(g) for g in per_task), default=0)
+    for g, tasks in per_task.items():
+        common = os.path.commonprefix([tid for tid, _ in tasks]) if len(tasks) > 1 else ""
+        stem = common[: common.rfind("_") + 1]                      # e.g. hemorrhage_, synth_, seg_
+        kinds = {m.split(" ")[0] for _, ms in tasks for m in ms}
+        metric = next(iter(kinds)) if len(kinds) == 1 else ""      # one metric: named once, in the group's lead
+        cells = []
+        for tid, ms in tasks:
+            name = tid.removeprefix(f"{g}_").removeprefix(stem).removeprefix("seg_").removeprefix("vol_") or tid
+            cells.append(f"{name} {ms[0].split(' ', 1)[1] if metric else ' '.join(ms)}")
+        skill = v.get(f"group_{g}")
+        lead = f"  {g:<{gw}}  skill " + (f"{skill:6.3f}" if skill is not None else "     -") + " | " \
+            + (f"{metric:<4} " if metric else "")
+        line = lead
+        for c in cells:
+            if len(line) + len(c) + 2 > width and line != lead:
+                lines.append(line.rstrip())
+                line = " " * len(lead)
+            line += c + "  "
+        lines.append(line.rstrip())
+    rest = {k: x for k, x in v.items() if k not in used and not k.startswith("group_")}
+    if rest:
+        lines.append("  other  " + "  ".join(f"{k} {x:.4f}" for k, x in rest.items()))
+    return lines

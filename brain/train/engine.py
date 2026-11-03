@@ -10,6 +10,7 @@ and the log table, validation cadence, best/last/kept checkpoints, NaN guards, a
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib
 import json
 import math
@@ -29,12 +30,67 @@ from brain.train.defaults import METHODS, default_config, smoke_config
 
 
 def lr_of(step: int, s: dict) -> float:
-    """The LR at ``step`` of a run's saved schedule (schedules saved before ``kind`` existed are cosine)."""
-    return lr_at(step, s["max_steps"], s["lr"], s["warmup_steps"], s["floor"], s.get("kind", "cosine"),
+    """The LR at ``step`` of a run's saved schedule (schedules saved before ``kind`` existed are cosine). ``start``: the
+    step the schedule began at (a ``--reset-schedule`` resume restarts it there, warmup included)."""
+    t0 = int(s.get("start", 0))
+    return lr_at(step - t0, s["max_steps"] - t0, s["lr"], s["warmup_steps"], s["floor"], s.get("kind", "cosine"),
                  s.get("decay_steps"))
 
 
+def resume_schedule(saved: dict | None, config: dict, step: int, reset: bool) -> dict:
+    """The LR schedule a (re)started run follows: the saved one, or with ``reset`` the config's, started afresh at the
+    resume step (``start``; warmup included). A reset is idempotent: when the saved schedule already is the config's
+    (a requeued chunk passes --reset-schedule again), it keeps its start instead of re-warming."""
+    if not saved:
+        return dict(config)
+    if not reset:
+        return dict(saved)
+    if {k: v for k, v in saved.items() if k != "start"} == config:
+        return dict(saved)
+    return {**config, "start": step} if step > 0 else dict(config)
+
+
 HIGHER_IS_BETTER = {"score"}     # the multitask validation skill score (brain.eval.skill); every other metric is a loss
+
+
+class WeightEMA:
+    """Exponential moving average of a module's weights (``train.ema_decay``; rank 0 only), with the usual warmup
+    ``min(decay, (1 + n) / (10 + n))`` so early averages are not dominated by the initial weights. Float tensors are
+    averaged in fp32; integer buffers are copied. ``swapped`` puts the average into the module for an evaluation or a
+    checkpoint and restores the live weights after."""
+
+    def __init__(self, module: torch.nn.Module, decay: float, state: dict | None = None):
+        self.decay, self.n = float(decay), 0
+        self.avg = {k: v.detach().float().clone() if v.is_floating_point() else v.detach().clone()
+                    for k, v in module.state_dict().items()}
+        if state:
+            self.n = int(state["n"])
+            # keys the saved average lacks (a head added on resume, e.g. HL-Gauss bins) start from the live weights
+            self.avg = {k: state["avg"][k].to(v.device, v.dtype) if k in state["avg"] else v
+                        for k, v in self.avg.items()}
+
+    @torch.no_grad()
+    def update(self, module: torch.nn.Module) -> None:
+        d = min(self.decay, (1 + self.n) / (10 + self.n))
+        for k, v in module.state_dict().items():
+            a = self.avg[k]
+            if a.is_floating_point():
+                a.mul_(d).add_(v.detach().float(), alpha=1 - d)
+            else:
+                a.copy_(v)
+        self.n += 1
+
+    def state(self) -> dict:
+        return {"n": self.n, "avg": self.avg, "decay": self.decay}
+
+    @contextlib.contextmanager
+    def swapped(self, module: torch.nn.Module):
+        live = {k: v.detach().clone() for k, v in module.state_dict().items()}
+        module.load_state_dict({k: self.avg[k].to(v.dtype) for k, v in live.items()})
+        try:
+            yield
+        finally:
+            module.load_state_dict(live)
 
 
 def is_new_best(vals: dict, metric: str, best_val: float) -> float | None:
@@ -82,6 +138,10 @@ class Trainer:
         """Extra table cells computed from the last step's tensors (called only when logging)."""
         return {}
 
+    def eval_lines(self, vals: dict[str, float]) -> list[str]:
+        """The validation log: the first line follows the ``[eval step/max]`` prefix, later ones stand alone."""
+        return [" ".join(f"{k}={v:.4f}" for k, v in vals.items())]
+
     def on_start(self, out_dir: Path, step: int) -> None:
         """Rank-0 hook after the output directory exists (QC images, etc.)."""
 
@@ -111,7 +171,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--log-every", type=int, default=None)
     p.add_argument("--no-resume", action="store_true")
     p.add_argument("--reset-schedule", action="store_true",
-                   help="on resume, use the config's LR schedule (lr, warmup, max_steps) instead of the saved one")
+                   help="on resume, start the config's LR schedule (lr, warmup, max_steps) afresh at the resume step "
+                        "instead of keeping the saved one")
     p.add_argument("--synthetic", action="store_true", help="tiny phantom volumes, no store (lejepa3d only)")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="dotted config override, repeatable (e.g. --set optim.lr=1e-4)")
@@ -154,7 +215,8 @@ def run(argv: list[str] | None = None) -> None:
             ckpt, resume_src = None, None
         else:
             step, history = int(ckpt["step"]), list(ckpt.get("history") or [])
-            best_val, best_step = float(ckpt.get("best_val", best_val)), int(ckpt.get("best_step", best_step))
+            if ckpt.get("best_metric", best_metric) == best_metric:   # a changed best_metric starts its best afresh
+                best_val, best_step = float(ckpt.get("best_val", best_val)), int(ckpt.get("best_step", best_step))
     # The LR schedule is part of the run: a resumed run keeps the one it started with (saved in every checkpoint),
     # so a changed config or --max-steps cannot silently bend the cosine; --reset-schedule adopts the config's.
     o = cfg["optim"]
@@ -162,11 +224,10 @@ def run(argv: list[str] | None = None) -> None:
                 "floor": float(o.get("lr_floor", 0.01)), "kind": str(o.get("schedule") or "cosine"),
                 "decay_steps": o.get("decay_steps")}
     saved = (ckpt or {}).get("schedule")
-    if saved and not args.reset_schedule:
-        if saved != schedule:
-            log(f"[resume] keeping the saved LR schedule {saved} (config gives {schedule}; --reset-schedule to adopt)")
-        schedule = dict(saved)
-        max_steps = int(schedule["max_steps"])
+    if saved and not args.reset_schedule and saved != schedule:
+        log(f"[resume] keeping the saved LR schedule {saved} (config gives {schedule}; --reset-schedule to adopt)")
+    schedule = resume_schedule(saved, schedule, step, args.reset_schedule)
+    max_steps = int(schedule["max_steps"])
     args.max_steps = max_steps                         # the trainer reads it too (end-of-run prefetch)
     if step > 0:
         # fresh random streams after a resume: the same seeds would replay the batches and augmentation draws
@@ -192,6 +253,16 @@ def run(argv: list[str] | None = None) -> None:
         save_config(cfg, out_dir / "config.yaml")
         trainer.on_start(out_dir, step)
 
+    # weight average (train.ema_decay): evaluated beside the live weights and written as <name>_ema.pt, an ordinary
+    # checkpoint whose weights are the average, so the benchmark can score both
+    ema = WeightEMA(trainer.module, float(t_cfg["ema_decay"]), (ckpt or {}).get("ema")) \
+        if rt.main and t_cfg.get("ema_decay") else None
+    best_ema = float("-inf") if best_metric in HIGHER_IS_BETTER else float("inf")
+    if (ckpt or {}).get("best_metric", best_metric) == best_metric:
+        best_ema = float((ckpt or {}).get("best_ema", best_ema))
+    if ema is not None:
+        log(f"[ema] decay {ema.decay} (updates so far {ema.n})")
+
     def save(path: Path, model_only: bool = False) -> None:
         if not finite_params(trainer.module):
             log("[nan] weights are non-finite; not writing a checkpoint")
@@ -200,7 +271,12 @@ def run(argv: list[str] | None = None) -> None:
             **trainer.state(model_only), "step": step, "config": cfg, "history": history, "provenance": prov,
             "schedule": schedule, "lr": lr_of(step, schedule),
             "best_val": best_val, "best_step": best_step, "best_metric": best_metric,
+            **({"ema": ema.state(), "best_ema": best_ema} if ema is not None and not model_only else {}),
         }, path)
+
+    def save_ema(path: Path) -> None:
+        with ema.swapped(trainer.module):
+            save(path, model_only=True)
 
     persist = not args.synthetic or os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"   # tests: resume on phantoms
     stop = StopFlag()
@@ -212,6 +288,8 @@ def run(argv: list[str] | None = None) -> None:
         lr = lr_of(step, schedule)
         set_lr(trainer.opt, lr)
         metrics = trainer.step(step, lr)
+        if ema is not None:
+            ema.update(trainer.module)
         if keys is None:
             keys = list(metrics)
             acc = torch.zeros(len(keys), device=rt.device)
@@ -235,13 +313,30 @@ def run(argv: list[str] | None = None) -> None:
             vals = trainer.evaluate()
             if vals:
                 history.append({"step": step, **vals})
-                log(f"[eval {step:>{step_w}}/{max_steps}] " + " ".join(f"{k}={v:.4f}" for k, v in vals.items()))
+                lines = trainer.eval_lines(vals)
+                log(f"[eval {step:>{step_w}}/{max_steps}] " + (lines[0] if lines else ""))
+                for line in lines[1:]:
+                    log(line)
                 new_best = is_new_best({k.removeprefix("val_"): v for k, v in vals.items()}, best_metric, best_val)
                 if new_best is not None:
                     best_val, best_step = new_best, step
                     if persist:
                         save(best_path, model_only=True)
                     log(f"[best] step {step} val_{best_metric}={best_val:.4f} -> {best_path.name}")
+                if ema is not None:
+                    with ema.swapped(trainer.module):
+                        ev = trainer.evaluate()
+                    history[-1]["ema"] = ev
+                    lines = trainer.eval_lines(ev)
+                    log(f"[eval-ema {step:>{step_w}}/{max_steps}] " + (lines[0] if lines else ""))
+                    for line in lines[1:]:
+                        log(line)
+                    nb = is_new_best({k.removeprefix("val_"): v for k, v in ev.items()}, best_metric, best_ema)
+                    if nb is not None:
+                        best_ema = nb
+                        if persist:
+                            save_ema(out_dir / "best_ema.pt")
+                        log(f"[best-ema] step {step} val_{best_metric}={best_ema:.4f} -> best_ema.pt")
                 (out_dir / "metrics.json").write_text(json.dumps(
                     {"history": history, "best_val": best_val if math.isfinite(best_val) else None,
                      "best_step": best_step, "best_metric": best_metric}, indent=2) + "\n")
@@ -249,12 +344,16 @@ def run(argv: list[str] | None = None) -> None:
             save(last_path)
             if step % int(t_cfg["keep_every"]) == 0:      # keep_full: with optimizer state, to branch a cooldown
                 save(out_dir / f"step_{step:07d}.pt", model_only=not t_cfg.get("keep_full", False))
+                if ema is not None:
+                    save_ema(out_dir / "last_ema.pt")
         if step % int(t_cfg.get("stop_poll", 20)) == 0 and stop.poll(rt.device):
             break
 
     if rt.main:
         if persist:
             save(last_path)
+            if ema is not None:
+                save_ema(out_dir / "last_ema.pt")
         preempted = step < max_steps
         log(f"[done] step {step}/{max_steps}" + (" (preempted)" if preempted else ""))
         if preempted:

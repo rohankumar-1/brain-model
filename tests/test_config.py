@@ -48,14 +48,15 @@ def test_every_shipped_config_only_uses_known_keys():
         for k, v in user.items():
             if k not in base:
                 bad.append(".".join(path + [k]))
-            elif isinstance(v, dict) and isinstance(base[k], dict):
+            elif isinstance(v, dict) and isinstance(base[k], dict) and base[k]:   # {} default: a free-form map
                 walk(base[k], v, path + [k])
 
     files = sorted(f for f in (ROOT / "configs").glob("*/*.yaml")                    # not the task registry or the
                    if f.name != "registry.yaml" and f.parent.name != "bench")        # benchmark spec / model registry
     assert files
+    method = {"single": "multitask"}               # configs/single: single-task specialists of the multitask trainer
     for f in files:
-        walk(d.default_config(f.parent.name), yaml.safe_load(f.read_text()), [f.name])
+        walk(d.default_config(method.get(f.parent.name, f.parent.name)), yaml.safe_load(f.read_text()), [f.name])
     assert not bad, bad
 
 

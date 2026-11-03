@@ -96,7 +96,9 @@ LEJEPA3D: dict[str, Any] = {
                     # MAE (mae3d): voxels | split target; lesion = {visible, weight} lesion-aware masking (None = off)
                     "target": "voxels", "lesion": None},
     },
-    "optim": {"lr": 2.5e-4, "weight_decay": 0.05, "warmup_steps": 2000, "clip_grad": 1.0, "batch_size": 4},
+    # lr_floor: the schedule's final LR as a fraction of the peak (engine.lr_of)
+    "optim": {"lr": 2.5e-4, "weight_decay": 0.05, "warmup_steps": 2000, "clip_grad": 1.0, "batch_size": 4,
+              "lr_floor": 0.01},
     "train": {"max_steps": 45000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500, "keep_every": 5000,
               "stop_poll": 20, "best_metric": "loss"},
     # resume_from: checkpoint used only when <out_dir>/last.pt is absent (weights + optimizer + step).
@@ -134,24 +136,46 @@ def _multitask_defaults() -> dict[str, Any]:
                  "labels_dir": "data/processed/slices_zarr/labels/multitask_v2", "registry": None,
                  "volume_size_xyz": list(GRID_XYZ), "default_spacing_mm": [1.0, 1.0, 1.0],
                  "num_workers": 10, "balance_alpha": 0.5,
+                 # RSNA slice labels (brain.prep.rsna_slices parquet) for loss.slice_weight
+                 "rsna_slices": None,
+                 # dataset-name prefixes whose scans leave training and validation entirely (multitask.data.drop_datasets)
+                 "exclude_datasets": [],
+                 # fastMRI+ box tables (brain.prep.fastmri_labels parquet) for loss.box_weight
+                 "fastmri_boxes": None,
                  # the BraTS re-releases count as one family for sampling
                  "balance_groups": {"brats": ["brats_gli", "brats_men", "brats_ped", "brats_goat"]},
                  "val_per_task": 64, "val_max_seg": 4},
         "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
                   # task tokens in the encoder (OMNI); the patches' attention to them opens over write_ramp_steps
                   # from write_bias logits so a warm-started encoder is not shifted at step 0
-                  "task_tokens": {"enabled": True, "write_bias": 10.0, "write_ramp_steps": 2000},
+                  "task_tokens": {"enabled": True, "write_bias": 10.0, "write_ramp_steps": 2000, "share": False},
                   # MoE MLPs in the top ``blocks`` encoder blocks (0 = off; tried 2026-10-26, no clear gain over tokens)
                   "moe": {"blocks": 0, "experts": 5, "top_k": 2, "aux_weight": 0.05},
+                  # regression head: ``scalar`` (smooth L1) or ``hlgauss`` (bins over the standardised range, Gaussian
+                  # targets of sigma_ratio bin widths; switching a resumed run adds the head and resets the optimizer)
+                  "regression": {"kind": "scalar", "bins": 80, "range": [-5.0, 5.0], "sigma_ratio": 0.75},
+                  # a logit per encoder token for a slot (BrainQuery.token_logits), for loss.token_weight / slice_weight
+                  "token_map": {"enabled": False, "dim": 64},
+                  # encoder: the ViT (init_from an SSL checkpoint, or ``size`` from scratch) or ``resnet3d``
+                  # (brain.models.resnet3d, from scratch; ``resnet`` its widths / blocks)
+                  "arch": "vit", "resnet": {"widths": [64, 128, 240, 384], "blocks": [2, 2, 2, 2]},
+                  # ViT size when training from scratch (no init_from); None = the init_from checkpoint's
+                  "size": None,
                   # ``dim``: the heads' width. layers / heads / cross_task: the slot readout of checkpoints before
                   # task tokens (task_tokens.enabled: false)
                   "slot": {"dim": 256, "layers": 3, "heads": 8, "cross_task": True},
                   "seg": {"widths": [128, 64, 32, 16]}},
-        "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5}},
+        # gate mode: "center" (a token's centre voxel), "max" or "frac" (>= min_frac of its voxels; data.gate.token_keep)
+        "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
+                                                     "min_frac": 0.25}},
         # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
         # exclude: small clinical tasks (55-350 training scans) that overfit and never learned (run 6, 2026-10-25);
         # they stay in the registry as held-out few-shot tasks
-        "tasks": {"k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None,
+        # ssl: also train the self-supervised registry tasks (masked_recon, synth_*); mask_p: share of samples (with a
+        # reconstruction row) that are masked and ask only self-supervised tasks; mask_ratio: their hidden foreground share
+        # max_dense: decoder slots per sample for dense tasks on their own (None: they share max_seg)
+        "tasks": {"ssl": False, "mask_p": 0.0, "mask_ratio": 0.6, "max_dense": None,
+                  "k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None,
                   "ids": None, "exclude": ["mmse", "autism_severity", "adhd", "parkinsons", "glioma_survival_12m",
                                            "glioma_lower_grade", "glioma_idh"]},
         "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0},
@@ -164,13 +188,21 @@ def _multitask_defaults() -> dict[str, Any]:
                 "fov_cut": {"p": 0.2, "mm": [10, 40]},
                 # skull-strip skull-on MRI with its SynthStrip mask (never rows asking a needs_skull task): the tumour
                 # and stroke cohorts arrive stripped, so "no skull" would otherwise mean "lesion cohort"
-                "skull_strip": {"p": 0.3}},
-        "loss": {"balance": "uncertainty", "ema_decay": 0.99, "seg_stride": 2},
+                "skull_strip": {"p": 0.3},
+                # rows asking a registry ``fine`` task (small targets) get no blur, field-of-view cut or stripping
+                "task_aware": False},
+        # sparse_pos_weight: target-voxel / target-cell weight of losses.sparse_seg_loss (registry ``sparse`` tasks).
+        # token_weight / slice_weight (need model.token_map): token-map losses added to a slot's loss, on mask tasks'
+        # token occupancy (losses.token_occupancy_loss) and on RSNA slice labels (losses.slab_mil_loss)
+        "loss": {"balance": "uncertainty", "ema_decay": 0.99, "seg_stride": 2, "sparse_pos_weight": 20.0,
+                 "token_weight": 0.0, "slice_weight": 0.0, "box_weight": 0.0},
         # freeze_steps: slot-readout runs only (the encoder trains from step 0 with task tokens inside it)
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
                   "warmup_steps": 1000, "freeze_steps": 0, "clip_grad": 1.0, "batch_size": 8},
+        # ema_decay: weight average (brain.train.engine.WeightEMA), evaluated beside the live weights; None = off
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
-                  "keep_every": 5000, "stop_poll": 20, "best_metric": "score"},   # validation skill (brain.eval.skill)
+                  "keep_every": 5000, "stop_poll": 20, "best_metric": "score",   # validation skill (brain.eval.skill)
+                  "ema_decay": None},
         "output": {"out_dir": "runs/multitask", "resume_from": None},
     }
 

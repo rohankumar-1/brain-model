@@ -9,7 +9,8 @@ readout runs; BQ-T1 / BQ-A2 the task-token runs. The pieces:
     output  = typed head(proj(token_t))                       shared per output type, conditioned only by the token
 
 Heads are shared by every task of a type (binary logit, standardised regression value, survival hazards, the
-segmentation decoder via FiLM; multiclass scores the token against learned per-(task, class) vectors). Every trained
+segmentation decoder via FiLM, whose ``dense_head`` answers the dense (self-supervised intensity) tasks; multiclass
+scores the token against learned per-(task, class) vectors). Every trained
 task's token is always in the sequence, so an answer never depends on which other tasks were asked; a held-out task
 gets a read-only token (it reads the scan, nothing reads it), so few-shot fits only its embedding row.
 ``moe.blocks`` turns the encoder's top blocks' MLPs into mixtures of experts.
@@ -68,7 +69,8 @@ class SegDecoder(nn.Module):
     (x * (1 + gamma) + beta, zero-initialised so training starts from the unconditioned decoder).
     """
 
-    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1):
+    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
+                 dense: bool = False):
         super().__init__()
         pz, py, px = patch_zyx
         n_z, n_xy = int(math.log2(pz)) - 1, int(math.log2(py)) - 1  # upsamplings to stride 2 per axis
@@ -95,6 +97,9 @@ class SegDecoder(nn.Module):
             nn.init.zeros_(f.weight)
             nn.init.zeros_(f.bias)
         self.head = nn.Conv3d(widths[-1], 1, 1)
+        # dense (intensity) slots: their own 1x1 output; only built for a registry with dense tasks, so earlier
+        # checkpoints load unchanged
+        self.dense_head = nn.Conv3d(widths[-1], 1, 1) if dense else None
         self._register_load_state_dict_pre_hook(self._legacy_keys)
 
     @staticmethod
@@ -110,9 +115,11 @@ class SegDecoder(nn.Module):
         g, b = film(cond).chunk(2, dim=-1)
         return x * (1 + g.view(*g.shape, 1, 1, 1)) + b.view(*b.shape, 1, 1, 1)
 
-    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor):
+    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
+                dense: torch.Tensor | None = None):
         """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, in_chans, Z, Y, X); ``rows`` (P,) the volume of each
-        segmentation slot, ``cond`` (P, cond_dim) its slot. Returns (P, 1, Z/2, Y/2, X/2) logits."""
+        spatial slot, ``cond`` (P, cond_dim) its slot, ``dense`` (P,) bool: the slot is a dense task (``dense_head``).
+        Returns (P, 1, Z/2, Y/2, X/2) logits / intensities."""
         x = self.stem(grid)
         feats, h = [], image
         for p in self.pyramid:
@@ -123,7 +130,9 @@ class SegDecoder(nn.Module):
         for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
             x = fuse(torch.cat([up(x), feats[i][rows]], dim=1))
             x = self._mod(x, self.film[i + 1], cond)
-        return self.head(x)
+        if dense is None or self.dense_head is None or not bool(dense.any()):
+            return self.head(x)
+        return torch.where(dense.view(-1, 1, 1, 1, 1), self.dense_head(x), self.head(x))
 
 
 class BrainQuery(nn.Module):
@@ -161,6 +170,14 @@ class BrainQuery(nn.Module):
             backbone.enable_moe(int(moe["blocks"]), int(moe.get("experts", 5)), int(moe.get("top_k", 2)))
         self.register_buffer("task_type", torch.tensor([TYPE_ID[t.type] for t in reg.tasks]), persistent=False)
         self.register_buffer("n_classes", torch.tensor([len(t.classes) for t in reg.tasks]), persistent=False)
+        # shared task tokens (registry ``token``, on with ``task_tokens.share``; earlier checkpoints keep one token per
+        # task): members read the token of ``tok_of`` (the group's first task), each through its own offset
+        # ``cls_emb[t, 0]`` (a row binary / segmentation tasks do not otherwise use)
+        share = self.tokens and bool((cfg.get("task_tokens") or {}).get("share", False))
+        tok_of = reg.token_of() if share else list(range(n_tasks))
+        self.register_buffer("tok_of", torch.tensor(tok_of), persistent=False)
+        self.register_buffer("tok_shared", torch.tensor([share and t.token is not None for t in reg.tasks]),
+                             persistent=False)
         if self.tokens:
             self.tt_proj = nn.Linear(d_enc, dim)                # a task token's output -> the heads' input
             self._register_load_state_dict_pre_hook(self._unused_slot_keys)
@@ -177,6 +194,29 @@ class BrainQuery(nn.Module):
         # typed heads, shared across tasks
         self.binary = mlp(dim, dim, 1)
         self.regress = mlp(dim, dim, 1)
+        # ``regression.kind: hlgauss`` (Farebrother et al., ICML 2024): standardised targets as a distribution over
+        # ``bins`` on ``range``, trained against a Gaussian (sigma = ``sigma_ratio`` bin widths) and read out as its
+        # mean; the scalar head stays (unused) so scalar-trained checkpoints still load
+        rg = cfg.get("regression") or {}
+        self.regress_bins = None
+        if rg.get("kind", "scalar") == "hlgauss":
+            n, (lo, hi) = int(rg.get("bins", 80)), rg.get("range", [-5.0, 5.0])
+            edges = torch.linspace(float(lo), float(hi), n + 1)
+            self.register_buffer("reg_edges", edges, persistent=False)
+            self.register_buffer("reg_centres", (edges[1:] + edges[:-1]) / 2, persistent=False)
+            self.reg_sigma = float(rg.get("sigma_ratio", 0.75)) * float(edges[1] - edges[0])
+            self.regress_bins = mlp(dim, dim, n)
+        elif rg.get("kind", "scalar") != "scalar":
+            raise ValueError(f"model.regression.kind {rg['kind']!r}")
+        # ``token_map.enabled``: a logit per encoder patch token for a slot (its task's "is it here?"), from the final
+        # patch tokens and the slot's answer vector: trained on mask tasks' token occupancy and on RSNA slice labels
+        # (losses.token_occupancy_loss / slab_mil_loss), a coarse localisation target straight into the encoder
+        tm = cfg.get("token_map") or {}
+        self.tok_q = self.tok_k = self.tok_bias = None
+        if tm.get("enabled"):
+            dk = int(tm.get("dim", 64))
+            self.tok_q, self.tok_k = nn.Linear(dim, dk), nn.Linear(d_enc, dk)
+            self.tok_bias = nn.Parameter(torch.tensor(-3.0))          # prior ~5% of tokens on
         self.cls_query = nn.Linear(dim, dim)
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
         n_bins = max([len(t.survival_bins) for t in reg.tasks] + [1])
@@ -185,7 +225,9 @@ class BrainQuery(nn.Module):
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
         self.seg = SegDecoder(d_enc * (len(self.taps) + 1), dim, patch_zyx,
                               tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
-                              in_chans=backbone.patch_embed.proj.in_channels)
+                              in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
+                              dense=any(t.type == "dense" for t in reg.tasks))
+        self._register_load_state_dict_pre_hook(self._pad_type_emb)
 
     @staticmethod
     def _unused_slot_keys(state, prefix, *_):
@@ -193,6 +235,13 @@ class BrainQuery(nn.Module):
         for k in [k for k in state if k.startswith(prefix) and
                   k[len(prefix):].startswith(("kv_norm.", "kv.", "pos.", "cls_pos"))]:
             state.pop(k)
+
+    def _pad_type_emb(self, state, prefix, *_):
+        """Checkpoints from before the ``dense`` type have one ``type_emb`` row fewer: keep this model's extra rows."""
+        k = prefix + "type_emb.weight"
+        if k in state and state[k].shape[0] < self.type_emb.weight.shape[0]:
+            extra = self.type_emb.weight.detach()[state[k].shape[0]:].to(state[k].device, state[k].dtype)
+            state[k] = torch.cat([state[k], extra])
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):
@@ -203,7 +252,7 @@ class BrainQuery(nn.Module):
     def set_token_tasks(self, ids) -> None:
         """The tasks whose tokens are always in the sequence and read by the patch tokens (the trained tasks)."""
         self.tt_write.zero_()
-        self.tt_write[torch.as_tensor(list(ids), dtype=torch.long, device=self.tt_write.device)] = True
+        self.tt_write[self.tok_of[torch.as_tensor(list(ids), dtype=torch.long, device=self.tt_write.device)]] = True
 
     def encode(self, x: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None = None,
                task: torch.Tensor | None = None) -> dict:
@@ -215,7 +264,7 @@ class BrainQuery(nn.Module):
         if self.tokens:
             asked = torch.zeros_like(self.tt_write)
             if task is not None and (task >= 0).any():
-                asked[task[task >= 0].unique()] = True
+                asked[self.tok_of[task[task >= 0]].unique()] = True
             ids = torch.cat([self.tt_write.nonzero()[:, 0], (asked & ~self.tt_write).nonzero()[:, 0]])
             if ids.numel() == 0:
                 raise ValueError("task tokens: no trained tasks set (set_token_tasks) and none asked")
@@ -233,7 +282,7 @@ class BrainQuery(nn.Module):
         lut = torch.full((len(self.reg),), -1, dtype=torch.long, device=task.device)
         ids = enc["tt_ids"]
         lut[ids] = torch.arange(ids.numel(), device=task.device)
-        pos = lut[task.clamp_min(0)]
+        pos = lut[self.tok_of[task.clamp_min(0)]]
         if bool(((pos < 0) & (task >= 0)).any()):
             raise ValueError("task tokens: a requested task has no token in this encoding (encode with task=...)")
         tok = enc["task_tokens"]                                            # (B, T, D)
@@ -278,30 +327,73 @@ class BrainQuery(nn.Module):
         one = {"_kv": (kv.repeat_interleave(k, 0), pad.repeat_interleave(k, 0))}
         return self.slots(one, task.reshape(b * k, 1), keep).reshape(b, k, -1)
 
+    def member(self, z: torch.Tensor, task: torch.Tensor) -> torch.Tensor:
+        """A shared token's output read as one member task: plus that task's offset (no-op for unshared tasks)."""
+        t = task.clamp_min(0)
+        if not bool(self.tok_shared[t].any()):
+            return z
+        return z + self.tok_shared[t].unsqueeze(-1).to(z.dtype) * self.cls_emb[t, 0].to(z.dtype)
+
+    @torch.no_grad()
+    def bins_from_scalar(self, width: float = 0.5) -> None:
+        """Warm-start the HL-Gauss head from the scalar one: a Gaussian of std ``width`` around the scalar prediction
+        r has logits (c_k r - c_k^2 / 2) / width^2, linear in r, so the bin head copies the scalar head's hidden layer
+        and its output layer becomes c_k / width^2 times the scalar output (mean = r away from the range ends)."""
+        c = self.reg_centres.float() / width ** 2
+        self.regress_bins[0].load_state_dict(self.regress[0].state_dict())
+        w, b = self.regress[2].weight.float(), self.regress[2].bias.float()       # (1, dim), (1,)
+        self.regress_bins[2].weight.copy_(c[:, None] * w)
+        self.regress_bins[2].bias.copy_(c * b - self.reg_centres.float() ** 2 / (2 * width ** 2))
+
     def heads(self, z: torch.Tensor, task: torch.Tensor) -> dict:
         t = task.clamp_min(0)
         logits = torch.einsum("bkd,bkcd->bkc", self.cls_query(z), self.cls_emb[t]) / math.sqrt(self.cls_emb.shape[-1])
         valid = torch.arange(logits.shape[-1], device=z.device) < self.n_classes[t].unsqueeze(-1)
-        return {"binary": self.binary(z)[..., 0], "regression": self.regress(z)[..., 0],
-                "multiclass": logits.masked_fill(~valid, float("-inf")), "survival": self.survival(z)}
+        out = {"binary": self.binary(z)[..., 0], "multiclass": logits.masked_fill(~valid, float("-inf")),
+               "survival": self.survival(z)}
+        if self.regress_bins is None:
+            out["regression"] = self.regress(z)[..., 0]
+        else:
+            lg = self.regress_bins(z)
+            out["regression"] = (lg.float().softmax(-1) * self.reg_centres).sum(-1)
+            out["regression_hl"] = (lg, self.reg_edges, self.reg_sigma)
+        return out
+
+    def token_logits(self, enc: dict, z: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
+        """(Q, N) token-map logits of the slots ``pairs`` (Q, 2) = (row, slot), in the encoder's (z, y, x) token order."""
+        tokens = enc["tokens"]
+        k = self.tok_k(F.layer_norm(tokens, tokens.shape[-1:]))                  # (B, N, dk)
+        q = self.tok_q(z[pairs[:, 0], pairs[:, 1]])                                # (Q, dk)
+        return torch.einsum("qd,qnd->qn", q, k[pairs[:, 0]]) / math.sqrt(q.shape[-1]) + self.tok_bias
 
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
-                encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None) -> dict:
+                encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None,
+                dense_pair: torch.Tensor | None = None, tok_pair: torch.Tensor | None = None) -> dict:
+        """Typed answers per slot; ``out["seg"]`` (segmentation slots, ``seg_pair`` order) and ``out["dense"]`` (dense
+        slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``."""
         # task tokens live inside the encoder, so their gradient has to pass through it even when the encoder is frozen
         # (few-shot fitting: its weights have requires_grad off and get none)
         with torch.set_grad_enabled(torch.is_grad_enabled() and (encoder_grad or self.tokens)):
             enc = self.encode(x, keep, meta, task)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
+        z = self.member(z, task)
         out = self.heads(z, task)
-        out["seg"] = None
-        if len(seg_pair):
+        out["seg"] = out["dense"] = out["tok"] = None
+        if tok_pair is not None and len(tok_pair) and self.tok_q is not None:
+            out["tok"] = self.token_logits(enc, z, tok_pair)
+        n_seg, n_dense = len(seg_pair), 0 if dense_pair is None else len(dense_pair)
+        if n_seg or n_dense:
             b = x.shape[0]
             pz, py, px = reversed(self.backbone.patch_xyz)
             g = (x.shape[2] // pz, x.shape[3] // py, x.shape[4] // px)
             taps = [F.layer_norm(t, t.shape[-1:]) for t in enc["taps"]]       # pre-norm residual stream -> unit scale
             feats = torch.cat([*taps, enc["tokens"]], -1)                    # (B, N, D * (taps + 1))
             grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g).contiguous()   # DDP grad layout
-            out["seg"] = self.seg(grid, x, seg_pair[:, 0], z[seg_pair[:, 0], seg_pair[:, 1]])
+            pairs = torch.cat([seg_pair, dense_pair]) if n_dense else seg_pair
+            is_dense = torch.arange(n_seg + n_dense, device=x.device) >= n_seg
+            maps = self.seg(grid, x, pairs[:, 0], z[pairs[:, 0], pairs[:, 1]], dense=is_dense if n_dense else None)
+            out["seg"] = maps[:n_seg] if n_seg else None
+            out["dense"] = maps[n_seg:] if n_dense else None
         return out
 
 

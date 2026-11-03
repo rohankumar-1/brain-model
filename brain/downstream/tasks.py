@@ -72,6 +72,10 @@ CLASSIFICATION_TASKS = (
     "cq500_other_fracture",
     "aisd_remote_infarct",
     "atlas_lesion_side",
+    "instance_large_ich",
+    "instance_ivh",
+    "instance_infratentorial",
+    "instance_side",
     "gli_survival_12m",
     "gli_lgg",
     "gli_idh",
@@ -79,6 +83,14 @@ CLASSIFICATION_TASKS = (
     "ucsf_lgg",
     "ucsf_idh",
     "ucsf_mgmt",
+    "upenn_survival_12m",
+    "upenn_mgmt",
+    "rsna_ica_cta_aneurysm",
+    "rsna_ica_mr_aneurysm",
+    "adni_dx3",
+    "adni_cn_ad",
+    "adni_cn_mci",
+    "ppmi_pd",
 )
 REGRESSION_TASKS = (
     "oasis1_age",
@@ -93,6 +105,7 @@ REGRESSION_TASKS = (
     "isles24_nihss_discharge",
     "oasis1_mmse",
     "oasis2_mmse",
+    "adni_mmse",
     "abide_ados",
     "atlas_lesion_volume",
     "atlas_days_post_stroke",
@@ -225,7 +238,9 @@ LABEL_FILES = (
     ("atlas", "metadata.tsv"),             # written by brain.prep.stage_new
     ("valdo", "labels.tsv"),
     ("ucsf_pdgm", "meta", "UCSF-PDGM-metadata_v5.csv"),
-    ("fomo260k", "participants.tsv"),     # demographics / diagnosis for BrainQuery's tasks (brain.multitask)
+    ("upenn_gbm", "meta", "UPENN-GBM_clinical_info_v2.1.csv"),
+    ("rsna_ica", "train.csv"),             # copied out of the competition zip (sources.rsna_ica caches it too)
+    ("fomo260k", "participants.tsv"),    # demographics / diagnosis for BrainQuery's tasks (brain.multitask)
 )
 
 
@@ -715,6 +730,34 @@ def load_atlas_lesion_volume_task(volumes: pd.DataFrame) -> TaskBundle:
                               ["log_lesion_ml"], modality="mri")
 
 
+# INSTANCE 2022 ICH (99 NCCT): the imaging items of the ICH score (Hemphill 2001) from the hematoma masks
+# (``mask_labels``): volume >= 30 ml, ventricular extension, infratentorial origin; plus the side of unilateral bleeds.
+INSTANCE_TASKS = {
+    "instance_large_ich": "hematoma volume >= 30 ml",
+    "instance_ivh": ">= 1 ml of the hematoma inside the ventricle prior (intraventricular extension)",
+    "instance_infratentorial": "> 50% of the hematoma inside the posterior-fossa prior",
+    "instance_side": "side of a unilateral hematoma (>= 90% on one side): 1 = left",
+}
+
+
+def load_instance_ich_task(volumes: pd.DataFrame, name: str) -> TaskBundle:
+    """One of ``INSTANCE_TASKS`` (binary, CT)."""
+    m = _mask_stats(volumes, "instance", "instance")
+    m = m[m["ich_ml"] > 0].copy()
+    if name == "instance_large_ich":
+        y = m["ich_ml"] >= 30
+    elif name == "instance_ivh":
+        y = m["ventricle_ml"] >= 1
+    elif name == "instance_infratentorial":
+        y = m["posterior_fossa_ml"] > 0.5 * m["ich_ml"]
+    else:
+        left = m["left_ml"] / (m["left_ml"] + m["right_ml"]).clip(lower=1e-6)
+        m = m[(left >= 0.9) | (left <= 0.1)].copy()
+        y = left[m.index] >= 0.9
+    return _bundle_from_frame(name, "binary", m, y.astype(np.int64).to_numpy(), [name.removeprefix("instance_")],
+                              modality="ct")
+
+
 def load_atlas_lesion_side_task(volumes: pd.DataFrame) -> TaskBundle:
     """ATLAS lesion side among unilateral lesions (>= 90% of the lesion on one side): 1 = left."""
     m = _mask_stats(volumes, "atlas", "atlas")
@@ -826,6 +869,122 @@ def load_ucsf_mgmt_task(volumes: pd.DataFrame) -> TaskBundle:
           & m["MGMT status"].isin(["positive", "negative"])]
     return _bundle_from_frame("ucsf_mgmt", "binary", m, (m["MGMT status"] == "positive").astype(np.int64).to_numpy(),
                               ["MGMT_methylated"], modality="mri")
+
+
+def _upenn_gbm(volumes: pd.DataFrame) -> pd.DataFrame:
+    """UPENN-GBM pre-operative post-contrast T1 (``_11`` scans; ``_21`` are post-treatment follow-ups) with the TCIA
+    clinical table. A multitask training cohort under glioma option B (``index.MULTITASK_FAMILIES``)."""
+    meta = pd.read_csv(label_file("upenn_gbm", "meta", "UPENN-GBM_clinical_info_v2.1.csv"))
+    meta = meta[meta["ID"].str.endswith("_11")]
+    meta["case_id"] = meta["ID"] + "_t1c"
+    vol = volumes[volumes["dataset"] == "upenn_gbm_t1c"]
+    return vol.merge(meta, on="case_id", how="inner")
+
+
+def load_upenn_survival_task(volumes: pd.DataFrame) -> TaskBundle:
+    """UPENN-GBM survival from surgery beyond 12 months (1) vs death within 12 months (0); alive or lost to follow-up
+    with less than 12 months of follow-up is dropped, as is an uncertain date of death."""
+    m = _upenn_gbm(volumes)
+    days = pd.to_numeric(m["Survival_from_surgery_days_UPDATED"], errors="coerce")
+    follow = pd.to_numeric(m["Survival_Censor"], errors="coerce")
+    dead = m["Survival_Status"] == "Deceased"
+    ok = (dead & days.notna()) | (~dead & (m["Survival_Status"] != "Deceased - uncertain date of death") & (follow >= 365))
+    m, y = m[ok], np.where(dead[ok], days[ok] >= 365, True)
+    return _bundle_from_frame("upenn_survival_12m", "binary", m, y.astype(np.int64), ["survived_12m"], modality="mri")
+
+
+def load_upenn_mgmt_task(volumes: pd.DataFrame) -> TaskBundle:
+    """UPENN-GBM MGMT promoter methylated (1) vs unmethylated (0); indeterminate / not available dropped."""
+    m = _upenn_gbm(volumes)
+    m = m[m["MGMT"].isin(["Methylated", "Unmethylated"])]
+    return _bundle_from_frame("upenn_mgmt", "binary", m, (m["MGMT"] == "Methylated").astype(np.int64).to_numpy(),
+                              ["MGMT_methylated"], modality="mri")
+
+
+# ADNI / PPMI (LONI IDA, held out of every training pool; DUA: tables stay in the pool, owner-only, never in the store)
+ADNI_DX3 = ["CN", "MCI", "AD"]
+
+
+def _adni(volumes: pd.DataFrame) -> pd.DataFrame:
+    """ADNI baseline 3D T1 (one session per subject, ADNI1-4; ``adni/tables/adni_labels.csv``): dx3 is the ADNIMERGE2
+    diagnosis nearest the scan (within 120 days, else the IDA research group; SMC -> CN, EMCI / LMCI -> MCI), MMSE the
+    nearest exam. BrainDINO's ADNI cohort is longitudinal ADNI1 (sc..m36), so its numbers are not directly comparable.
+    Subjects of ``adni_exclude.csv`` (IDA duplicates across subject IDs) are dropped."""
+    lab = pd.read_csv(label_file("adni", "tables", "adni_labels.csv"))
+    drop = set(pd.read_csv(label_file("adni", "tables", "adni_exclude.csv"))["subject"].astype(str))
+    lab = lab[~lab["subject"].astype(str).isin(drop) & lab["t1_image_id"].notna()]
+    lab["case_id"] = "I" + lab["t1_image_id"].astype(np.int64).astype(str)
+    vol = volumes[volumes["dataset"] == "adni_t1w"]
+    return vol.merge(lab.drop(columns=["subject"]), on="case_id", how="inner")
+
+
+def load_adni_dx3_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ADNI CN / MCI / AD, one-hot (scored by macro one-vs-rest AUROC, BrainDINO's 3-class metric)."""
+    m = _adni(volumes)
+    m = m[m["dx3"].isin(ADNI_DX3)]
+    y = (m["dx3"].to_numpy()[:, None] == np.asarray(ADNI_DX3)[None, :]).astype(np.int64)
+    return _bundle_from_frame("adni_dx3", "multilabel", m, y, ADNI_DX3, modality="mri")
+
+
+def load_adni_pair_task(volumes: pd.DataFrame, pos: str) -> TaskBundle:
+    """ADNI ``pos`` (AD or MCI, 1) vs cognitively normal (0)."""
+    m = _adni(volumes)
+    m = m[m["dx3"].isin(["CN", pos])]
+    return _bundle_from_frame(f"adni_cn_{pos.lower()}", "binary", m, (m["dx3"] == pos).astype(np.int64).to_numpy(),
+                              [pos], modality="mri")
+
+
+def load_adni_mmse_task(volumes: pd.DataFrame) -> TaskBundle:
+    """ADNI MMSE (0-30) nearest the baseline scan."""
+    m = _adni(volumes).dropna(subset=["mmse"])
+    return _bundle_from_frame("adni_mmse", "regression", m, m["mmse"].astype(float).to_numpy(), ["mmse"], modality="mri")
+
+
+def load_ppmi_pd_task(volumes: pd.DataFrame) -> TaskBundle:
+    """PPMI Parkinson's disease (1) vs healthy control (0) from the baseline 3D T1, IDA research group
+    (``ppmi/tables/ppmi_baseline_pick.csv``; BrainDINO: PD 1,158 / HC 283). Unlike BrainDINO, PPMI is in no training
+    pool here."""
+    pick = pd.read_csv(label_file("ppmi", "tables", "ppmi_baseline_pick.csv"))
+    pick = pick[(pick["kind"] == "t1") & pick["Research Group"].isin(["PD", "Control"])]
+    pick["case_id"] = "I" + pick["Image ID"].astype(np.int64).astype(str)
+    m = volumes[volumes["dataset"] == "ppmi_t1w"].merge(pick[["case_id", "Research Group"]], on="case_id", how="inner")
+    return _bundle_from_frame("ppmi_pd", "binary", m, (m["Research Group"] == "PD").astype(np.int64).to_numpy(),
+                              ["PD"], modality="mri")
+
+
+# RSNA Intracranial Aneurysm Detection location columns, left and right merged (BrainQuery's training flips scans,
+# so a sided target would swap; brain.multitask.labels.src_rsna_ica reads these)
+RSNA_ICA_LOCATIONS = {
+    "ica_infraclinoid": ("Left Infraclinoid Internal Carotid Artery", "Right Infraclinoid Internal Carotid Artery"),
+    "ica_supraclinoid": ("Left Supraclinoid Internal Carotid Artery", "Right Supraclinoid Internal Carotid Artery"),
+    "mca": ("Left Middle Cerebral Artery", "Right Middle Cerebral Artery"),
+    "acom": ("Anterior Communicating Artery",),
+    "aca": ("Left Anterior Cerebral Artery", "Right Anterior Cerebral Artery"),
+    "pcom": ("Left Posterior Communicating Artery", "Right Posterior Communicating Artery"),
+    "basilar_tip": ("Basilar Tip",),
+    "posterior_other": ("Other Posterior Circulation",),
+}
+
+
+def rsna_ica_labels(volumes: pd.DataFrame) -> pd.DataFrame:
+    """RSNA-ICA series (CTA, TOF MRA, T2, post-contrast T1; one per SeriesInstanceUID, no patient IDs) with the
+    competition's ``train.csv``: ``Aneurysm Present`` and the side-merged ``RSNA_ICA_LOCATIONS``. A pretraining and
+    multitask training cohort (2026-10-29); its test split is the aneurysm evaluation."""
+    meta = pd.read_csv(label_file("rsna_ica", "train.csv"))
+    meta = meta.rename(columns={"SeriesInstanceUID": "case_id"})
+    for loc, cols in RSNA_ICA_LOCATIONS.items():
+        meta[loc] = meta[list(cols)].max(axis=1)
+    vol = volumes[volumes["dataset"].astype(str).str.startswith("rsna_ica")]
+    return vol.merge(meta, on="case_id", how="inner")
+
+
+def load_rsna_ica_aneurysm_task(volumes: pd.DataFrame, which: str) -> TaskBundle:
+    """Aneurysm present (any location) on CTA (``cta``) or on MR (``mr``: TOF MRA, T2, post-contrast T1)."""
+    m = rsna_ica_labels(volumes)
+    m = m[m["dataset"].eq("rsna_ica_cta") if which == "cta" else ~m["dataset"].eq("rsna_ica_cta")]
+    return _bundle_from_frame(f"rsna_ica_{which}_aneurysm", "binary", m, m["Aneurysm Present"].astype(np.int64)
+                              .to_numpy(), ["aneurysm"], modality="ct" if which == "cta" else "mri",
+                              cohort_col=None if which == "cta" else "dataset")
 
 
 def load_ms3seg_task(volumes: pd.DataFrame) -> TaskBundle:
@@ -1044,6 +1203,8 @@ def load_task(
         return load_atlas_lesion_volume_task(volumes)
     if name == "atlas_lesion_side":
         return load_atlas_lesion_side_task(volumes)
+    if name in ("instance_large_ich", "instance_ivh", "instance_infratentorial", "instance_side"):
+        return load_instance_ich_task(volumes, name)
     if name == "atlas_days_post_stroke":
         return load_atlas_days_post_stroke_task(volumes)
     if name == "ms3seg_lesion_load":
@@ -1062,6 +1223,20 @@ def load_task(
         return load_ucsf_idh_task(volumes)
     if name == "ucsf_mgmt":
         return load_ucsf_mgmt_task(volumes)
+    if name == "upenn_survival_12m":
+        return load_upenn_survival_task(volumes)
+    if name == "upenn_mgmt":
+        return load_upenn_mgmt_task(volumes)
+    if name in ("rsna_ica_cta_aneurysm", "rsna_ica_mr_aneurysm"):
+        return load_rsna_ica_aneurysm_task(volumes, name.removeprefix("rsna_ica_").removesuffix("_aneurysm"))
+    if name == "adni_dx3":
+        return load_adni_dx3_task(volumes)
+    if name in ("adni_cn_ad", "adni_cn_mci"):
+        return load_adni_pair_task(volumes, name.rsplit("_", 1)[1].upper())
+    if name == "adni_mmse":
+        return load_adni_mmse_task(volumes)
+    if name == "ppmi_pd":
+        return load_ppmi_pd_task(volumes)
     if name == "isles24_mrs":
         return load_isles24_mrs_task(volumes)
     if name == "isles24_nihss":

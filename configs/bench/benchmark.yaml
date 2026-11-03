@@ -16,6 +16,10 @@ index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
 # later indexes that only add rows to it (python -m brain.bench index-check): results on them count as current
 index_compatible:
   - 59c964508422a3cbffa103702343feccf67708d4   # 2026-10-28: + UCSF-PDGM (2,004 volumes, held out)
+  - 47e2b48abf2db9efa0e6f85269038b2c9d8c2761   # 2026-10-30: + UPENN-GBM, RSNA-ICA, SynthRAD, ADNI, PPMI; no split / subject
+    # change vs the pinned index (index-check flags only pretrain: BraTS twins of UCSF / UPENN left SSL, and 48 CQ500 rows
+    # whose ids seg_cq500 shares, identical when matched on dataset + path). UCSF splits differ from 59c96 (32 re-keyed).
+  - 39ddb6552ec627247bfe48e17bb00dbebc54e046   # 2026-11-02: + fastMRI+ (999 annotated NYU MRIs), append-only (index-check)
 # the model every other one is paired against (a checkpoint or a models.yaml name)
 reference: BQ-R6
 # the label table in-domain and few-shot scoring read (BrainQuery models with task heads), whatever a checkpoint
@@ -43,27 +47,44 @@ transfer:
   neuro_psych: [oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd]
   age: [ixi_age, pixar_age, ms3seg_age]
   lesion_tumor: [msd, ms3seg_lesion_load, valdo_epvs]
+  # added 2026-10-29: external glioma cohorts (their BraTS copies are out of every training pool; UPENN-GBM trains
+  # BrainQuery's survival / MGMT tasks, so its tasks are seen for those models) and the RSNA-ICA test split
+  glioma: [ucsf_idh, ucsf_lgg, ucsf_mgmt, ucsf_survival_12m, upenn_survival_12m, upenn_mgmt]
+  vascular: [rsna_ica_cta_aneurysm, rsna_ica_mr_aneurysm]
+  # added 2026-10-30: external neurodegeneration cohorts (LONI IDA; in no training or SSL pool), baseline 3D T1, close to
+  # BrainDINO's ADNI 3-class / CN-v-AD / CN-v-MCI and PPMI PD-v-HC tasks (ours: ADNI1-4 baseline, theirs ADNI1 longitudinal)
+  neurodegeneration: [adni_dx3, adni_cn_ad, adni_cn_mci, adni_mmse, ppmi_pd]
 transfer_seg:
   segmentation: [brats2023_gli, brats2023_men, wmh, atlas]
 
 # the scans each task is on (the task loaders' modality): a model is scored on the tasks of the modalities it takes
 modality:
   ct: [rsna_ich, cq500, cq500_edh, cq500_other_fracture, cq500_bleed_side, aisd_remote_infarct, isles24_lvo_side,
-       isles24_mrs, isles24_mrs_discharge]
-  mri: [atlas_lesion_volume, atlas_days_post_stroke, oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd,
+       isles24_mrs, isles24_mrs_discharge, rsna_ica_cta_aneurysm]
+  mri: [ucsf_idh, ucsf_lgg, ucsf_mgmt, ucsf_survival_12m, upenn_survival_12m, upenn_mgmt, rsna_ica_mr_aneurysm,
+        adni_dx3, adni_cn_ad, adni_cn_mci, adni_mmse, ppmi_pd,
+        atlas_lesion_volume, atlas_days_post_stroke, oasis1_cdr, oasis2_cdr, oasis1_mmse, oasis2_mmse, abide_asd,
         ixi_age, pixar_age, ms3seg_age, msd, ms3seg_lesion_load, valdo_epvs, brats2023_gli, brats2023_men, wmh, atlas]
 
 # a downstream task whose labels a model trained on (same cohort, registry task listed here) is in-domain for it, not
 # transfer: left out of comparisons involving that model. Registry models list theirs in models.yaml (seen_tasks).
 seen:
-  oasis1_mmse: [mmse]
-  oasis2_mmse: [mmse]
-  dementia: [mmse]          # held-out few-shot task built from OASIS-1 CDR: not held out for runs that trained MMSE
+  oasis1_mmse: [mmse, mmse_grade]
+  oasis2_mmse: [mmse, mmse_grade]
+  dementia: [mmse, mmse_grade]          # held-out few-shot task built from OASIS-1 CDR: not held out for runs that trained MMSE
   # a closely related label trained on the same cohort (added 2026-10-28): CDR stage <- MMSE on OASIS-1 / -2; autism
   # diagnosis <- ADOS severity, which exists only for ABIDE's ASD subjects
-  oasis1_cdr: [mmse]
-  oasis2_cdr: [mmse]
-  abide_asd: [autism_severity]
+  oasis1_cdr: [mmse, mmse_grade]
+  oasis2_cdr: [mmse, mmse_grade]
+  abide_asd: [autism_severity, autism_grade]
+  # glioma option B (2026-10-29): UPENN-GBM is a training cohort
+  upenn_survival_12m: [glioma_survival_12m]
+  upenn_mgmt: [glioma_mgmt]
+  # RSNA-ICA (2026-10-29): the aneurysm tasks train on its train split; the test split is scored
+  rsna_ica_cta_aneurysm: &aneurysm [aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca,
+                                    aneurysm_acom, aneurysm_aca, aneurysm_pcom, aneurysm_basilar_tip,
+                                    aneurysm_posterior_other]
+  rsna_ica_mr_aneurysm: *aneurysm
   # RSNA ICH: the hemorrhage tasks train on its study labels, and hemorrhage segmentation on BHSD / HemSeg masks of
   # RSNA studies (added 2026-10-27; before, multitask models were scored on rsna_ich as if it were transfer)
   rsna_ich: [hemorrhage_any, hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular,

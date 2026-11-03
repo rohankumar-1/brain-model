@@ -105,7 +105,7 @@ def test_cross_fitted_validation_scores_each_half_with_seeds_blind_to_it():
     h = AttnEnsemble(16, 1, False, 0, n_seeds=3, epochs=2, patience=1, model_factory=lambda: ConvProbe(16, 1))
     h.fit(x, y, m, xv, yv, mv, z=z, z_val=zv, val_half=half)
     assert h.stop_half_ == [0, 1, 0]
-    lg = h._all_logits(xv, mv, zv)                              # (3, 8, 1)
+    lg = h._all_logits(xv, mv, zv).cpu()                        # (3, 8, 1); on a GPU node the heads run on cuda
     want = torch.where(torch.as_tensor(half == 0)[:, None], lg[1], (lg[0] + lg[2]) / 2).sigmoid().numpy().ravel()
     assert np.allclose(h.predict_val(xv, mv, half, z=zv), want, atol=1e-6)
     assert np.allclose(h.predict_scores(xv, mv, z=zv), lg.mean(0).sigmoid().numpy().ravel(), atol=1e-6)

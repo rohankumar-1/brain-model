@@ -7,7 +7,7 @@
 # Next if E1 helps: E2 = E1 without the CT SynthSeg targets (test-retest ICC 0.22-0.79 on RSNA CT,
 # runs/diagnostics/synthseg_ct_reliability.py), E3 = E1 with read-only task tokens.
 #   sbatch -p pi_dbertsim -c 12 --mem=96G -t 24:00:00 -J e1-enclr1 \
-#     --export=ALL,METHOD=multitask,EXPECT_GPUS=1,CONFIG=configs/multitask/e1_enclr1.yaml jobs/train.sbatch
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=1,CONFIG=configs/archive/multitask/e1_enclr1.yaml jobs/train.sbatch
 # Compare: python -m brain.multitask.test_eval --ckpts BQ-12k-tokens runs/multitask/e1_enclr1/best.pt, then
 #   python -m brain.multitask.transfer_heads and python -m brain.bench run on the checkpoint.
 seed: 42

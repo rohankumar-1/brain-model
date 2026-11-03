@@ -31,7 +31,10 @@ META_ALIASES = {"t1": "t1", "t1w": "t1", "t1n": "t1", "t1_pre": "t1", "t1c": "t1
                 "t2": "t2", "t2w": "t2", "flair": "flair", "t2f": "flair", "pd": "pd", "dwi": "dwi", "adc": "adc",
                 "t2s": "t2s", "ct": "ct", "ncct": "ct", "cta": "cta"}
 DATASET_CONTRAST = {"brainmetshare_bravo": "t1c", "brainmetshare_t1_gd": "t1c", "brainmetshare_t1_pre": "t1",
-                    "brainmetshare_flair": "flair", "isles24_cta": "cta", "isles24_ncct": "ct"}
+                    "brainmetshare_flair": "flair", "isles24_cta": "cta", "isles24_ncct": "ct",
+                    # TOF angiography has no META entry (adding one resizes the metadata embedding): "unknown", not
+                    # the unlabelled-MRI default of T1 (2026-11-01)
+                    "rsna_ica_mra": "tof"}
 
 
 def excluded(df: pd.DataFrame, patterns) -> pd.Series:

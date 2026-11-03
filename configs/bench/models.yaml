@@ -30,6 +30,14 @@ models:
   BQ-S-hemorrhage: {ckpt: runs/single/hemorrhage/best.pt, note: "single-task specialist: the 6 hemorrhage tasks"}
   BQ-T1:          {ckpt: runs/multitask/tokens_s42/best.pt, note: "task tokens, full length (configs/multitask/tokens.yaml); next batch"}
   BQ-A2:          {ckpt: runs/joint/tokens_warm_v3/best.pt, note: "joint SSL + task tokens (configs/joint/tokens_warm_v3.yaml); next batch"}
+  BQ-v4:          {ckpt: runs/v4/scratch_s42/last.pt, note: "self-supervised LeJEPA ViT-S from scratch, LR 5e-4, stopped at step 27,660 of 30k (2026-10-30)"}
+  BQ-R7:          {ckpt: runs/multitask/r7_targets/last.pt, note: "R7 targets on BQ-v4, task tokens, labels v5, 12k steps (configs/multitask/r7_targets.yaml)"}
+  BQ-R7-SSL:      {ckpt: runs/multitask/r7_ssl/last.pt, note: "R7 + self-supervised tasks: masked reconstruction, contrast synthesis (configs/multitask/r7_ssl.yaml)"}
+  BQ-R9:          {ckpt: runs/multitask/r9/last.pt, note: "R7 at 30k steps + synthesis (own decoder budget) + masked recon 0.1, labels v6 (configs/multitask/r9.yaml)"}
+  BQ-R10:         {ckpt: runs/multitask/r10/last.pt, note: "R9 on 4 GPUs (batch 32), task-aware augmentation, aneurysm location + vessel tasks, labels v7 (configs/multitask/r10.yaml)"}
+  BQ-R10-EMA:     {ckpt: runs/multitask/r10/last_ema.pt, note: "R10's weight average (decay 0.999) at step 30k"}
+  BQ-R12:         {ckpt: runs/multitask/r12/last.pt, note: "R10 continued to 60k steps: labels v9 (tool-label QC), HL-Gauss regression, re-warmed WSD schedule (configs/multitask/r12.yaml)"}
+  BQ-R13:         {ckpt: runs/multitask/r13/last.pt, note: "R12 at 50k + 25k steps: token maps (mask occupancy, RSNA slice and fastMRI+ box bags), fastMRI+ findings, 25% token gate, no aneurysm / RSNA-ICA (configs/multitask/r13.yaml)"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
   regional_stats:

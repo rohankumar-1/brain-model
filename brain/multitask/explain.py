@@ -81,7 +81,7 @@ def slots_with_attention(model, enc: dict, task: torch.Tensor, keep: torch.Tenso
 
 def task_scalar(model, z: torch.Tensor, task: torch.Tensor, kind: str) -> torch.Tensor:
     """The task's scalar output per slot: binary logit, regression value, or the predicted class's logit."""
-    out = model.heads(z, task)
+    out = model.heads(model.member(z, task), task)
     if kind == "binary":
         return out["binary"]
     if kind == "regression":

@@ -65,7 +65,7 @@ def token_gate(cropped_xyz: torch.Tensor, modality: str, patch_xyz: tuple[int, i
     keep = token_keep(
         cropped_xyz.view(1, 1, *cropped_xyz.shape), mod, patch_xyz,
         ct_hu=tuple(gate.get("ct_hu", DEFAULT_GATE["ct_hu"])), mri_lo=float(gate.get("mri_lo", DEFAULT_GATE["mri_lo"])),
-        mode=str(gate.get("mode", "center")),
+        mode=str(gate.get("mode", "center")), min_frac=float(gate.get("min_frac", 0.25)),
     )
     return keep[0].reshape(-1)
 
@@ -96,7 +96,7 @@ class FrozenEncoder3D:
         self.meta: int | None = None   # the next volume's META id (``volume_meta``); None = unknown
         self.task_tokens: torch.Tensor | None = None   # a task-token model's trained-task tokens (task_token_prefix)
         # a three-input encoder takes the role windows (windowing.ROLES) as channels in one pass, whatever ``window``
-        self.role_channels = model.patch_embed.proj.in_channels == 3
+        self.role_channels = int(getattr(model, "in_chans", 0) or model.patch_embed.proj.in_channels) == 3
         self.meta_off = False          # encode as if the scan's metadata (its contrast) were unknown
         # share of each view's kept cells encoded as 8 half-size tokens, the most detailed first (BRAIN_REFINE)
         self.refine_frac = float(os.environ.get("BRAIN_REFINE", "0") or 0)
@@ -379,6 +379,18 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
              if not str(k).removeprefix("module.").startswith(("anchor.", "predictor."))}
     cfg = ckpt.get("config") or {}
     m, v = cfg.get("model") or {}, cfg.get("views") or {}
+    native = tuple(int(x) for x in (cfg.get("data") or {}).get("volume_size_xyz", GRID_XYZ))
+    spacing = tuple(float(x) for x in (cfg.get("data") or {}).get("default_spacing_mm", (1.0, 1.0, 1.0)))
+    if m.get("arch") == "resnet3d":          # convolutional single-task baseline (brain.models.resnet3d)
+        from brain.models.resnet3d import ResNetEncoder
+
+        r = m.get("resnet") or {}
+        patch = tuple(int(x) for x in (v.get("patch_xyz") or (16, 16, 8)))
+        net = ResNetEncoder(widths=r.get("widths", (64, 128, 240, 384)), blocks=r.get("blocks", (2, 2, 2, 2)),
+                            in_chans=int(m.get("in_chans", 1)), patch_xyz=patch, checkpoint_blocks=False).to(device)
+        if pretrained:
+            net.load_state_dict(state)
+        return FrozenEncoder3D(net.eval().requires_grad_(False), patch, native, spacing)
     size = str(m.get("size", "tiny"))
     if size not in VIT_SIZES:
         dim = int(state["patch_embed.proj.weight"].shape[0])

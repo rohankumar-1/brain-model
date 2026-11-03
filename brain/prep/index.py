@@ -34,7 +34,9 @@ DEFAULT_STORE = SCRATCH / "data" / "processed" / "slices_zarr"
 SSL_QC_DROP_DATASETS = ("rsna_ich",)  # read from DICOM series by brain.prep.dicom
 # Whole datasets kept out of every training pool (SSL and multitask), stay in the store: HBN proton-density scans,
 # many of them noise / artefact with no brain contrast (SynthSeg QC passed 61%, vs 99% for HBN T1w), 2026-10-21.
-POOL_DROP_DATASETS = ("fomo_hbn_pd",)
+# SynthRAD cone-beam CTs (2026-10-30): artefact-heavy, not calibrated HU (CT density targets would be wrong); the CT
+# and MR of those patients stay.
+POOL_DROP_DATASETS = ("fomo_hbn_pd", "synthrad_cbct")
 V3_VOLUMES = SCRATCH / "data" / "processed" / "v3_index_backup" / "volumes.csv"
 BHSD_ZIP = DATASETS / "bhsd" / "label_192.zip"
 SEED, TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 42, 0.75, 0.10, 0.15
@@ -43,12 +45,15 @@ SPLIT_RANK = {"test": 0, "val": 1, "train": 2}  # lower wins when merging inheri
 
 # Entire families stay out of the pretraining index (brain.downstream still gets train/val/test).
 HELD_OUT = {"cq500", "isles22", "atlas", "wmh", "isles24", "instance", "aisd", "brainmetshare",
-            "msd_braintumor", "ms3seg", "valdo", "ucsf_pdgm", "upenn_gbm"}
+            "msd_braintumor", "ms3seg", "valdo", "ucsf_pdgm", "upenn_gbm", "adni", "ppmi"}
 # Held-out families some of whose subjects are also in a pretraining family under another name (UCSF-PDGM patients in
 # BraTS 2021; UPENN-GBM patients, the BraTS site-1 cases): they share the pretraining copy's dedup_key, so both copies
-# get one split and the held-out scan counts as seen when its twin was (brain.downstream.records.pretrain_overlap).
+# get one split, and since 2026-10-29 the BraTS copies leave SSL and every training pool (``twin_drop`` in ``build``).
 # Their own scans still never enter SSL.
 SHARED_SUBJECTS = {"ucsf_pdgm", "upenn_gbm"}
+# held out of SSL but a multitask training cohort (glioma option B, 2026-10-29): UPENN-GBM trains survival / MGMT, UCSF-PDGM
+# stays the external glioma test
+MULTITASK_FAMILIES = {"upenn_gbm"}
 
 
 def all_held_out() -> set[str]:
@@ -90,6 +95,10 @@ def dataset_family(dataset: str) -> str:
         return "ms3seg"
     if ds.startswith("valdo"):
         return "valdo"
+    if ds.startswith("rsna_ica"):                # CTA / MRA / T2 / T1post series of one aneurysm dataset
+        return "rsna_ica"
+    if ds.startswith("synthrad"):                # SynthRAD2023 brain: one patient's CT + MR (task 1) or CT + CBCT (task 2)
+        return "synthrad"
     return ds
 
 
@@ -123,22 +132,50 @@ def ucsf_pdgm_brats() -> dict[int, str]:
     return dict(zip(num, "BraTS-GLI-" + m["BraTS21 ID"].str.extract(r"BraTS2021_(\d{5})")[0]))
 
 
+UCSF_PDGM_CONTENT_TWINS = DATASETS / "ucsf_pdgm" / "meta" / "brats_twins_content.csv"
+
+
+@functools.cache
+def ucsf_pdgm_content_twins() -> dict[str, str]:
+    """UCSF-PDGM patient -> BraTS dedup_key for the patients TCIA maps to no BraTS 2021 case but whose BraTS copy
+    was found by image content (runs/diagnostics/glioma_twins.py, 2026-10-29; mostly newer BraTS-GLI ids)."""
+    if not UCSF_PDGM_CONTENT_TWINS.exists():
+        return {}
+    m = pd.read_csv(UCSF_PDGM_CONTENT_TWINS, usecols=["ucsf_id", "brats_id"]).dropna()
+    return dict(zip(m["ucsf_id"], m["brats_id"]))
+
+
 def ucsf_pdgm_key(case_id: str) -> str:
-    """One person: the BraTS twin's key when the patient is also in BraTS 2021 (so both copies share a split), else
-    the UCSF number. Follow-ups (``_FU###d``) and the contrast suffix are dropped."""
+    """One person: the BraTS twin's key when the patient is also in BraTS (TCIA's BraTS 2021 mapping, else a content
+    match), so both copies share a split, else the UCSF number. Follow-ups (``_FU###d``) and the contrast suffix are
+    dropped."""
     num = int(case_id.split("_")[0].removeprefix("UCSF-PDGM-"))
     twin = ucsf_pdgm_brats().get(num)
-    return f"brats:gli:{twin}" if twin else f"ucsf_pdgm:UCSF-PDGM-{num:04d}"
+    if twin:
+        return f"brats:gli:{twin}"
+    return ucsf_pdgm_content_twins().get(f"UCSF-PDGM-{num:04d}", f"ucsf_pdgm:UCSF-PDGM-{num:04d}")
 
 
 UPENN_GBM_TWINS = DATASETS / "upenn_gbm" / "meta" / "brats_twins.csv"
 
 
 @functools.cache
+def ida_subjects(project: str) -> dict[str, str]:
+    """IDA image ID -> subject for the ADNI / PPMI baseline picks (``sources.ida``): a subject's T1 / T2 / FLAIR share
+    one dedup_key."""
+    from brain.prep.sources import ida_pick
+
+    pick = ida_pick(project)
+    if pick.empty:
+        return {}
+    return dict(zip("I" + pick["Image ID"].astype(str).str.lstrip("I"), pick["Subject ID"].astype(str)))
+
+
+@functools.cache
 def upenn_gbm_brats() -> dict[str, str]:
-    """UPENN-GBM patient -> its BraTS-GLI copy. TCIA gives no mapping (UPenn is BraTS site 1, without local IDs), so
-    ``brats_twins.csv`` is found by image content after prep (runs/diagnostics/upenn_brats_twins.py). Empty until
-    then: every patient keys by its own ID."""
+    """UPENN-GBM patient -> its BraTS copy's dedup_key (``brats:gli:BraTS-GLI-NNNNN`` or ``brats:goat:...``). TCIA
+    gives no mapping (UPenn is BraTS site 1, without local IDs), so ``brats_twins.csv`` comes from image content
+    (runs/diagnostics/glioma_twins.py, 2026-10-29: 451 of 611 baseline patients, every GLI match a site-1 case)."""
     if not UPENN_GBM_TWINS.exists():
         return {}
     m = pd.read_csv(UPENN_GBM_TWINS, usecols=["upenn_id", "brats_id"]).dropna()
@@ -150,7 +187,26 @@ def upenn_gbm_key(case_id: str) -> str:
     contrast suffix dropped)."""
     pid = case_id.split("_")[0]
     twin = upenn_gbm_brats().get(pid)
-    return f"brats:gli:{twin}" if twin else f"upenn_gbm:{pid}"
+    if not twin:
+        return f"upenn_gbm:{pid}"
+    return twin if twin.startswith("brats:") else f"brats:gli:{twin}"
+
+
+BRATS_GLI_SITES = DATASETS / "brats" / "meta" / "BraTS2023_GLI_sites.csv"   # from BraTS2023_2017_GLI_Mapping.xlsx
+# BraTS-GLI originating sites that are an external cohort's source: every case from them leaves the training pools.
+# Site 1 is UPenn (UPENN-GBM): content matched 403 of its 511 BraTS patients to a UPENN-GBM patient, and an unmatched
+# one may still be a UPENN-GBM scan too re-processed to match, so the whole site goes (2026-10-29). UCSF (site 18) is
+# handled per patient: TCIA's mapping plus content matches.
+EXTERNAL_BRATS_SITES = {1: "upenn_gbm"}
+
+
+@functools.cache
+def brats_gli_sites() -> dict[str, int]:
+    """BraTS-GLI patient -> originating site number (BraTS 2023 GLI training mapping; newer ids are absent)."""
+    if not BRATS_GLI_SITES.exists():
+        return {}
+    m = pd.read_csv(BRATS_GLI_SITES, usecols=["brats_id", "site"]).dropna()
+    return dict(zip(m["brats_id"], m["site"].astype(int)))
 
 
 def brats_patient(case_id: str) -> str:
@@ -201,6 +257,18 @@ def rsna_patients() -> dict[str, str]:
     return _RSNA_PATIENTS
 
 
+def load_fastmri_patients(root: Path) -> None:
+    """fastMRI file -> its anonymised patient id (``labels/fastmri_patients.csv``, written by ``brain.prep.fastmri``),
+    so one patient's FLAIR / T1 / T1 post-contrast share a dedup_key and a split."""
+    global _FASTMRI_PATIENTS
+    f = root / "labels" / "fastmri_patients.csv"
+    _FASTMRI_PATIENTS = dict(zip(*[pd.read_csv(f)[c].astype(str) for c in ("case_id", "patient_id")])) \
+        if f.exists() else {}
+
+
+_FASTMRI_PATIENTS: dict[str, str] = {}
+
+
 def dedup_key(dataset: str, case_id: str) -> str:
     fam = dataset_family(dataset)
     if fam.startswith("brats"):
@@ -216,6 +284,10 @@ def dedup_key(dataset: str, case_id: str) -> str:
         return "rsna:" + (f"patient:{pid}" if pid else case_id)
     if fam in ("oasis1", "oasis2"):
         return "oasis:" + oasis_subject(case_id)
+    if fam in ("adni", "ppmi"):
+        return f"{fam}:" + ida_subjects(fam).get(case_id, case_id)
+    if fam == "fastmri":
+        return "fastmri:" + _FASTMRI_PATIENTS.get(case_id, case_id)
     if fam == "ixi":
         return "ixi:" + ixi_subject(case_id)
     if fam == "isles22":
@@ -512,7 +584,7 @@ def assert_no_leak(vols: pd.DataFrame, slices: pd.DataFrame, bhsd: set[str]) -> 
         leak = sa & sb
         assert not leak, f"dedup_key in SSL {a} and {b}: {list(leak)[:5]}"
     ssl_keys = set(ssl["dedup_key"])
-    held = set(vols.loc[vols.dataset_family.isin(all_held_out() - SHARED_SUBJECTS), "dedup_key"])
+    held = set(vols.loc[vols.dataset_family.isin(all_held_out()), "dedup_key"])     # incl. the glioma twins' keys
     assert not (vols.dataset_family.isin(SHARED_SUBJECTS) & vols.pretrain).any(), "a shared-subject family in SSL"
     assert not (ssl_keys & held), f"held-out subjects in SSL index: {list(ssl_keys & held)[:5]}"
     bhsd_keys = {"rsna:" + i for i in bhsd}
@@ -533,6 +605,7 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
     bhsd = bhsd_case_ids()
     print(f"[bhsd] {len(bhsd)} RSNA studies with hemorrhage masks", flush=True)
     load_rsna_patients(root)
+    load_fastmri_patients(root)
     man = load_ok_manifests(root, manifests)
     recs = []
     for r in man.itertuples(index=False):
@@ -599,6 +672,19 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
         vols["pool_drop"] |= hit
         print(f"[ssl] volume drop {f.name}: {int(hit.sum())} volumes", flush=True)
     vols["pretrain"] &= ~vols["pool_drop"]
+    # The pretraining-family copies of the external glioma cohorts' patients (BraTS 2021 / 2024 cases that are UCSF-PDGM
+    # or UPENN-GBM patients: they share the twin's dedup_key) leave SSL and every training pool (2026-10-29), so
+    # neither cohort's evaluation has seen its patients through BraTS.
+    twin_keys = set(vols.loc[vols["dataset_family"].isin(SHARED_SUBJECTS), "dedup_key"])
+    vols["twin_drop"] = vols["dedup_key"].isin(twin_keys) & ~vols["dataset_family"].isin(SHARED_SUBJECTS)
+    n_twin = int(vols.twin_drop.sum())
+    sites = brats_gli_sites()
+    gli = vols["dataset_family"].eq("brats_gli")
+    site = vols.loc[gli, "dedup_key"].str.rsplit(":", n=1).str[1].map(sites)
+    vols.loc[gli, "twin_drop"] |= site.isin(list(EXTERNAL_BRATS_SITES)).to_numpy()
+    vols["pretrain"] &= ~vols["twin_drop"]
+    print(f"[ssl] BraTS copies of {sorted(SHARED_SUBJECTS)} patients: {n_twin} volumes matched, "
+          f"{int(vols.twin_drop.sum())} with the whole of sites {EXTERNAL_BRATS_SITES}", flush=True)
     # label masks only: mask_brain (the brain array inside the image zip) is not a downstream label
     vols["has_mask"] = vols.filter(like="mask_").drop(columns=["mask_brain"], errors="ignore").astype(str).ne("").any(axis=1)
 

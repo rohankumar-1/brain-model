@@ -95,7 +95,7 @@ def main() -> None:
     labels_dir = resolve(a.labels_dir or ref_cfg["data"]["labels_dir"])
     labels, stats = load_labels(labels_dir)
     volumes = pd.read_csv(store / ref_cfg["data"].get("index_name", "volumes.csv"), low_memory=False)
-    tasks = [t.id for t in ref_reg.trained if a.tasks is None or t.id in a.tasks]
+    tasks = [t.id for t in ref_reg.trained if (a.tasks is None or t.id in a.tasks) and t.type in METRIC]   # not dense (SSL)
     lab = labels[(labels["use"] == "train") & labels["task"].isin(tasks)]
     test_ids, train_ids = {}, {}
     for t in tasks:
