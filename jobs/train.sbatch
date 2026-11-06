@@ -1,11 +1,11 @@
 #!/bin/bash
-# SSL pretraining, any method, one L40S. Resumes from <out_dir>/last.pt and requeues on SIGTERM.
+# Training job for every method (python -m brain.train METHOD): resumes from <out_dir>/last.pt and requeues on SIGTERM.
+# The header asks for one L40S; pass the partition / GPUs / CPUs / memory on the command line for anything bigger:
 #
-#   sbatch --export=ALL,METHOD=lejepa3d,CONFIG=configs/lejepa3d/tiny.yaml jobs/train.sbatch
-#   sbatch --export=ALL,METHOD=lejepa3d jobs/train.sbatch                  # CONFIG defaults to configs/<METHOD>/tiny.yaml
-#   sbatch --export=ALL,METHOD=lejepa3d,EXTRA_ARGS="--set optim.lr=3e-4" jobs/train.sbatch
-#   jobs/train_pi.sbatch (2 GPUs) and jobs/train_pi4.sbatch (4 GPUs) take the same variables.
-# METHOD: lejepa3d | mae3d | multitask | joint. NO_RESUME=1 starts fresh. EXPECT_GPUS aborts if the allocation differs.
+#   sbatch -p pi_dbertsim -G l40s:4 -c 48 --mem=360G -t 2-00:00:00 -J r14f \
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r14f.yaml jobs/train.sbatch
+#   EXTRA_ARGS="--reset-schedule" (or "--set optim.lr=3e-4") adds trainer arguments; NO_RESUME=1 starts fresh.
+# METHOD: lejepa3d | multitask | joint (required with CONFIG). EXPECT_GPUS aborts if the allocation differs.
 
 #SBATCH -p mit_normal_gpu
 #SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
@@ -24,9 +24,8 @@
 set -uo pipefail
 source "${BRAIN_REPO:-/home/roku/brain-model}/jobs/_env.sh"
 
-METHOD="${METHOD:-lejepa3d}"
-DEFAULT_CFG=tiny
-CONFIG="${CONFIG:-configs/${METHOD}/${DEFAULT_CFG}.yaml}"
+METHOD="${METHOD:?set METHOD (lejepa3d | multitask | joint)}"
+CONFIG="${CONFIG:?set CONFIG (a configs/<method>/<run>.yaml)}"
 NGPU="${SLURM_GPUS_ON_NODE:-1}"
 if [ -n "${EXPECT_GPUS:-}" ] && [ "$NGPU" -ne "$EXPECT_GPUS" ]; then
   echo "[abort] allocated ${NGPU} GPUs, expected ${EXPECT_GPUS}"

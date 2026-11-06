@@ -1,0 +1,35 @@
+:root {
+  color-scheme: light;
+  --paper: #ffffff; --ink: #1b1b1b; --soft: #555555; --rule: #1b1b1b; --grid: #e6e6e3;
+  --best: #b9e0ad;
+  --tie: #e8f4e3;
+  --serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+}
+body { background: var(--paper); color: var(--ink); font-family: var(--serif); font-size: 16px; line-height: 1.5; }
+.page { max-width: 980px; margin: 0 auto; padding-block: 48px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { font-size: 26px; font-weight: 600; line-height: 1.25; margin: 0 0 6px; text-wrap: balance; }
+h2 { font-size: 19px; font-weight: 600; margin: 40px 0 8px; }
+.date { color: var(--soft); margin: 0 0 18px; }
+.lede, .sub { max-width: 72ch; margin: 0 0 10px; }
+.sub { color: var(--soft); font-size: 15px; }
+.tablebox { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 700px; font-variant-numeric: tabular-nums lining-nums; }
+table.narrow { min-width: 520px; }
+th, td { padding: 4px 9px; text-align: left; vertical-align: bottom; }
+th:first-child, td:first-child { padding-left: 0; }
+thead tr th { border-top: 1.5px solid var(--rule); border-bottom: 0.75px solid var(--rule); padding-block: 8px 6px;
+  font-weight: 600; font-size: 14px; line-height: 1.25; }
+th.num, td.num { text-align: right; white-space: nowrap; }
+tbody tr:last-child td { border-bottom: 1.5px solid var(--rule); }
+tr.group td { font-style: italic; color: var(--soft); padding-top: 12px; }
+td.num .pos { color: var(--soft); }
+td.quiet { color: var(--soft); }
+td.best { background: var(--best); font-weight: 600; }
+td.tie { background: var(--tie); }
+.split { border-left: 1.5px dotted var(--rule); }
+td.num .pub { color: var(--soft); font-size: 12px; }
+tr.sum td { border-top: 0.75px solid var(--rule); font-weight: 600; padding-top: 8px; }
+sup { font-size: 10px; }
+.notes { margin-top: 32px; font-size: 14px; color: var(--soft); max-width: 80ch; padding-left: 18px; }
+.notes li + li { margin-top: 4px; }
