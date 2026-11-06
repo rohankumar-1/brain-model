@@ -41,13 +41,16 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     model.eval()
     preds: dict[int, list] = defaultdict(list)
     losses: dict[int, list] = defaultdict(list)
+    neg_ids = set((cfg.get("loss") or {}).get("negative_tasks") or [])   # their training loss, so val loss matches
+    negatives = torch.tensor([t.id in neg_ids for t in reg.tasks], device=device) if neg_ids else None
     task_type = model.task_type
     for raw in loader:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
             out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=alone, meta=b.get("meta"),
-                        dense_pair=b.get("dense_pair"))
-        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b)
+                        dense_pair=b.get("dense_pair"), study=b.get("study"))
+        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b,
+                                negatives=negatives)
         task, y = b["task"], b["y"]
         for i, j in has.nonzero().tolist():
             losses[int(task[i, j])].append(float(loss[i, j]))
@@ -65,8 +68,13 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             t = seg_target(b["seg"])
             d = dice(out["seg"].float().masked_fill(t[:, -1:] < 0.5, -1.0) if t.shape[1] == 2 else out["seg"].float(),
                      t[:, :1])                                    # ignored voxels count as predicted background
-            for (i, j), v in zip(b["seg_pair"].tolist(), d.tolist()):
-                preds[int(task[i, j])].append((1.0, v, str(raw["volume_id"][i])))
+            # y 1: a target Dice can see (> half an output voxel, dice's threshold); 0: empty (a true negative,
+            # labels v11). A target too small for the output grid is neither and is left out
+            flat = t[:, :1].flatten(1)
+            has_t, empty_t = (flat > 0.5).any(1), ~(flat > 0).any(1)
+            for (i, j), v, h, e in zip(b["seg_pair"].tolist(), d.tolist(), has_t.tolist(), empty_t.tolist()):
+                if h or e:
+                    preds[int(task[i, j])].append((float(h), v, str(raw["volume_id"][i])))
         if out.get("dense") is not None:
             w = b["dense_w"]
             mae = ((out["dense"].float() - b["dense_tgt"]).abs() * w).sum(dim=(1, 2, 3, 4)) \
@@ -96,8 +104,13 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             res[f"{task.id}_bacc"] = balanced_accuracy(y.astype(int), p.astype(int))
             skills.append((task.group, skill("bacc", res[f"{task.id}_bacc"], len(task.classes))))
         elif task.type == "segmentation":
-            res[f"{task.id}_dice"] = float(p.mean())
-            skills.append((task.group, res[f"{task.id}_dice"]))
+            # Dice on scans with a target; on empty ones (Dice 1 = nothing predicted) the false-positive rate
+            if (y > 0).any():
+                res[f"{task.id}_dice"] = float(p[y > 0].mean())
+                skills.append((task.group, res[f"{task.id}_dice"]))
+            if (y == 0).any():                  # specificity counts in the score, so model selection sees it
+                res[f"{task.id}_fp"] = float(1.0 - p[y == 0].mean())
+                skills.append((task.group, 1.0 - res[f"{task.id}_fp"]))
         elif task.type == "dense":
             res[f"{task.id}_mae"] = float(p.mean())
     per_task = [np.mean(v) for v in losses.values() if v]
@@ -106,7 +119,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     return (res, dict(preds)) if return_preds else res
 
 
-METRICS = ("auc", "r2", "mae", "bacc", "dice")
+METRICS = ("auc", "r2", "mae", "bacc", "dice", "fp")
 
 
 def format_eval(vals: dict[str, float], reg, width: int = 150) -> list[str]:

@@ -114,9 +114,15 @@ class VolumeDataset(Dataset):
             df = df.loc[df["pretrain"].astype(bool)].copy()
         if "ssl_keep" in df.columns:
             df = df.loc[df["ssl_keep"].astype(bool)].copy()
-        exclude = ((crop_cfg or {}).get("data") or {}).get("ssl_exclude") or ()
+        dcfg = (crop_cfg or {}).get("data") or {}
+        # data.exclude_datasets (dataset-name prefixes; the multitask side drops the same cohorts from every task) and
+        # data.exclude_volumes (a volume_id CSV) leave the SSL pool too, so one list keeps a cohort out of everything
+        exclude = list(dcfg.get("ssl_exclude") or ()) + [f"{p}*" for p in dcfg.get("exclude_datasets") or ()]
         if exclude:
             df = df.loc[~excluded(df, exclude)].copy()
+        if dcfg.get("exclude_volumes"):
+            from brain.multitask.data import excluded_volume_ids
+            df = df.loc[~df["volume_id"].astype(str).isin(excluded_volume_ids(dcfg["exclude_volumes"]))].copy()
         self.df = df.reset_index(drop=True)
         if len(self.df) == 0:
             raise ValueError(f"No volumes for split={self.split} in {src}")
@@ -294,6 +300,21 @@ def family_weights(families: pd.Series, alpha: float, groups: dict | None = None
     return (n_g ** alpha) * share / n_f
 
 
+def subject_balance(weights: np.ndarray, families: pd.Series, subjects: pd.Series, beta: float) -> np.ndarray:
+    """``weights`` with each volume divided by ``n_subject ** beta`` (its subject's volumes in the same family), then
+    rescaled so every family keeps its mass: ``beta`` 1 counts a subject once however many sequences / sessions it
+    has (R15, 2026-11-06: tumour type had 32k training rows from 2.5k subjects, ~13 per patient; the global heads
+    memorised their training scans). 0 = unchanged."""
+    if not beta:
+        return weights
+    fam = families.astype(str).reset_index(drop=True)
+    key = fam + "|" + subjects.astype(str).reset_index(drop=True)
+    w2 = weights * key.map(key.value_counts()).to_numpy(np.float64) ** -float(beta)
+    f_old = pd.Series(weights).groupby(fam).transform("sum").to_numpy()
+    f_new = pd.Series(w2).groupby(fam).transform("sum").to_numpy()
+    return w2 * f_old / f_new
+
+
 class FamilySampler(DistributedSampler):
     """Draws volumes with replacement so a dataset family gets sampling mass proportional to ``n ** alpha``
     (two-level with ``groups``: see ``family_weights``).
@@ -303,9 +324,14 @@ class FamilySampler(DistributedSampler):
     """
 
     def __init__(self, dataset: VolumeDataset, alpha: float, *, seed: int = 0, num_replicas: int = 1, rank: int = 0,
-                 groups: dict | None = None):
+                 groups: dict | None = None, subject_beta: float = 0.0):
         super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=True, seed=seed)
-        self.weights = torch.from_numpy(family_weights(dataset.df["dataset_family"], float(alpha), groups))
+        df = dataset.df
+        w = family_weights(df["dataset_family"], float(alpha), groups)
+        if subject_beta:
+            subj = df["subject_id"] if "subject_id" in df else df["volume_id"]
+            w = subject_balance(w, df["dataset_family"], subj.fillna(df["volume_id"]), float(subject_beta))
+        self.weights = torch.from_numpy(w)
 
     def __iter__(self):
         g = torch.Generator().manual_seed(self.seed + self.epoch)
@@ -355,10 +381,10 @@ def make_loader(
         ds = torch.utils.data.Subset(ds, keep.tolist())
         workers = min(workers, 2)
     alpha = float(d.get("balance_alpha", 1.0))
-    if shuffle and alpha != 1.0:
+    if shuffle and (alpha != 1.0 or float(d.get("subject_beta", 0.0))):
         world, rank = (torch.distributed.get_world_size(), torch.distributed.get_rank()) if distributed else (1, 0)
         sampler = FamilySampler(ds, alpha, seed=seed, num_replicas=world, rank=rank,
-                                groups=d.get("balance_groups"))
+                                groups=d.get("balance_groups"), subject_beta=float(d.get("subject_beta", 0.0)))
     else:
         sampler = DistributedSampler(ds, shuffle=shuffle, seed=seed) if distributed else None
     cpus = int(os.environ.get("SLURM_CPUS_PER_TASK", "0"))

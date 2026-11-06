@@ -1,0 +1,52 @@
+# The pinned readout per benchmark task (python -m brain.bench pin): the head with the best mean validation
+# score over the models listed, never chosen on test. Re-pin only with a new benchmark version.
+version: 3
+pinned_utc: '2026-11-06T15:06:50+00:00'
+from_models:
+- BQ-random
+- BQ-R10
+- BQ-R10-EMA
+- BQ-R12
+- BQ-R13
+- BQ-R13-EMA
+- BQ-R14
+- brainiac
+- ct_fm
+index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
+readouts:
+  rsna_ich: linear
+  cq500: tok_conv
+  cq500_edh: spatial
+  cq500_other_fracture: spatial
+  cq500_bleed_side: tok_conv
+  aisd_remote_infarct: tok_conv
+  isles24_lvo_side: tok_conv
+  isles24_mrs: spatial
+  isles24_mrs_discharge: spatial
+  atlas_lesion_volume: tok_conv
+  atlas_days_post_stroke: tok_conv
+  oasis1_cdr: spatial
+  oasis2_cdr: spatial
+  oasis1_mmse: spatial
+  oasis2_mmse: tok_conv
+  abide_asd: tok_conv
+  ixi_age: tok_conv
+  pixar_age: tok_conv
+  ms3seg_age: mlp
+  msd: spatial
+  ms3seg_lesion_load: tok_conv
+  valdo_epvs: spatial
+  ucsf_idh: tok_conv
+  ucsf_lgg: tok_conv
+  ucsf_mgmt: tok_conv
+  ucsf_survival_12m: tok_conv
+  upenn_survival_12m: mlp
+  upenn_mgmt: tok_conv
+  rsna_ica_cta_aneurysm: spatial
+  rsna_ica_mr_aneurysm: tok_conv
+  adni_dx3: tok_conv
+  adni_cn_ad: tok_conv
+  adni_cn_mci: tok_conv
+  adni_mmse: tok_conv
+  ppmi_pd: tok_conv
+  wmh: tok_unet3d

@@ -748,6 +748,15 @@ def synthrad(root: Path = SYNTHRAD_ROOT) -> list[Case]:
                 cases.append(Case(sec_ds, d.name, "ct", sec, ref=ref))
     return cases
 
+def pedi_cranial_ct(root: Path = DATASETS / "pedi_cranial_ct" / "nifti") -> list[Case]:
+    """Pedi-Cranial-CT-Healthy (TCIA doi:10.7937/MQ33-AJ18, CC BY 4.0): 100 healthy children aged 0-9.9 years, one
+    non-contrast head CT each (int16 HU), a pretraining-pool healthy CT cohort. ``<NNNNN>_CT.nii.gz`` as staged by
+    ``brain.prep.pedi_ct`` from TCIA's MetaImage files (pool keeps ``pedi_cranial_ct.raw.zip``); case_id
+    ``sub-<NNNNN>_ses-01``, with age / sex in ``pedi_cranial_ct/participants.tsv`` (FOMO participants form)."""
+    return [Case("pedi_cranial_ct", f"sub-{p.name[:5]}_ses-01", "ct", p)
+            for p in sorted(Path(root).glob("[0-9][0-9][0-9][0-9][0-9]_CT.nii.gz"))]
+
+
 def hemseg(root: Path = DATASETS / "hemseg" / "extracted",
            rsna_zip: Path = DATASETS / "rsna" / "rsna-ihd-dataset.zip") -> list[Case]:
     """HemSeg-500: 525 RSNA studies with voxel masks of their one bleed (352 IPH-only, 173 IVH-only by RSNA's labels,

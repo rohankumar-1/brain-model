@@ -1,0 +1,213 @@
+# R15 (2026-11-06): a fresh ViT-B BrainQuery trained jointly from step 0 (brain.train.joint).
+#
+# User decisions 2026-11-05/06:
+#   * fresh weight init, ViT-B with the conv stem (CS-ViT), every data update since R14;
+#   * joint run: LeJEPA (v4's objective) as the SSL branch beside the tasks from the start, its weight scheduled from
+#     large to even (joint.ssl_start 4 -> ssl_floor 1 by 60% of the run, held after; tasks ramp in over the first 2%);
+#   * CT (and MRI) as three role-window input channels (CT brain 40/40, subdural 75/100, bone 500/400);
+#   * benchmark cohorts out of training AND the SSL pool: ABIDE, IXI, OASIS-1/2, Pixar (frozen-transfer tasks) and
+#     NKI-Rockland / HBN (BrainFMBench; FOMO carries them as fomo_nki_* / fomo_hbn_*, so no RBC matching is needed);
+#     pixel-verified training copies of benchmark scans and train-split twins of val / test scans out too
+#     (runs/diagnostics/build_train_exclude.py -> configs/multitask/train_exclude_r15.csv, 421 volumes);
+#   * shared segmentation decoder v2 (pilot 2026-11-05: anatomy Dice 0.773 vs 0.688 at 6k steps; tumour still to fix);
+#   * enhancing tumour / tumour core trained on T1c scans only (labels v12, pending); TotalSegmentator CT anatomy skipped.
+# SSL as prediction (user 2026-11-06): views share their volume's contrast (aug.tie_views), no window-pair term, less
+# contrast inversion, cross-sequence synthesis at full weight; LeJEPA's spatial agreement + masked prediction remain.
+# Subject-balanced sampling (data.subject_beta 1).
+# Queued 2026-11-06 (4 x H200, mit_preemptable, requeues from last.pt) after labels v12 + its check, the H200 profile and
+# the decoder pilots v3a / v3b; the decoder head is set from the pilots before it starts. skull_strip.match and
+# synth_contrast stay on unless the R14 UCSF-IDH regression is traced to them.
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v12   # v12: T1c-only ET/TC, CT HU masks, ct_measures group
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  default_origin_mm: [0.0, 0.0, 0.0]
+  num_workers: 5                  # per loader: the SSL and the task loader each run this many (12 CPUs per GPU)
+  balance_alpha: 0.5
+  subject_beta: 1.0               # a subject counts once in its family, whatever its sequences / sessions (user 2026-11-06)
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 128
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+  # dataset-name prefixes out of every task and (joint runs) the SSL pool; rsna_ica as in R13 / R14 (no aneurysm tasks)
+  exclude_datasets: [abide1, ixi, oasis1, oasis2, pixar, fomo_nki, fomo_hbn, rsna_ica]
+  exclude_volumes: configs/multitask/train_exclude_r15.csv
+model:
+  size: base
+  in_chans: 3
+  conv_stem: [32, 64]
+  qk_norm: true
+  rope_base_mm: 100.0
+  rope_min_period_mm: 32.0        # no aliased RoPE frequency pairs (the original 6.3 mm shortest period aliased 38%)
+  rope_fp32: true
+  fp32_residual: true
+  meta: {enabled: false}
+  drop_path: 0.1                  # global heads memorise their training scans (train-fit 2026-11-05)
+  proj_dim: 128
+  proj_hidden: 2048
+  proj_norm: batch
+  length_buckets: 4
+  dense_dim: 128
+  dense_hidden: 1024
+  n_cls: 1
+  n_registers: 0
+  checkpoint: true
+  init_from: null
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  seg:
+    widths: [128, 96, 64, 64]
+    shared: true
+    head_hidden: 64                # decoder pilot v3 (2026-11-06; v3a 64-wide heads, v3b + tumour x2): set from it
+  task_tokens: {enabled: true, share: true, write_bias: 0.0, write_ramp_steps: 0}   # no warm start to protect
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+views:
+  patch_xyz: [16, 16, 8]
+  global:
+    n: 2
+    size_xyz: [128, 128, 64]
+  local:
+    n: 2
+    size_xyz: [64, 64, 32]
+  fine:
+    n: 2
+    size_xyz: [32, 32, 16]
+    patch_xyz: [8, 8, 4]
+  nested: true
+  fg_min: 0.15
+  retries: 8
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 16
+  all_seg: true
+  lesion_ignore: true            # anatomy targets ignore expert / pseudo lesion voxels (labels v12)
+  group_weights: {synthesis: 1.0, radiology: 1.0, derived: 0.5}   # synthesis = cross-sequence prediction, full weight
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf, wmh_grade,
+    aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca, aneurysm_acom, aneurysm_aca,
+    aneurysm_pcom, aneurysm_basilar_tip, aneurysm_posterior_other, aneurysm_location, seg_vessels]
+aug:
+  # SSL branch (v4's): three role windows, jittered, every intensity augmentation in native units
+  window: {mode: roles, jitter: 0.05}
+  tie_views: true                 # one contrast per volume across its views: SSL agreement is not contrast invariance
+  curve: {p: 0.8, knots: 5, strength: 0.6, flip: 0.1}   # contrast inversion 0.3 -> 0.1 (user 2026-11-06)
+  bias: {p: 0.5, amp: 0.3}
+  noise:
+    p: 0.5
+    sigma: [0.02, 0.15]
+    kind: rician
+    snr: [15, 100]
+  blur:
+    p: 0.3
+    sigma_vox: [0.5, 1.5]
+  through_plane:
+    p: 0.5
+    fwhm_vox: [2.0, 6.0]
+  drift: {p: 0.3, amp: 0.25}
+  skull: {p: 0.3, per_view: true}
+  geometric:
+    p: 0.8
+    rot_deg: [10, 10, 15]
+    scale: [0.85, 1.15]
+    flip_lr: 0.5
+  histmatch:
+    p: 0.15
+    alpha: [0.5, 1.0]
+  # task branch (R14's)
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+    shear_deg: 10.0
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
+  synth_contrast: {p: 0.1}        # 0.2 -> 0.1 (R14's UCSF-IDH drop arrived with it)
+  task_aware: true
+loss:
+  # SSL branch (v4's LeJEPA)
+  lamb: 0.03
+  win_weight: 0.0                 # the window pair (one crop, two contrasts must agree) is pure contrast invariance: off
+  local_pooled: false
+  n_proj: 256
+  gather_ddp: true
+  dense: {weight: 1.0, tokens_per_view: 32, fine_weight: 0.0, stopgrad_mean: false}
+  predict:
+    weight: 1.0
+    pixel_weight: 0.5
+    pixel_cells: [2, 2, 2]
+    blocks: 3
+    block_tokens: [3, 6]
+    depth: 4
+    ramp_steps: 2000
+    fine_weight: 0.0
+    fine_blocks: 2
+    fine_block_tokens: [2, 3]
+  # task branch (R14's)
+  balance: uncertainty
+  ema_decay: 0.99
+  seg_stride: 2
+  uncertainty_clamp: 1.0
+  token_weight: 0.5
+  slice_weight: 0.5
+  box_weight: 0.5
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]
+joint:
+  ssl_start: 4.0
+  ssl_floor: 1.0
+  warmup_frac: 0.0
+  task_ramp_frac: 0.02
+  taper_end_frac: 0.6
+  ssl_batch_size: 8               # SSL volumes per GPU (each 6 crops); optim.batch_size = task volumes per GPU
+  normalize: true
+optim:
+  lr: 0.0004
+  enc_lr_mult: 1.0
+  layer_decay: 1.0
+  weight_decay: 0.05
+  warmup_steps: 3000
+  freeze_steps: 0
+  clip_grad: 1.0
+  batch_size: 8                   # 4 H200 x 8 = global 32 (R10-R14's); profile job 28052436
+  schedule: wsd
+  decay_steps: null               # 20% of the run
+  betas: [0.9, 0.95]
+train: {max_steps: 120000, log_every: 50, eval_every: 2000, ckpt_every: 500, keep_every: 10000, stop_poll: 20,
+  best_metric: score, ema_decay: 0.999, keep_full: false}   # weights-only snapshots: scratch is ~97% full
+output: {out_dir: runs/joint/r15, resume_from: null, init_from: null}

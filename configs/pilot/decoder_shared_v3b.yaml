@@ -1,0 +1,226 @@
+# Decoder pilot (2026-11-06), arm shared_v3b: shared_v2 with a 64-wide per-task MLP head (model.seg.head_hidden 64) and the tumour group at weight 2 (tasks.group_weights.tumor);
+# shared_v2 at 6k: anatomy 0.773 vs per-slot 0.688 but tumour Dice ~0.03 vs 0.15. 4 L40S x batch 4 = global 16 as v2.
+#   sbatch -p pi_dbertsim -G l40s:4 -c 48 --mem=360G -t 06:00:00 -J pil-v3b \
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/pilot/decoder_shared_v3b.yaml jobs/train.sbatch
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v11
+  registry: null
+  volume_size_xyz:
+  - 256
+  - 256
+  - 160
+  default_spacing_mm:
+  - 1.0
+  - 1.0
+  - 1.0
+  num_workers: 10
+  balance_alpha: 0.5
+  balance_groups:
+    brats:
+    - brats_gli
+    - brats_men
+    - brats_ped
+    - brats_goat
+  val_per_task: 128
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets:
+  - rsna_ica
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: null
+  checkpoint: true
+  taps:
+  - 3
+  - 7
+  slot:
+    dim: 256
+    layers: 3
+    heads: 8
+    cross_task: true
+  seg:
+    widths:
+    - 128
+    - 96
+    - 64
+    - 64
+    shared: true
+    head_hidden: 64
+  rope_fp32: false
+  fp32_residual: false
+  meta:
+    enabled: true
+    drop: 0.2
+  task_tokens:
+    enabled: true
+    share: true
+    write_bias: 10.0
+    write_ramp_steps: 2000
+  regression:
+    kind: hlgauss
+    bins: 80
+    range:
+    - -5.0
+    - 5.0
+    sigma_ratio: 0.75
+  token_map:
+    enabled: true
+    dim: 64
+  size: small
+  conv_stem:
+  - 32
+  - 64
+views:
+  patch_xyz:
+  - 16
+  - 16
+  - 8
+  gate:
+    ct_hu:
+    - -500.0
+    - 200.0
+    mri_lo: -5.5
+    mode: frac
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 16
+  group_weights:
+    tumor: 2.0
+    synthesis: 0.5
+    radiology: 0.5
+    derived: 0.5
+  groups: null
+  ids: null
+  exclude:
+  - mmse
+  - autism_severity
+  - adhd
+  - parkinsons
+  - glioma_lower_grade
+  - glioma_idh
+  - ct_gray_white_ratio
+  - vol_hippocampus
+  - vol_amygdala
+  - vol_thalamus
+  - vol_caudate
+  - vol_putamen
+  - vol_cortex
+  - vol_white_matter
+  - vol_cerebellum
+  - vol_brainstem
+  - vol_log_ventricles
+  - vol_log_csf
+  - wmh_grade
+  - aneurysm_present
+  - aneurysm_ica_infraclinoid
+  - aneurysm_ica_supraclinoid
+  - aneurysm_mca
+  - aneurysm_acom
+  - aneurysm_aca
+  - aneurysm_pcom
+  - aneurysm_basilar_tip
+  - aneurysm_posterior_other
+  - aneurysm_location
+  - seg_vessels
+  all_seg: true
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg:
+    - 8
+    - 8
+    - 12
+    shift_mm: 8.0
+    shear_deg: 10.0
+  appearance:
+    bias:
+      p: 0.3
+      amp: 0.2
+    through_plane:
+      p: 0.3
+      fwhm_vox:
+      - 2.0
+      - 6.0
+    noise:
+      p: 0.5
+      kind: rician
+      snr:
+      - 15
+      - 100
+      sigma:
+      - 0.02
+      - 0.1
+    blur:
+      p: 0.2
+      sigma_vox:
+      - 0.5
+      - 1.0
+    drift:
+      p: 0.2
+      amp: 0.1
+  fov_cut:
+    p: 0.2
+    mm:
+    - 10
+    - 40
+  skull_strip:
+    p: 0.3
+    match:
+    - whole_tumor
+    - tumor_core
+    - enhancing_tumor
+    - resection_cavity
+  synth_contrast:
+    p: 0.2
+  task_aware: true
+loss:
+  balance: uncertainty
+  ema_decay: 0.99
+  seg_stride: 2
+  uncertainty_clamp: 1.0
+  token_weight: 0.5
+  slice_weight: 0.5
+  box_weight: 0.5
+  negative_tasks:
+  - whole_tumor
+  - tumor_core
+  - enhancing_tumor
+  - resection_cavity
+  - hemorrhage_segmentation
+optim:
+  lr: 0.0004
+  enc_lr_mult: 1.0
+  layer_decay: 1.0
+  weight_decay: 0.05
+  warmup_steps: 1000
+  freeze_steps: 0
+  clip_grad: 1.0
+  batch_size: 4
+  schedule: wsd
+  decay_steps: 2000
+  betas:
+  - 0.9
+  - 0.999
+train:
+  max_steps: 8000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 10000
+  stop_poll: 20
+  best_metric: score
+  ema_decay: 0.999
+  keep_full: false
+output:
+  out_dir: runs/pilot/decoder_shared_v3b
+  resume_from: null

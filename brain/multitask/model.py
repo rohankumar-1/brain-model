@@ -27,6 +27,7 @@ import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.models.conv3d import Res, conv3, group_norm
@@ -135,6 +136,68 @@ class SegDecoder(nn.Module):
         return torch.where(dense.view(-1, 1, 1, 1, 1), self.dense_head(x), self.head(x))
 
 
+def _mlp_heads(f, hw, hb, w, b):
+    """Per-voxel task MLPs: ``f`` (C, Z, Y, X) shared features -> (K, Z, Y, X) logits through (K, C, H) / (K, H) weights."""
+    g = F.gelu(torch.einsum("czyx,kch->khzyx", f, hw) + hb.view(*hb.shape, 1, 1, 1))
+    return torch.einsum("khzyx,kh->kzyx", g, w) + b.view(-1, 1, 1, 1)
+
+
+class SharedSegDecoder(SegDecoder):
+    """``SegDecoder`` decoded once per volume (2026-11-04, ``model.seg.shared``): no per-slot FiLM, and a 1x1 output per
+    registry task (``chan``: the slot's task index) read from the shared top features. The per-slot decoder runs every
+    upsampling stage once per segmentation slot (a third of a ViT-B training step at 3 slots per scan); this one's cost
+    does not grow with the slots, so a scan can be asked all its masks every step (``tasks.all_seg``). Gives up
+    query-conditioned decoding of tasks the registry lacks.
+
+    ``head_hidden`` > 0 (v2, 2026-11-05): each task reads the shared features through its own small per-voxel MLP
+    (C -> head_hidden -> 1, GELU) instead of a 1x1 linear map; with 16 shared channels the linear readout starved the
+    ~25 spatial tasks (decoder pilot: anatomy Dice 0.42 vs 0.63 per slot, tumour collapsed), so v2 also widens the
+    shared stages (``model.seg.widths``, e.g. 128 / 96 / 64 / 64)."""
+
+    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
+                 dense: bool = False, n_tasks: int = 1, head_hidden: int = 0):
+        super().__init__(in_dim, cond_dim, patch_zyx, widths, in_chans, dense=False)
+        del self.film, self.head
+        c, h, t = int(widths[-1]), int(head_hidden), int(n_tasks)                     # the finest decoder width
+        self.head_hidden = h
+        if h:
+            self.hid_w = nn.Parameter(torch.randn(t, c, h) * (2.0 / c) ** 0.5)
+            self.hid_b = nn.Parameter(torch.zeros(t, h))
+        self.out_w = nn.Parameter(torch.randn(t, h or c) * 0.02)
+        self.out_b = nn.Parameter(torch.zeros(t))
+
+    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
+                dense: torch.Tensor | None = None, chan: torch.Tensor | None = None):
+        if chan is None:
+            raise ValueError("SharedSegDecoder needs the task index of every slot (chan)")
+        uniq, inv = torch.unique(rows, return_inverse=True)
+        x = self.stem(grid[uniq])
+        feats, h = [], image[uniq]
+        for p in self.pyramid:
+            h = p(h)
+            feats.append(h)
+        feats = feats[::-1]
+        for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
+            x = fuse(torch.cat([up(x), feats[i]], dim=1))
+        w, b = self.out_w[chan].to(x.dtype), self.out_b[chan].to(x.dtype)               # (P, C or H), (P,)
+        out = x.new_empty((len(rows), 1, *x.shape[2:]))
+        recompute = self.training and torch.is_grad_enabled()
+        for u in range(len(uniq)):                  # per volume: its slots' heads, without copying x per slot
+            sel = (inv == u).nonzero(as_tuple=True)[0]
+            f = x[u]
+            if self.head_hidden:
+                # the (slots, hidden, Z, Y, X) activation is the decoder's largest (4 GB at 16 slots x 64 on a ViT-S
+                # batch of 4: the v3 pilots ran out of memory): a few slots at a time, recomputed in the backward pass
+                for part in sel.split(4):
+                    hw, hb = self.hid_w[chan[part]].to(x.dtype), self.hid_b[chan[part]].to(x.dtype)
+                    args = (f, hw, hb, w[part], b[part])
+                    out[part, 0] = checkpoint(_mlp_heads, *args, use_reentrant=False) if recompute \
+                        else _mlp_heads(*args)
+            else:
+                out[sel, 0] = torch.einsum("czyx,kc->kzyx", f, w[sel]) + b[sel].view(-1, 1, 1, 1)
+        return out
+
+
 class BrainQuery(nn.Module):
     def __init__(self, backbone: BrainEncoder, reg: Registry, cfg: dict):
         super().__init__()
@@ -223,10 +286,13 @@ class BrainQuery(nn.Module):
         self.survival = mlp(dim, dim, n_bins)
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
-        self.seg = SegDecoder(d_enc * (len(self.taps) + 1), dim, patch_zyx,
-                              tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
-                              in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
-                              dense=any(t.type == "dense" for t in reg.tasks))
+        # ``seg.shared``: decode once per volume, a 1x1 output per task (SharedSegDecoder); else once per slot
+        self.seg_shared = bool(seg_cfg.get("shared", False))
+        self.seg = (SharedSegDecoder if self.seg_shared else SegDecoder)(
+            d_enc * (len(self.taps) + 1), dim, patch_zyx, tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
+            in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
+            dense=any(t.type == "dense" for t in reg.tasks),
+            **({"n_tasks": n_tasks, "head_hidden": int(seg_cfg.get("head_hidden", 0))} if self.seg_shared else {}))
         self._register_load_state_dict_pre_hook(self._pad_type_emb)
 
     @staticmethod
@@ -255,10 +321,33 @@ class BrainQuery(nn.Module):
         self.tt_write[self.tok_of[torch.as_tensor(list(ids), dtype=torch.long, device=self.tt_write.device)]] = True
 
     def encode(self, x: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None = None,
-               task: torch.Tensor | None = None) -> dict:
+               task: torch.Tensor | None = None, study: dict | None = None) -> dict:
         """Encoder outputs. With task tokens: every trained task's token, plus read-only tokens for the other tasks
-        in ``task`` (held-out / few-shot), so an answer never depends on which other tasks were asked."""
+        in ``task`` (held-out / few-shot), so an answer never depends on which other tasks were asked.
+        ``study`` (R14-F): the anchors' co-registered partner scans, ``x`` (P, C, Z, Y, X), ``row`` (P,) their
+        anchor, ``seq`` (B,) / ``pseq`` (P,) sequence types; fused inside the encoder (``SequenceFusion``)."""
         b = x.shape[0]
+        fuse = None
+        if study is not None and len(study["row"]) and getattr(self.backbone, "fusion", None) is not None:
+            row = study["row"]
+            s_max = 1 + int(torch.bincount(row, minlength=b).max())
+            index = torch.full((b, s_max), -1, dtype=torch.long, device=x.device)
+            index[:, 0] = torch.arange(b, device=x.device)
+            slot = torch.zeros(b, dtype=torch.long, device=x.device)
+            for j in range(len(row)):                               # P is small (a few partners per batch)
+                r = int(row[j])
+                slot[r] += 1
+                index[r, int(slot[r])] = b + j
+            seq = torch.zeros_like(index)
+            seq[:, 0] = study["seq"]
+            part = index[:, 1:]
+            sub = seq[:, 1:]
+            sub[part >= 0] = study["pseq"][part[part >= 0] - b]
+            fuse = {"n_out": b, "index": index, "seq": seq}
+            x = torch.cat([x, study["x"].to(x.dtype)])
+            keep = torch.cat([keep, keep[row]])
+            meta = None if meta is None else torch.cat([meta, meta[row]])
+        n_rows = x.shape[0]
         coords, pmm = self._coords(x.shape[2:], x.device)
         tt = write = ids = None
         if self.tokens:
@@ -269,9 +358,9 @@ class BrainQuery(nn.Module):
             if ids.numel() == 0:
                 raise ValueError("task tokens: no trained tasks set (set_token_tasks) and none asked")
             tt, write = self.task_queries(ids), self.tt_write[ids]
-        out = self.backbone(x.permute(0, 1, 4, 3, 2), coords.unsqueeze(0).expand(b, -1, -1),
-                            pmm.unsqueeze(0).expand(b, -1), keep=keep, taps=self.taps, meta=meta,
-                            task_tokens=tt, task_write=write)
+        out = self.backbone(x.permute(0, 1, 4, 3, 2), coords.unsqueeze(0).expand(n_rows, -1, -1),
+                            pmm.unsqueeze(0).expand(n_rows, -1), keep=keep, taps=self.taps, meta=meta,
+                            task_tokens=tt, task_write=write, **({"fuse": fuse} if fuse is not None else {}))
         out["coords"] = coords
         if self.tokens:
             out["tt_ids"] = ids
@@ -368,13 +457,14 @@ class BrainQuery(nn.Module):
 
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
                 encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None,
-                dense_pair: torch.Tensor | None = None, tok_pair: torch.Tensor | None = None) -> dict:
+                dense_pair: torch.Tensor | None = None, tok_pair: torch.Tensor | None = None,
+                study: dict | None = None) -> dict:
         """Typed answers per slot; ``out["seg"]`` (segmentation slots, ``seg_pair`` order) and ``out["dense"]`` (dense
         slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``."""
         # task tokens live inside the encoder, so their gradient has to pass through it even when the encoder is frozen
         # (few-shot fitting: its weights have requires_grad off and get none)
         with torch.set_grad_enabled(torch.is_grad_enabled() and (encoder_grad or self.tokens)):
-            enc = self.encode(x, keep, meta, task)
+            enc = self.encode(x, keep, meta, task, study)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         z = self.member(z, task)
         out = self.heads(z, task)
@@ -391,7 +481,8 @@ class BrainQuery(nn.Module):
             grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g).contiguous()   # DDP grad layout
             pairs = torch.cat([seg_pair, dense_pair]) if n_dense else seg_pair
             is_dense = torch.arange(n_seg + n_dense, device=x.device) >= n_seg
-            maps = self.seg(grid, x, pairs[:, 0], z[pairs[:, 0], pairs[:, 1]], dense=is_dense if n_dense else None)
+            maps = self.seg(grid, x, pairs[:, 0], z[pairs[:, 0], pairs[:, 1]], dense=is_dense if n_dense else None,
+                            **({"chan": task[pairs[:, 0], pairs[:, 1]]} if self.seg_shared else {}))
             out["seg"] = maps[:n_seg] if n_seg else None
             out["dense"] = maps[n_seg:] if n_dense else None
         return out

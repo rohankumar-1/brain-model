@@ -1,0 +1,642 @@
+volume_id,reason,other,r
+fomo_corr_t1w:sub-0950_ses-01_t1w,copy of a benchmark scan,abide1:USM_0050436,0.999640465182768
+fomo_corr_t1w:sub-0968_ses-01_t1w,copy of a benchmark scan,abide1:USM_0050468,0.998018902483214
+mri:BraTS-GoAT-01501-t1n,twin of a val / test scan,mri:BraTS-GLI-00768-000-t1n,0.9951237978793768
+fomo_corr_t1w:sub-0958_ses-01_t1w,copy of a benchmark scan,abide1:USM_0050450,0.9992136210721532
+mri:BraTS-GoAT-01501-t2f,twin of a val / test scan,mri:BraTS-GLI-00768-000-t2f,0.9906139210607052
+ct:RSNA-ID_c2ca0ef259,twin of a val / test scan,ct:RSNA-ID_c9c04a6d84,0.9807259694091912
+mri:BraTS-GoAT-02290-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0385_t1n,0.9928178502243014
+mri:BraTS-GoAT-01501-t1c,twin of a val / test scan,mri:BraTS-GLI-00768-000-t1c,0.9890367119111404
+ct:RSNA-ID_422bad0857,twin of a val / test scan,ct:RSNA-ID_21fa164048,0.9905030049853848
+fomo_ahead_t1w:sub-087_ses-01_t1w,twin of a val / test scan,fomo_ahead_t1w:sub-033_ses-01_t1w,0.9884802031184566
+mri:BraTS-MEN-00520-000-t1n,twin of a val / test scan,mri:BraTS-GoAT-00576-t1n,0.985736926480022
+ct:RSNA-ID_abb84f694f,twin of a val / test scan,ct:RSNA-ID_d07c9b1eaf,0.9884140192860618
+fomo_corr_t1w:sub-0972_ses-01_t1w,copy of a benchmark scan,abide1:USM_0050473,0.9986791896903404
+ct:RSNA-ID_7a177de382,twin of a val / test scan,ct:RSNA-ID_54ccdc962d,0.9855068284118724
+ct:RSNA-ID_9436d7a73a,twin of a val / test scan,ct:RSNA-ID_fd13eace83,0.9871231071021588
+fomo_corr_t1w:sub-0123_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051053,0.9883238659567768
+ct:RSNA-ID_d7601b25c5,twin of a val / test scan,ct:RSNA-ID_16e3193823,0.9912931819538044
+ct:RSNA-ID_39d1b4e1f5,twin of a val / test scan,ct:RSNA-ID_b46dd78686,0.9765961138472924
+fomo_corr_t1w:sub-0073_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051062,0.9889227334775268
+mri:BraTS-GLI-01003-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_256,0.9869279000573344
+fomo_corr_t1w:sub-0971_ses-01_t1w,copy of a benchmark scan,abide1:USM_0050471,0.9981898997777356
+ct:RSNA-ID_f8432d162b,twin of a val / test scan,ct:RSNA-ID_78c3273be7,0.9805385531225876
+ct:RSNA-ID_a2ee5e28d9,twin of a val / test scan,ct:RSNA-ID_1010f40806,0.9857353033780012
+mri:BraTS-GoAT-01075-t1n,twin of a val / test scan,mri:BraTS-MEN-00662-000-t1n,0.9908737527754308
+mri:BraTS-GoAT-00917-t1n,twin of a val / test scan,mri:BraTS-GLI-01002-000-t1n,0.981558136151661
+mri:BraTS-GLI-01003-000-t2f,twin of a val / test scan,mri:BraTS-GoAT-02227-t2f,0.9533669530559656
+mri:BraTS-GLI-01493-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_221,0.990709714428809
+mri:BraTS-MEN-01103-000-t1n,twin of a val / test scan,mri:BraTS-GoAT-01096-t1n,0.9846555761358102
+ct:RSNA-ID_7c4b291db1,twin of a val / test scan,ct:RSNA-ID_b40e067c3b,0.965329866746906
+mri:BraTS-GLI-01003-000-t2w,twin of a val / test scan,mri:BraTS-GoAT-02227-t2w,0.9678527564604548
+mri:BraTS-GoAT-00917-t2w,twin of a val / test scan,mri:BraTS-GLI-01002-000-t2w,0.9740685914678708
+mri:BraTS-GLI-00758-000-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0433_FU007d_t1n,0.981850933641127
+ct:RSNA-ID_c769583768,twin of a val / test scan,hemseg:RSNA-ID_517f0ae994,0.9861698038001414
+ct:RSNA-ID_ce65c3d48b,twin of a val / test scan,ct:RSNA-ID_b9486bf01a,0.9882346315731844
+mri:BraTS-MEN-00520-000-t2w,twin of a val / test scan,mri:BraTS-GoAT-00576-t2w,0.9738468285066076
+mri:BraTS-MEN-00520-000-t1c,twin of a val / test scan,mri:BraTS-GoAT-00576-t1c,0.9625452641899078
+mri:BraTS-GoAT-02290-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0385_t2w,0.9845636837049546
+mri:BraTS-GoAT-02475-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0325_t1n,0.9876628618042818
+mri:BraTS-GoAT-02280-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0348_t1n,0.992710471257292
+fomo_corr_t1w:sub-0038_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051073,0.9844530741081332
+mri:BraTS-GoAT-02300-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0386_t1n,0.9875293448519528
+ct:RSNA-ID_a817af6249,twin of a val / test scan,ct:RSNA-ID_40161c87b6,0.9724421426371423
+ct:RSNA-ID_9869450bc3,twin of a val / test scan,ct:RSNA-ID_94baec2268,0.9756644027131736
+mri:BraTS-GoAT-02312-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0517_t1n,0.9881244768079812
+mri:BraTS-GoAT-02393-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0358_t1n,0.9814058282386332
+ct:RSNA-ID_7cada6936b,twin of a val / test scan,ct:RSNA-ID_fb41bd6eb3,0.9810154522397686
+fomo_corr_t1w:sub-0148_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051051,0.984941465091356
+mri:BraTS-GoAT-00917-t1c,twin of a val / test scan,mri:BraTS-GLI-01002-000-t1c,0.9610229538133672
+mri:BraTS-GLI-01484-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_218,0.9672776243604474
+mri:BraTS-GLI-01003-000-t1c,twin of a val / test scan,mri:BraTS-GoAT-02227-t1c,0.957285137920306
+mri:BraTS-GoAT-01507-t2f,twin of a val / test scan,mri:BraTS-GLI-01016-000-t2f,0.9541437163491342
+mri:BraTS-GoAT-01075-t2w,twin of a val / test scan,mri:BraTS-MEN-00662-000-t2w,0.9684610916514532
+fomo_corr_t1w:sub-0109_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051125,0.9848670308099124
+ct:RSNA-ID_e88cd1321a,twin of a val / test scan,ct:RSNA-ID_ccad96e431,0.981851060113296
+mri:BraTS-GoAT-02379-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0176_t1n,0.9808747145675892
+ct:RSNA-ID_52da57f914,twin of a val / test scan,ct:RSNA-ID_4daa7b9cc7,0.9848126009363772
+fomo_corr_t1w:sub-0965_ses-01_t1w,copy of a benchmark scan,abide1:USM_0050464,0.9946462275120888
+mri:BraTS-GLI-01267-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_366,0.9759881913327554
+mri:BraTS-GLI-00758-000-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0433_FU007d_t2w,0.9534960130761586
+mri:BraTS-GoAT-02499-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0494_t1n,0.988894812051804
+fomo_corr_t1w:sub-0122_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051121,0.9818898406222364
+fomo_corr_t1w:sub-0021_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051046,0.9840301915218193
+fomo_corr_t1w:sub-0193_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051088,0.9778359357745356
+mri:BraTS-GoAT-01507-t2w,twin of a val / test scan,mri:BraTS-GLI-01016-000-t2w,0.9690340375211692
+fomo_corr_t1w:sub-0097_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051129,0.9824472343019444
+ct:RSNA-ID_a372ae7d5e,twin of a val / test scan,ct:RSNA-ID_b0968800c5,0.9807027299110328
+fomo_corr_t1w:sub-0144_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051115,0.9854270816166876
+mri:BraTS-GoAT-01075-t2f,twin of a val / test scan,mri:BraTS-MEN-00662-000-t2f,0.9647669883807852
+mri:BraTS-GoAT-02276-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0532_t1n,0.989180288824662
+mri:BraTS-GoAT-02282-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0381_t1n,0.9842124756710834
+mri:BraTS-GoAT-02269-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0207_t1n,0.9759666391368956
+ct:RSNA-ID_dfca837a9e,twin of a val / test scan,ct:RSNA-ID_c4c987a873,0.9706725934181236
+ct:RSNA-ID_335a861519,twin of a val / test scan,ct:RSNA-ID_a230454d7d,0.9816001339748536
+ct:RSNA-ID_385ff5466c,twin of a val / test scan,ct:RSNA-ID_4be48aee19,0.956739772188582
+mri:BraTS-GoAT-02269-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0207_t2w,0.9529637948585084
+ct:RSNA-ID_81e4594077,twin of a val / test scan,ct:RSNA-ID_20efd332cc,0.9816880589913668
+fomo_corr_t1w:sub-0175_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051057,0.9809696761585552
+ct:RSNA-ID_86bd89c2ed,twin of a val / test scan,ct:RSNA-ID_c6e88f7166,0.9863002150504426
+fomo_corr_t1w:sub-0190_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051147,0.9828016874234994
+fomo_corr_t1w:sub-0182_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051148,0.9779600237913848
+mri:BraTS-GoAT-02475-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0325_t2f,0.9635161576775116
+mri:BraTS-GoAT-02393-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0358_t2w,0.9271205994593814
+mri:BraTS-GoAT-02312-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0517_t1c,0.9707054031120568
+ct:RSNA-ID_fa07f2543c,twin of a val / test scan,ct:RSNA-ID_a86d9a588a,0.960216330461264
+mri:BraTS-GoAT-01507-t1c,twin of a val / test scan,mri:BraTS-GLI-01016-000-t1c,0.97738770648581
+mri:BraTS-GLI-00758-000-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0433_FU007d_t1c,0.9628576092077632
+fomo_corr_t1w:sub-0092_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051105,0.9802925617200884
+mri:BraTS-GoAT-02462-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0333_t1n,0.9822798219597496
+ct:RSNA-ID_67eb6655ed,twin of a val / test scan,ct:RSNA-ID_dfa992b2c9,0.9404122441214656
+fomo_corr_t1w:sub-0098_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051056,0.9836881525596308
+mri:BraTS-GLI-00140-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_238,0.961112396159106
+fomo_corr_t1w:sub-0052_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051061,0.980495374430987
+mri:BraTS-GoAT-02393-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0358_t1c,0.9495044779909788
+fomo_corr_t1w:sub-0020_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051048,0.9820211773590132
+ct:RSNA-ID_ef32954c6b,twin of a val / test scan,ct:RSNA-ID_736ccc385f,0.9542368107250216
+ct:RSNA-ID_1aec88a278,twin of a val / test scan,ct:RSNA-ID_0b10ddcdc3,0.9875850562462302
+mri:BraTS-GoAT-02561-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0115_t1n,0.981906624130192
+mri:BraTS-GoAT-02276-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0532_t2f,0.9787182761022758
+mri:BraTS-GoAT-02300-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0386_t1c,0.9722194343172104
+mri:BraTS-GoAT-02307-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0508_t1n,0.9752046979696948
+mri:BraTS-GoAT-02465-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0392_t1n,0.9797504669487758
+mri:BraTS-GoAT-01075-t1c,twin of a val / test scan,mri:BraTS-MEN-00662-000-t1c,0.9724627852713325
+mri:BraTS-GoAT-02312-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0517_t2w,0.9546944147881954
+ct:RSNA-ID_00320855ef,twin of a val / test scan,ct:RSNA-ID_79b8f0df2d,0.9628740421095932
+mri:BraTS-GoAT-02442-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0410_t1n,0.9758875890913262
+mri:BraTS-GoAT-02538-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0497_t1n,0.9796222908335014
+fomo_corr_t1w:sub-0137_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051109,0.9723836661666958
+fomo_corr_t1w:sub-0136_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051110,0.9719158145470016
+fomo_corr_t1w:sub-0088_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051102,0.9789397020152244
+fomo_corr_t1w:sub-0080_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051094,0.9753190396412093
+ct:RSNA-ID_dc9cf0e45e,twin of a val / test scan,ct:RSNA-ID_607672ce6c,0.9109489121291874
+mri:BraTS-GoAT-02269-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0207_t1c,0.9485889844869788
+fomo_corr_t1w:sub-0180_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051149,0.9794381295456502
+mri:BraTS-MEN-01103-000-t1c,twin of a val / test scan,mri:BraTS-GoAT-01096-t1c,0.9671272929370892
+mri:BraTS-GoAT-02300-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0386_t2w,0.9476832802159724
+mri:BraTS-GoAT-02393-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0358_t2f,0.9618213681911196
+ct:RSNA-ID_7878d2be3d,twin of a val / test scan,ct:RSNA-ID_a09b7b4166,0.9601161923681972
+mri:BraTS-GoAT-02290-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0385_t2f,0.988010937602526
+mri:BraTS-GLI-02572-100-t1n,twin of a val / test scan,mri:BraTS-GLI-02640-100-t1n,0.9767700546983178
+mri:BraTS-GoAT-02401-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0276_t2w,0.9333003339616714
+mri:BraTS-GoAT-02442-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0410_t1c,0.9610530610842714
+mri:BraTS-GoAT-02307-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0508_t2w,0.9380206818850552
+mri:BraTS-GLI-00758-000-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0433_FU007d_t2f,0.9567154551209176
+fomo_corr_t1w:sub-0095_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051126,0.9774605557179856
+fomo_corr_t1w:sub-0065_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051154,0.958617522703316
+fomo_corr_t1w:sub-0139_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051055,0.978308408599876
+fomo_corr_t1w:sub-0164_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051112,0.974379018250201
+mri:BraTS-GoAT-02573-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0160_t1n,0.9879917237042456
+fomo_corr_t1w:sub-0723_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-150_ses-01_t1w,0.9800352151240252
+ct:RSNA-ID_6f63c82599,twin of a val / test scan,ct:RSNA-ID_70e3b76dc3,0.9498041356193
+mri:BraTS-GoAT-02307-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0508_t2f,0.9428841503691342
+mri:BraTS-GoAT-02282-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0381_t2w,0.9455353688315384
+fomo_corr_t1w:sub-0081_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051091,0.9667623620479217
+mri:BraTS-GoAT-02453-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0205_t1n,0.970255962934672
+mri:BraTS-GoAT-02269-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0207_t2f,0.956577170673527
+fomo_corr_t1w:sub-0076_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051090,0.9587152304831036
+mri:BraTS-MEN-01103-000-t2w,twin of a val / test scan,mri:BraTS-GoAT-01096-t2w,0.9232892624225112
+mri:BraTS-GoAT-02401-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0276_t1n,0.9567317766666292
+fomo_corr_t1w:sub-0016_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051050,0.9751533986600596
+ct:RSNA-ID_ba330d71d9,twin of a val / test scan,ct:RSNA-ID_5a0841156c,0.9605592239326036
+mri:BraTS-GoAT-02508-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0073_t1n,0.9775778087110956
+ct:RSNA-ID_032e8dc2a6,twin of a val / test scan,ct:RSNA-ID_bd81acdde5,0.917081205491682
+fomo_corr_t1w:sub-0025_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051122,0.9658482160465928
+mri:BraTS-GoAT-02379-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0176_t1c,0.9480519189890434
+ct:RSNA-ID_848e5c4d0e,twin of a val / test scan,ct:RSNA-ID_78ccf2c1fb,0.9293897511657332
+mri:BraTS-GLI-01005-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_234,0.9469740398157552
+mri:BraTS-GoAT-02297-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0206_t1n,0.9661824825149116
+fomo_corr_t1w:sub-0077_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051113,0.9764098438644572
+mri:BraTS-GoAT-02442-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0410_t2f,0.9403903142099111
+ct:RSNA-ID_1718e879ff,twin of a val / test scan,ct:RSNA-ID_41dd86b884,0.906287611448624
+ct:RSNA-ID_2963e7479b,twin of a val / test scan,ct:RSNA-ID_e9d4bdd5cb,0.9310474597190358
+fomo_slim_t1w:sub-146_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0719_ses-02_t1w,0.98995681251913
+fomo_corr_t1w:sub-0058_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051059,0.9787597790740432
+mri:BraTS-GoAT-02276-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0532_t1c,0.961404933396133
+mri:BraTS-GoAT-02253-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0204_t1n,0.9747136993176948
+mri:BraTS-GoAT-02276-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0532_t2w,0.966711946410178
+mri:BraTS-GoAT-02312-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0517_t2f,0.9674539119474892
+mri:BraTS-GoAT-00784-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0016_t1n,0.9513974936561
+mri:BraTS-GoAT-02499-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0494_t2w,0.9401839083961242
+fomo_corr_t1w:sub-0671_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-097_ses-01_t1w,0.9741933362987965
+fomo_corr_t1w:sub-0528_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0520_ses-01_t1w,0.9898441745484328
+mri:BraTS-GoAT-02538-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0497_t2w,0.93008560578656
+mri:BraTS-GoAT-02282-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0381_t1c,0.9701441853906532
+mri:BraTS-GoAT-02273-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0019_t1n,0.967308075273812
+mri:BraTS-GoAT-02442-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0410_t2w,0.9287908506913198
+ct:RSNA-ID_80cb85cc07,twin of a val / test scan,ct:RSNA-ID_eea96e2b12,0.9061671474327349
+mri:BraTS-MEN-01103-000-t2f,twin of a val / test scan,mri:BraTS-GoAT-01096-t2f,0.9412595676739194
+fomo_corr_t1w:sub-0971_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050471,0.9822030545371376
+ct:RSNA-ID_50a0160c0a,twin of a val / test scan,hemseg:RSNA-ID_3e3634f8cf,0.9499361795426544
+mri:BraTS-GoAT-02465-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0392_t2f,0.944865162341056
+fomo_corr_t1w:sub-0032_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051044,0.9720424250356332
+mri:BraTS-GoAT-02381-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0094_t1n,0.9490180782444512
+ct:RSNA-ID_bb68ada61e,twin of a val / test scan,ct:RSNA-ID_45d85e1cf9,0.9048052068719312
+mri:BraTS-GoAT-02290-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0385_t1c,0.985699764378141
+mri:BraTS-GLI-01281-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_410,0.9441908841040388
+mri:BraTS-GoAT-02401-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0276_t2f,0.9450426301873828
+fomo_corr_t1w:sub-0613_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-039_ses-01_t1w,0.9716684108468436
+fomo_slim_t1w:sub-146_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0719_ses-01_t1w,0.98242955671277
+mri:BraTS-GoAT-02280-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0348_t2w,0.9440680838578454
+mri:BraTS-GoAT-02538-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0497_t2f,0.9597637117723092
+mri:BraTS-GoAT-02465-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0392_t2w,0.9261943432970364
+mri:BraTS-GoAT-02401-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0276_t1c,0.9349018792738628
+mri:BraTS-GoAT-02381-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0094_t1c,0.916015184535632
+fomo_corr_t1w:sub-0970_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050470,0.979303617075166
+fomo_corr_t1w:sub-0160_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051067,0.9732302596592708
+fomo_corr_t1w:sub-0157_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051068,0.9709199330035584
+mri:BraTS-GoAT-02538-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0497_t1c,0.943128235217242
+mri:BraTS-GoAT-02300-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0386_t2f,0.9712297413264828
+ct:RSNA-ID_d9dc6cb126,twin of a val / test scan,bhsd:RSNA-ID_11a3b1afdc,0.9700063386258736
+fomo_corr_t1w:sub-0075_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051064,0.9671789348879852
+fomo_corr_t1w:sub-0611_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-037_ses-02_t1w,0.9852569254412072
+fomo_corr_t1w:sub-0058_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051059,0.9826213521640912
+mri:BraTS-GoAT-02508-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0073_t1c,0.9444101131569732
+fomo_corr_t1w:sub-0723_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-150_ses-02_t1w,0.9793461443782616
+mri:BraTS-GoAT-02475-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0325_t2w,0.9367655711401748
+mri:BraTS-GoAT-02379-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0176_t2w,0.9448558946808678
+mri:BraTS-GoAT-02450-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0122_t1n,0.9570313141000414
+mri:BraTS-GoAT-02376-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0341_t1n,0.9715502685960142
+mri:BraTS-GoAT-02521-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0210_t1n,0.9672318526328848
+hemseg:RSNA-ID_a2ee5e28d9,twin of a val / test scan,ct:RSNA-ID_1010f40806,0.9782046796559232
+mri:BraTS-GoAT-02381-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0094_t2f,0.9192769856524536
+fomo_corr_t1w:sub-0639_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-065_ses-02_t1w,0.9876622284712272
+mri:BraTS-GoAT-02499-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0494_t2f,0.962509658321024
+mri:BraTS-GoAT-02475-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0325_t1c,0.9630415469091532
+fomo_corr_t1w:sub-0156_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051114,0.9735582918978242
+fomo_corr_t1w:sub-0954_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050442,0.9848553153994206
+fomo_corr_t1w:sub-0608_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-034_ses-02_t1w,0.9836423932266538
+mri:BraTS-GoAT-02381-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0094_t2w,0.9293328695916744
+mri:BraTS-GoAT-02508-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0073_t2f,0.9672050205632876
+fomo_corr_t1w:sub-1304_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0714_ses-01_t1w,0.9856802820251048
+mri:BraTS-GoAT-02282-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0381_t2f,0.9497433176320532
+fomo_corr_t1w:sub-0030_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051081,0.9607152818279686
+mri:BraTS-GoAT-02297-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0206_t2f,0.9348126684692932
+mri:BraTS-GLI-02572-100-t1c,twin of a val / test scan,mri:BraTS-GLI-02640-100-t1c,0.9619616819524908
+fomo_corr_t1w:sub-0953_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050441,0.973656071991004
+fomo_slim_t1w:sub-192_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0765_ses-02_t1w,0.9745845459161232
+mri:BraTS-GLI-01004-000-t1n,copy of a benchmark scan,upenn_gbm_t1n:UPENN-GBM-00336_11_t1n,0.9521673272382184
+fomo_corr_t1w:sub-0668_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-094_ses-01_t1w,0.9798320292454176
+fomo_corr_t1w:sub-1304_ses-03_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0714_ses-02_t1w,0.9807172572075612
+fomo_corr_t1w:sub-0762_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-189_ses-02_t1w,0.9668517540402602
+ct:RSNA-ID_f78d1c2ed8,twin of a val / test scan,ct:RSNA-ID_bbed51225b,0.911656099610606
+fomo_corr_t1w:sub-0957_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050448,0.9598826211283488
+mri:BraTS-GoAT-02379-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0176_t2f,0.957200588620084
+fomo_yale_highres_t1w:sub-002_ses-04_t1w,twin of a val / test scan,fomo_yale_highres_t1w:sub-013_ses-01_t1w,0.9710033457990866
+fomo_slim_t1w:sub-158_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0731_ses-02_t1w,0.9829567296197604
+mri:BraTS-GoAT-02462-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0333_t2w,0.9497404160215208
+fomo_corr_t1w:sub-0759_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-186_ses-02_t1w,0.9878159960999428
+ct:RSNA-ID_1f4321c42b,twin of a val / test scan,ct:RSNA-ID_0903b0c459,0.9429652664878908
+fomo_corr_t1w:sub-0964_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050462,0.9881933188645692
+ct:RSNA-ID_1d872d37c6,twin of a val / test scan,ct:RSNA-ID_815b89398e,0.9221063413483696
+fomo_corr_t1w:sub-0958_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050450,0.9773300268816836
+mri:BraTS-GoAT-02253-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0204_t1c,0.9468121912830012
+mri:BraTS-GoAT-02332-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0069_t1n,0.93909685453711
+mri:BraTS-GoAT-02332-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0069_t2f,0.9451649712780194
+mri:BraTS-GoAT-02280-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0348_t1c,0.9782716294949216
+mri:BraTS-GoAT-02555-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0096_t2f,0.9191208635164456
+mri:BraTS-GLI-01004-000-t2f,copy of a benchmark scan,upenn_gbm_t2f:UPENN-GBM-00336_11_t2f,0.9056961108013808
+mri:BraTS-GLI-02639-101-t1n,twin of a val / test scan,mri:BraTS-GLI-02570-104-t1n,0.961407069800256
+mri:BraTS-GoAT-02450-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0122_t2f,0.9241243733961164
+mri:BraTS-GoAT-02453-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0205_t2f,0.9436011776109164
+mri:BraTS-GoAT-02307-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0508_t1c,0.9353226754297485
+fomo_corr_t1w:sub-0812_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0900_ses-01_t1w,0.983570417082844
+mri:BraTS-GoAT-02280-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0348_t2f,0.9593871988310472
+mri:BraTS-GoAT-02462-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0333_t1c,0.9324177736677354
+mri:BraTS-GoAT-02273-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0019_t2f,0.9481767018714038
+fomo_slim_t1w:sub-132_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0705_ses-01_t1w,0.984181326876229
+mri:BraTS-GLI-00557-000-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0429_FU003d_t1n,0.9351865671348244
+mri:BraTS-GoAT-02311-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0142_t2w,0.9087700222592028
+fomo_corr_t1w:sub-1304_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0714_ses-01_t1w,0.9820173959037936
+mri:BraTS-GoAT-02555-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0096_t1c,0.922700133358168
+fomo_corr_t1w:sub-1189_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0808_ses-01_t1w,0.9851823649704576
+mri:BraTS-GoAT-02450-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0122_t1c,0.9251201132383532
+mri:BraTS-GoAT-02573-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0160_t2f,0.9684973162885328
+fomo_corr_t1w:sub-0961_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050455,0.9658454634877636
+ct:RSNA-ID_b62be836e0,twin of a val / test scan,ct:RSNA-ID_c801a3e447,0.948803199635858
+mri:BraTS-GoAT-02273-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0019_t2w,0.9285815268594828
+mri:BraTS-GoAT-02555-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0096_t1n,0.9457489076683214
+fomo_slim_t1w:sub-196_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0769_ses-02_t1w,0.9795373045442392
+fomo_corr_t1w:sub-0718_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-145_ses-01_t1w,0.9831542474089224
+mri:BraTS-GoAT-02555-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0096_t2w,0.9077431199093526
+mri:BraTS-GoAT-02521-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0210_t1c,0.94293086611973
+mri:BraTS-GoAT-02311-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0142_t2f,0.9096928014647524
+fomo_corr_t1w:sub-0050_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051153,0.9691288611889388
+mri:BraTS-GoAT-02462-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0333_t2f,0.9574927224001724
+fomo_corr_t1w:sub-0668_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-094_ses-01_t1w,0.97858953270268
+fomo_slim_t1w:sub-158_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0731_ses-01_t1w,0.978437225527374
+mri:BraTS-GoAT-02573-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0160_t2w,0.9656616650719736
+fomo_corr_t1w:sub-0053_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051130,0.9675243999644249
+fomo_slim_t1w:sub-064_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0638_ses-01_t1w,0.9822882465664436
+fomo_corr_t1w:sub-0812_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0900_ses-01_t1w,0.9801225076832234
+mri:BraTS-GoAT-02561-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0115_t2f,0.9407996572258748
+fomo_corr_t1w:sub-0045_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051146,0.9621905812397676
+mri:BraTS-GoAT-02297-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0206_t2w,0.9131932400019028
+mri:BraTS-GoAT-02297-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0206_t1c,0.9057060611698852
+fomo_corr_t1w:sub-0171_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051119,0.971380946317111
+ct:RSNA-ID_f3d12f3047,twin of a val / test scan,ct:RSNA-ID_bb0ece9b03,0.9205318350993126
+mri:BraTS-GoAT-02453-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0205_t1c,0.9484633949329476
+fomo_corr_t1w:sub-0596_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-022_ses-01_t1w,0.9779001832886788
+fomo_corr_t1w:sub-0639_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-065_ses-01_t1w,0.980505932738282
+fomo_slim_t1w:sub-009_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0594_ses-02_t1w,0.9860500857045154
+fomo_corr_t1w:sub-0083_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051038,0.9497918002163734
+fomo_corr_t1w:sub-0955_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050446,0.9814906466862936
+fomo_slim_t1w:sub-132_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0705_ses-02_t1w,0.9784854727450236
+fomo_corr_t1w:sub-0788_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-215_ses-02_t1w,0.9813229340064378
+fomo_slim_t1w:sub-142_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0715_ses-01_t1w,0.9725544217770054
+mri:BraTS-GoAT-02333-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0068_t1n,0.9515339647713056
+fomo_corr_t1w:sub-0788_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-215_ses-01_t1w,0.9725278966898444
+fomo_yale_highres_t1w:sub-002_ses-03_t1w,twin of a val / test scan,fomo_yale_highres_t1w:sub-013_ses-01_t1w,0.9661826403528936
+fomo_corr_t1w:sub-0073_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051062,0.966768362154486
+mri:BraTS-GoAT-02311-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0142_t1c,0.9159932830385796
+mri:BraTS-GoAT-02311-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0142_t1n,0.9291141827911696
+fomo_slim_t1w:sub-063_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0637_ses-01_t1w,0.9660570675759068
+mri:BraTS-GoAT-02332-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0069_t1c,0.92913712401806
+mri:BraTS-GoAT-02533-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0022_t1n,0.924307066550626
+fomo_corr_t1w:sub-0759_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-186_ses-01_t1w,0.9772007225411976
+fomo_corr_t1w:sub-0065_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051154,0.9383695757565022
+fomo_corr_t1w:sub-0780_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-207_ses-02_t1w,0.9738218514224743
+mri:BraTS-GoAT-02332-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0069_t2w,0.92455226346436
+fomo_corr_t1w:sub-0966_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050465,0.9770078236700755
+mri:BraTS-GoAT-02333-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0068_t2f,0.9163362094951898
+mri:BraTS-GoAT-02376-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0341_t1c,0.9023503576416544
+fomo_corr_t1w:sub-0600_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-026_ses-02_t1w,0.9811695016462454
+fomo_corr_t1w:sub-0619_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-045_ses-01_t1w,0.976881417616133
+fomo_corr_t1w:sub-0780_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-207_ses-01_t1w,0.9723877891186224
+fomo_corr_t1w:sub-0613_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-039_ses-02_t1w,0.9704820558288332
+fomo_slim_t1w:sub-142_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0715_ses-02_t1w,0.976275669017667
+fomo_corr_t1w:sub-0138_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051091,0.9582043311287144
+fomo_corr_t1w:sub-0951_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050438,0.9687641837174708
+fomo_corr_t1w:sub-0619_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-045_ses-02_t1w,0.9757431832049795
+mri:BraTS-GoAT-02465-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0392_t1c,0.9585240972381508
+fomo_corr_t1w:sub-0108_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051072,0.9472392229768568
+fomo_corr_t1w:sub-0031_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051093,0.945159574566364
+fomo_slim_t1w:sub-141_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0714_ses-01_t1w,0.9782593303213496
+mri:BraTS-GoAT-02450-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0122_t2w,0.9245915448343024
+fomo_slim_t1w:sub-070_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0644_ses-02_t1w,0.9732505819085912
+fomo_corr_t1w:sub-0039_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051074,0.9555026538979884
+fomo_corr_t1w:sub-0967_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050467,0.9785520102238152
+mri:BraTS-GoAT-02376-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0341_t2w,0.9262572751135346
+fomo_corr_t1w:sub-0608_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-034_ses-01_t1w,0.9802081138079176
+mri:BraTS-GoAT-02561-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0115_t1c,0.9543545593782168
+ct:RSNA-ID_3d741e8951,twin of a val / test scan,ct:RSNA-ID_d390afa9ba,0.9237328436184864
+fomo_corr_t1w:sub-0948_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050434,0.9803682899881332
+mri:BraTS-GoAT-02253-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0204_t2f,0.9198932327690084
+fomo_corr_t1w:sub-0612_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-038_ses-01_t1w,0.9755467557203644
+mri:BraTS-GoAT-02376-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0341_t2f,0.9360450391961732
+fomo_brainlat_t1w:sub-516_ses-01_t1w,twin of a val / test scan,fomo_brainlat_t1w:sub-537_ses-01_t1w,0.953677760924657
+mri:BraTS-GoAT-02521-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0210_t2f,0.9011460486169696
+mri:BraTS-GoAT-02565-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0381_t1n,0.9412289640944514
+fomo_corr_t1w:sub-0959_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050451,0.9435113191638668
+mri:BraTS-GLI-02572-100-t2w,twin of a val / test scan,mri:BraTS-GLI-02640-100-t2w,0.9164376941956942
+fomo_corr_t1w:sub-0947_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050433,0.972963498363182
+fomo_corr_t1w:sub-0790_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-217_ses-01_t1w,0.9560071564090096
+fomo_corr_t1w:sub-0632_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-058_ses-02_t1w,0.973048847958318
+mri:BraTS-GoAT-02333-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0068_t1c,0.9135880519054508
+fomo_corr_t1w:sub-0694_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-120_ses-01_t1w,0.9675165568024028
+fomo_slim_t1w:sub-064_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0638_ses-02_t1w,0.9712702984083292
+fomo_corr_t1w:sub-0952_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050440,0.9699749565414608
+fomo_corr_t1w:sub-0684_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-110_ses-02_t1w,0.9686177297025476
+fomo_corr_t1w:sub-0777_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-204_ses-02_t1w,0.9763405797566348
+fomo_corr_t1w:sub-0762_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-189_ses-01_t1w,0.9782100203727182
+fomo_corr_t1w:sub-0754_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-181_ses-02_t1w,0.9660252426230928
+fomo_corr_t1w:sub-0697_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-123_ses-01_t1w,0.9635924243663568
+fomo_corr_t1w:sub-0754_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-181_ses-02_t1w,0.9737778217476944
+ct:RSNA-ID_0829f98c0d,twin of a val / test scan,ct:RSNA-ID_849b12eb1f,0.9310058483840152
+fomo_slim_t1w:sub-081_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0655_ses-02_t1w,0.9452706255397398
+fomo_slim_t1w:sub-130_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0703_ses-02_t1w,0.9800001663656712
+fomo_corr_t1w:sub-0050_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051153,0.9629500126998218
+fomo_slim_t1w:sub-063_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0637_ses-02_t1w,0.9731274765554844
+fomo_corr_t1w:sub-0611_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-037_ses-01_t1w,0.9705406070697886
+fomo_yale_highres_t1w:sub-038_ses-01_t1w,twin of a val / test scan,fomo_yale_highres_t1w:sub-159_ses-01_t1w,0.9679378118736784
+fomo_slim_t1w:sub-009_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0594_ses-02_t1w,0.9677223414268658
+fomo_corr_t1w:sub-0596_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-022_ses-02_t1w,0.9524592271177376
+fomo_corr_t1w:sub-0710_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-137_ses-01_t1w,0.9635538628087346
+fomo_corr_t1w:sub-0693_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-119_ses-01_t1w,0.9752894494185422
+fomo_slim_t1w:sub-061_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0635_ses-01_t1w,0.961425194685609
+fomo_slim_t1w:sub-043_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0617_ses-02_t1w,0.9328160921182712
+mri:BraTS-GLI-02630-103-t1n,twin of a val / test scan,mri:BraTS-GLI-02524-104-t1n,0.9430659750836003
+mri:BraTS-GoAT-02453-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0205_t2w,0.9279309860348526
+fomo_corr_t1w:sub-0783_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-210_ses-01_t1w,0.9791137825818328
+fomo_slim_t1w:sub-136_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0709_ses-02_t1w,0.9791066169398014
+fomo_corr_t1w:sub-0725_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-152_ses-02_t1w,0.976232634101816
+fomo_corr_t1w:sub-0790_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-217_ses-01_t1w,0.956157170516336
+mri:BraTS-GLI-00148-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_134,0.9404041183082668
+mri:BraTS-GoAT-02573-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0160_t1c,0.9704040408827014
+fomo_slim_t1w:sub-030_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0604_ses-01_t1w,0.9382795746009808
+fomo_corr_t1w:sub-0055_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051063,0.9704957162599248
+fomo_corr_t1w:sub-0968_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050468,0.9533898593458836
+fomo_corr_t1w:sub-0710_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-137_ses-02_t1w,0.9613541663555664
+fomo_corr_t1w:sub-0742_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-169_ses-02_t1w,0.970887123267393
+fomo_corr_t1w:sub-0742_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-169_ses-01_t1w,0.9703857086254706
+mri:BraTS-GoAT-02561-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0115_t2w,0.921847214423471
+fomo_corr_t1w:sub-0658_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0526_ses-01_t1w,0.959739748633541
+ct:RSNA-ID_a391297c9c,twin of a val / test scan,ct:RSNA-ID_ef5399405a,0.9074836724871068
+fomo_corr_t1w:sub-0600_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-026_ses-01_t1w,0.9599084430139628
+ct:RSNA-ID_b444ca120e,twin of a val / test scan,ct:RSNA-ID_50b89b4e3c,0.9128505965516762
+fomo_corr_t1w:sub-0963_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050460,0.958017640036702
+fomo_corr_t1w:sub-0671_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-097_ses-01_t1w,0.9666676387989724
+ct:RSNA-ID_8e388643b8,twin of a val / test scan,ct:RSNA-ID_f1c9cf06cd,0.9051759243056712
+fomo_slim_t1w:sub-202_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0775_ses-02_t1w,0.9715280717827698
+fomo_corr_t1w:sub-0634_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-060_ses-02_t1w,0.9646215680745333
+fomo_slim_t1w:sub-141_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0714_ses-02_t1w,0.9676537984937198
+fomo_corr_t1w:sub-0602_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-028_ses-02_t1w,0.9584936953697656
+mri:BraTS-GoAT-02387-t1n,twin of a val / test scan,mri:BraTS-GoAT-02277-t1n,0.9424117502137044
+mri:BraTS-GoAT-02527-t1n,twin of a val / test scan,mri:BraTS-GoAT-02277-t1n,0.9320958193674068
+fomo_corr_t1w:sub-0602_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-028_ses-02_t1w,0.9583223438397688
+fomo_corr_t1w:sub-0694_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-120_ses-02_t1w,0.9657262736483568
+fomo_yale_highres_t1w:sub-018_ses-01_t1w,twin of a val / test scan,fomo_yale_highres_t1w:sub-004_ses-01_t1w,0.9360445514905548
+fomo_corr_t1w:sub-0748_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-175_ses-01_t1w,0.9532508903803536
+fomo_corr_t1w:sub-0789_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-216_ses-02_t1w,0.9554308699481674
+fomo_corr_t1w:sub-0029_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051069,0.920980319558731
+fomo_corr_t1w:sub-0693_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-119_ses-02_t1w,0.96629994067866
+ct:RSNA-ID_f889ec8d0e,twin of a val / test scan,ct:RSNA-ID_19644ef118,0.9104260339015666
+fomo_corr_t1w:sub-0783_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-210_ses-02_t1w,0.975346853353842
+fomo_corr_t1w:sub-0972_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050473,0.9741199818384728
+fomo_slim_t1w:sub-055_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0629_ses-01_t1w,0.950452542477573
+fomo_corr_t1w:sub-0697_ses-02_t1w,twin of a val / test scan,fomo_slim_t1w:sub-123_ses-01_t1w,0.961530749634212
+mri:BraTS-GLI-00557-000-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0429_FU003d_t2f,0.9198302108499422
+fomo_corr_t1w:sub-0950_ses-02_t1w,copy of a benchmark scan,abide1:USM_0050436,0.9483652427045026
+mri:BraTS-GoAT-02508-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0073_t2w,0.9253487286966068
+mri:BraTS-GoAT-00784-t2f,copy of a benchmark scan,ucsf_pdgm_t2f:UCSF-PDGM-0016_t2f,0.9102843982199872
+fomo_corr_t1w:sub-0036_ses-02_t1w,copy of a benchmark scan,abide1:NYU_0051086,0.9123853647134754
+fomo_slim_t1w:sub-192_ses-01_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0765_ses-01_t1w,0.916980731162268
+hemseg:RSNA-ID_8e388643b8,twin of a val / test scan,ct:RSNA-ID_f1c9cf06cd,0.9050646454211552
+mri:BraTS-GoAT-02499-t1c,copy of a benchmark scan,ucsf_pdgm_t1c:UCSF-PDGM-0494_t1c,0.9633975272214974
+mri:BraTS-GLI-01454-000-t1n,copy of a benchmark scan,msd_braintumor:BRATS_148,0.918933197964984
+fomo_corr_t1w:sub-0023_ses-01_t1w,copy of a benchmark scan,abide1:NYU_0051124,0.959718816227496
+synthrad_ct:2BB151,twin of a val / test scan,synthrad_ct:1BB151,0.9312867582523752
+fomo_slim_t1w:sub-055_ses-02_t1w,twin of a val / test scan,fomo_corr_t1w:sub-0629_ses-02_t1w,0.96027446089643
+fomo_corr_t1w:sub-0777_ses-01_t1w,twin of a val / test scan,fomo_slim_t1w:sub-204_ses-02_t1w,0.9615946445712252
+mri:BraTS-GoAT-02253-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0204_t2w,0.9045468862589704
+mri:BraTS-GLI-00557-000-t2w,copy of a benchmark scan,ucsf_pdgm_t2w:UCSF-PDGM-0429_FU003d_t2w,0.912191190237812
+mri:BraTS-GLI-02969-101-t1n,copy of a benchmark scan,ucsf_pdgm_t1n:UCSF-PDGM-0348_t1n,0.9486771275785604
+fomo_corr_t1w:sub-1411_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1419_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1427_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_wand_t2w:sub-006_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-038_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-083_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-145_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_highres_t1w:sub-006_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_highres_t1w:sub-008_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t1w:sub-0554_ses-13_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_pd:sub-0838_ses-03_pd,"contrast swap: labelled pd, tissue order t1-like",,
+fomo_yale_mets_t2w:sub-0908_ses-12_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_corr_t1w:sub-1412_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1420_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_wand_t2w:sub-058_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-115_ses-05_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_mets_pd:sub-0635_ses-01_pd,"contrast swap: labelled pd, tissue order t1-like",,
+fomo_corr_t1w:sub-1413_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1421_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_wand_t2w:sub-067_ses-04_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-082_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-106_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-139_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_mets_t2w:sub-1070_ses-13_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_corr_t1w:sub-1414_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1422_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_wand_t2w:sub-024_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_mets_pd:sub-0417_ses-08_pd,"contrast swap: labelled pd, tissue order t1-like",,
+fomo_yale_mets_t2w:sub-1426_ses-29_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+mri:BraTS-GLI-02479-100-t1c,"contrast swap: labelled t1c, tissue order t2-like",,
+fomo_corr_t1w:sub-1415_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_wand_t2w:sub-090_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_highres_t1w:sub-001_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t1w:sub-0554_ses-08_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t1w:sub-0554_ses-18_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t1w:sub-1307_ses-12_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t2w:sub-1426_ses-30_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_corr_t1w:sub-1416_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1424_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1432_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_nigerian_t2w:sub-50_ses-01_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-163_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-173_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_highres_t1w:sub-001_ses-02_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_pd:sub-0348_ses-04_pd,"contrast swap: labelled pd, tissue order t1-like",,
+fomo_yale_mets_t1w:sub-0554_ses-19_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t1w:sub-1307_ses-13_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_corr_t1w:sub-1425_ses-01_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_wand_t2w:sub-056_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_highres_t1w:sub-009_ses-03_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_mets_t1c:sub-0789_ses-02_t1c,"contrast swap: labelled t1c, tissue order t2-like",,
+fomo_yale_mets_t2w:sub-0908_ses-01_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-096_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-116_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_wand_t2w:sub-132_ses-06_t2w,"contrast swap: labelled t2, tissue order t1-like",,
+fomo_yale_highres_t1w:sub-003_ses-04_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_highres_t1w:sub-005_ses-04_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_highres_t1w:sub-007_ses-04_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+fomo_yale_highres_t1w:sub-009_ses-04_t1w,"contrast swap: labelled t1, tissue order t2-like",,
+ct:RSNA-ID_47c157a15c,CT Hounsfield scale off,,
+synthrad_cbct:2BA010,CT Hounsfield scale off,,
+ct:RSNA-ID_f492dad766,CT Hounsfield scale off,,
+ct:RSNA-ID_6e93b23277,CT Hounsfield scale off,,
+ct:RSNA-ID_01be051852,CT Hounsfield scale off,,
+ct:RSNA-ID_35bba17b46,CT Hounsfield scale off,,
+synthrad_cbct:2BA025,CT Hounsfield scale off,,
+synthrad_cbct:2BB003,CT Hounsfield scale off,,
+synthrad_cbct:2BB008,CT Hounsfield scale off,,
+synthrad_cbct:2BB026,CT Hounsfield scale off,,
+synthrad_cbct:2BB033,CT Hounsfield scale off,,
+synthrad_cbct:2BB043,CT Hounsfield scale off,,
+synthrad_cbct:2BB050,CT Hounsfield scale off,,
+synthrad_cbct:2BB062,CT Hounsfield scale off,,
+synthrad_cbct:2BB073,CT Hounsfield scale off,,
+synthrad_cbct:2BB082,CT Hounsfield scale off,,
+synthrad_cbct:2BB091,CT Hounsfield scale off,,
+synthrad_cbct:2BB099,CT Hounsfield scale off,,
+synthrad_cbct:2BB111,CT Hounsfield scale off,,
+synthrad_cbct:2BB171,CT Hounsfield scale off,,
+synthrad_cbct:2BB179,CT Hounsfield scale off,,
+synthrad_cbct:2BB198,CT Hounsfield scale off,,
+synthrad_cbct:2BC006,CT Hounsfield scale off,,
+synthrad_cbct:2BC012,CT Hounsfield scale off,,
+synthrad_cbct:2BC016,CT Hounsfield scale off,,
+synthrad_cbct:2BC021,CT Hounsfield scale off,,
+synthrad_cbct:2BC026,CT Hounsfield scale off,,
+synthrad_cbct:2BC035,CT Hounsfield scale off,,
+synthrad_cbct:2BC042,CT Hounsfield scale off,,
+synthrad_cbct:2BC046,CT Hounsfield scale off,,
+synthrad_cbct:2BC050,CT Hounsfield scale off,,
+synthrad_cbct:2BC057,CT Hounsfield scale off,,
+synthrad_cbct:2BC064,CT Hounsfield scale off,,
+synthrad_cbct:2BC071,CT Hounsfield scale off,,
+synthrad_cbct:2BC075,CT Hounsfield scale off,,
+synthrad_cbct:2BC082,CT Hounsfield scale off,,
+synthrad_cbct:2BC089,CT Hounsfield scale off,,
+ct:RSNA-ID_aec169b436,CT Hounsfield scale off,,
+ct:RSNA-ID_9d75104016,CT Hounsfield scale off,,
+ct:RSNA-ID_ad585ff750,CT Hounsfield scale off,,
+ct:RSNA-ID_7cf344c5e8,CT Hounsfield scale off,,
+synthrad_cbct:2BA001,CT Hounsfield scale off,,
+synthrad_cbct:2BA055,CT Hounsfield scale off,,
+ct:RSNA-ID_34a06b3e21,CT Hounsfield scale off,,
+ct:RSNA-ID_3f7e75c3fc,CT Hounsfield scale off,,
+ct:RSNA-ID_7951f1a5e9,CT Hounsfield scale off,,
+ct:RSNA-ID_34416da239,CT Hounsfield scale off,,
+ct:RSNA-ID_68233d29bc,CT Hounsfield scale off,,
+synthrad_cbct:2BA027,CT Hounsfield scale off,,
+synthrad_cbct:2BA047,CT Hounsfield scale off,,
+synthrad_cbct:2BA077,CT Hounsfield scale off,,
+synthrad_cbct:2BB005,CT Hounsfield scale off,,
+synthrad_cbct:2BB011,CT Hounsfield scale off,,
+synthrad_cbct:2BB028,CT Hounsfield scale off,,
+synthrad_cbct:2BB034,CT Hounsfield scale off,,
+synthrad_cbct:2BB044,CT Hounsfield scale off,,
+synthrad_cbct:2BB051,CT Hounsfield scale off,,
+synthrad_cbct:2BB066,CT Hounsfield scale off,,
+synthrad_cbct:2BB075,CT Hounsfield scale off,,
+synthrad_cbct:2BB083,CT Hounsfield scale off,,
+synthrad_cbct:2BB095,CT Hounsfield scale off,,
+synthrad_cbct:2BB100,CT Hounsfield scale off,,
+synthrad_cbct:2BB145,CT Hounsfield scale off,,
+synthrad_cbct:2BB173,CT Hounsfield scale off,,
+synthrad_cbct:2BB182,CT Hounsfield scale off,,
+synthrad_cbct:2BB200,CT Hounsfield scale off,,
+synthrad_cbct:2BC007,CT Hounsfield scale off,,
+synthrad_cbct:2BC013,CT Hounsfield scale off,,
+synthrad_cbct:2BC017,CT Hounsfield scale off,,
+synthrad_cbct:2BC022,CT Hounsfield scale off,,
+synthrad_cbct:2BC027,CT Hounsfield scale off,,
+synthrad_cbct:2BC037,CT Hounsfield scale off,,
+synthrad_cbct:2BC043,CT Hounsfield scale off,,
+synthrad_cbct:2BC047,CT Hounsfield scale off,,
+synthrad_cbct:2BC051,CT Hounsfield scale off,,
+synthrad_cbct:2BC059,CT Hounsfield scale off,,
+synthrad_cbct:2BC066,CT Hounsfield scale off,,
+synthrad_cbct:2BC072,CT Hounsfield scale off,,
+synthrad_cbct:2BC076,CT Hounsfield scale off,,
+synthrad_cbct:2BC085,CT Hounsfield scale off,,
+synthrad_cbct:2BC090,CT Hounsfield scale off,,
+ct:RSNA-ID_ccb8066cd0,CT Hounsfield scale off,,
+ct:RSNA-ID_462f860663,CT Hounsfield scale off,,
+ct:RSNA-ID_98243d96c3,CT Hounsfield scale off,,
+synthrad_cbct:2BA056,CT Hounsfield scale off,,
+ct:RSNA-ID_e9f918f8fc,CT Hounsfield scale off,,
+ct:RSNA-ID_21ca36242b,CT Hounsfield scale off,,
+ct:RSNA-ID_186fdd245d,CT Hounsfield scale off,,
+ct:RSNA-ID_5335772148,CT Hounsfield scale off,,
+ct:RSNA-ID_1aafc78402,CT Hounsfield scale off,,
+ct:RSNA-ID_718e47422d,CT Hounsfield scale off,,
+ct:RSNA-ID_88c047ab4e,CT Hounsfield scale off,,
+ct:RSNA-ID_f8043935c3,CT Hounsfield scale off,,
+ct:RSNA-ID_95d0eb61a6,CT Hounsfield scale off,,
+synthrad_cbct:2BA002,CT Hounsfield scale off,,
+synthrad_cbct:2BA049,CT Hounsfield scale off,,
+synthrad_cbct:2BB006,CT Hounsfield scale off,,
+synthrad_cbct:2BB016,CT Hounsfield scale off,,
+synthrad_cbct:2BB030,CT Hounsfield scale off,,
+synthrad_cbct:2BB039,CT Hounsfield scale off,,
+synthrad_cbct:2BB048,CT Hounsfield scale off,,
+synthrad_cbct:2BB052,CT Hounsfield scale off,,
+synthrad_cbct:2BB071,CT Hounsfield scale off,,
+synthrad_cbct:2BB076,CT Hounsfield scale off,,
+synthrad_cbct:2BB085,CT Hounsfield scale off,,
+synthrad_cbct:2BB096,CT Hounsfield scale off,,
+synthrad_cbct:2BB102,CT Hounsfield scale off,,
+synthrad_cbct:2BB151,CT Hounsfield scale off,,
+synthrad_cbct:2BB175,CT Hounsfield scale off,,
+synthrad_cbct:2BB184,CT Hounsfield scale off,,
+synthrad_cbct:2BB205,CT Hounsfield scale off,,
+synthrad_cbct:2BC010,CT Hounsfield scale off,,
+synthrad_cbct:2BC014,CT Hounsfield scale off,,
+synthrad_cbct:2BC018,CT Hounsfield scale off,,
+synthrad_cbct:2BC023,CT Hounsfield scale off,,
+synthrad_cbct:2BC038,CT Hounsfield scale off,,
+synthrad_cbct:2BC044,CT Hounsfield scale off,,
+synthrad_cbct:2BC048,CT Hounsfield scale off,,
+synthrad_cbct:2BC055,CT Hounsfield scale off,,
+synthrad_cbct:2BC060,CT Hounsfield scale off,,
+synthrad_cbct:2BC068,CT Hounsfield scale off,,
+synthrad_cbct:2BC073,CT Hounsfield scale off,,
+synthrad_cbct:2BC079,CT Hounsfield scale off,,
+synthrad_cbct:2BC086,CT Hounsfield scale off,,
+ct:RSNA-ID_47d82b035b,CT Hounsfield scale off,,
+ct:RSNA-ID_090f5c6a84,CT Hounsfield scale off,,
+ct:RSNA-ID_4a594faf8f,CT Hounsfield scale off,,
+ct:RSNA-ID_1c08d77b04,CT Hounsfield scale off,,
+ct:RSNA-ID_6cdae38cde,CT Hounsfield scale off,,
+synthrad_cbct:2BB002,CT Hounsfield scale off,,
+ct:RSNA-ID_509efa0d70,CT Hounsfield scale off,,
+ct:RSNA-ID_6d622d9445,CT Hounsfield scale off,,
+ct:RSNA-ID_8981333cfc,CT Hounsfield scale off,,
+ct:RSNA-ID_0e6317bedd,CT Hounsfield scale off,,
+synthrad_cbct:2BA024,CT Hounsfield scale off,,
+synthrad_cbct:2BB007,CT Hounsfield scale off,,
+synthrad_cbct:2BB017,CT Hounsfield scale off,,
+synthrad_cbct:2BB031,CT Hounsfield scale off,,
+synthrad_cbct:2BB041,CT Hounsfield scale off,,
+synthrad_cbct:2BB049,CT Hounsfield scale off,,
+synthrad_cbct:2BB059,CT Hounsfield scale off,,
+synthrad_cbct:2BB072,CT Hounsfield scale off,,
+synthrad_cbct:2BB079,CT Hounsfield scale off,,
+synthrad_cbct:2BB090,CT Hounsfield scale off,,
+synthrad_cbct:2BB098,CT Hounsfield scale off,,
+synthrad_cbct:2BB109,CT Hounsfield scale off,,
+synthrad_cbct:2BB152,CT Hounsfield scale off,,
+synthrad_cbct:2BB177,CT Hounsfield scale off,,
+synthrad_cbct:2BB189,CT Hounsfield scale off,,
+synthrad_cbct:2BC002,CT Hounsfield scale off,,
+synthrad_cbct:2BC011,CT Hounsfield scale off,,
+synthrad_cbct:2BC015,CT Hounsfield scale off,,
+synthrad_cbct:2BC019,CT Hounsfield scale off,,
+synthrad_cbct:2BC024,CT Hounsfield scale off,,
+synthrad_cbct:2BC033,CT Hounsfield scale off,,
+synthrad_cbct:2BC040,CT Hounsfield scale off,,
+synthrad_cbct:2BC045,CT Hounsfield scale off,,
+synthrad_cbct:2BC049,CT Hounsfield scale off,,
+synthrad_cbct:2BC056,CT Hounsfield scale off,,
+synthrad_cbct:2BC061,CT Hounsfield scale off,,
+synthrad_cbct:2BC070,CT Hounsfield scale off,,
+synthrad_cbct:2BC074,CT Hounsfield scale off,,
+synthrad_cbct:2BC081,CT Hounsfield scale off,,
+synthrad_cbct:2BC088,CT Hounsfield scale off,,
+pedi_cranial_ct:sub-00025_ses-01,infant CT not scaled to the template,,
+pedi_cranial_ct:sub-00057_ses-01,infant CT not scaled to the template,,
+pedi_cranial_ct:sub-00107_ses-01,infant CT not scaled to the template,,
+pedi_cranial_ct:sub-00204_ses-01,infant CT not scaled to the template,,
+pedi_cranial_ct:sub-00356_ses-01,infant CT not scaled to the template,,
+pedi_cranial_ct:sub-00488_ses-01,infant CT not scaled to the template,,

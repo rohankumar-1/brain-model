@@ -100,21 +100,31 @@ def load_or_build_embeddings(
         force = True
     if path.exists() and not force:
         data = np.load(path, allow_pickle=False)
-        same_ids = [str(x) for x in data["volume_ids"]] == ids
+        cached = [str(x) for x in data["volume_ids"]]
+        same_ids = cached == ids
+        # a subset of a cached list (a task after the benchmark's decontamination exclusions): rows of the cache
+        pos = {v: i for i, v in enumerate(cached)}
+        sub = None if same_ids or not set(ids) <= set(pos) else np.asarray([pos[v] for v in ids])
         fresh = "ckpt_fingerprint" in data.files and str(data["ckpt_fingerprint"]) == model.fingerprint
         if not fresh:
             print(f"[cache] stale (the model changed after it was built), rebuilding: {path}", flush=True)
-        if same_ids and fresh:
+        if (same_ids or sub is not None) and fresh:
             mus = np.load(path.with_suffix(".mus.npy"), mmap_mode="r") if "mus" not in data.files else data["mus"]
+            if sub is not None:
+                print(f"[cache] {len(ids)} of the {len(cached)} cached volumes (decontaminated subset): {path}",
+                      flush=True)
+            pick = (lambda a: a[sub]) if sub is not None else (lambda a: a)  # noqa: E731  per-volume rows
+            mus = pick(mus)
             # small caches as float32; big ones stay float16 (a float32 copy of RSNA's tokens alone was ~220 GB):
             # the heads cast per chunk
             big = mus.shape[1] > 8192 or mus.nbytes > BIG_CACHE_BYTES
             mus = mus if (big or mus.dtype == np.float32) else mus.astype(np.float32)
-            return {"volume_ids": ids, "mus": mus, "mask": data["mask"], "z": np.asarray(data["z"], dtype=np.float32),
+            return {"volume_ids": ids, "mus": mus, "mask": pick(data["mask"]),
+                    "z": np.asarray(pick(data["z"]), dtype=np.float32),
                     "latent_dim": int(data["latent_dim"]), "max_slices": int(mus.shape[1]),
                     "representation": str(data["representation"]), "cache_path": path,
-                    "cls": data["cls"] if "cls" in data.files else None,
-                    "registers": data["registers"] if "registers" in data.files else None}
+                    "cls": pick(data["cls"]) if "cls" in data.files else None,
+                    "registers": pick(data["registers"]) if "registers" in data.files else None}
     from brain.downstream.embed3d import extract_volume_embeddings
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -136,14 +146,22 @@ def load_or_build_embeddings(
             payload[k] = e[k].astype(np.float32)
     # Uncompressed for the big grids: compressing ~20 GB of embeddings is slower than the encode.
     tmp = path.with_name(path.stem + ".tmp.npz")             # write then rename: a full disk leaves no truncated cache
-    if payload["mus"].nbytes > BIG_CACHE_BYTES:             # tokens to an uncompressed .npy, read back memory-mapped
-        side = path.with_suffix(".mus.npy")
-        np.save(side.with_name(side.stem + ".tmp.npy"), payload.pop("mus"))
-        os.replace(side.with_name(side.stem + ".tmp.npy"), side)
-        np.savez(tmp, **payload)
-    else:
-        (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(tmp, **payload)
-    os.replace(tmp, path)
+    side = path.with_suffix(".mus.npy")
+    side_tmp = side.with_name(side.stem + ".tmp.npy")
+    try:
+        if payload["mus"].nbytes > BIG_CACHE_BYTES:         # tokens to an uncompressed .npy, read back memory-mapped
+            np.save(side_tmp, payload.pop("mus"))
+            os.replace(side_tmp, side)
+            np.savez(tmp, **payload)
+        else:
+            (np.savez if mus.shape[1] > 8192 else np.savez_compressed)(tmp, **payload)
+        os.replace(tmp, path)
+    except OSError:
+        # a full quota mid-write (2026-11-05: three ~20 GB orphans): leave nothing half-written behind; the caller
+        # still gets the in-memory embeddings only if it catches this, so the task fails cleanly and can be rerun
+        for p in (side_tmp, tmp, side):
+            p.unlink(missing_ok=True)
+        raise
     return {"volume_ids": ids, "mus": mus, "mask": e["mask"], "z": e["z"], "latent_dim": int(mus.shape[-1]),
             "max_slices": int(mus.shape[1]), "representation": "tokens", "cache_path": path,
             "cls": e["cls"], "registers": e["registers"]}

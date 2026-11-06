@@ -217,7 +217,12 @@ def ssl_exclude(ckpt) -> list[str]:
     path = Path(ckpt).parent / "config.yaml"
     if not path.exists():
         return []
-    return list(((yaml.safe_load(path.read_text()) or {}).get("data") or {}).get("ssl_exclude") or [])
+    cfg = yaml.safe_load(path.read_text()) or {}
+    d = cfg.get("data") or {}
+    out = list(d.get("ssl_exclude") or [])
+    if "joint" in cfg:     # a joint run's SSL pool also leaves out data.exclude_datasets (brain.data.volumes)
+        out += [f"{p}*" for p in d.get("exclude_datasets") or ()]
+    return out
 
 
 # ----------------------------------------------------------------------------- writing

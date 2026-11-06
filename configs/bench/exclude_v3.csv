@@ -1,0 +1,224 @@
+volume_id,reason,other,r
+atlas:sub-r064s008,second copy within its evaluation cohort,atlas:sub-r052s009,0.9946041501684862
+atlas:sub-r064s006,second copy within its evaluation cohort,atlas:sub-r052s029,0.9957911349799534
+atlas:sub-r059s025,second copy within its evaluation cohort,atlas:sub-r052s004,0.992627625547729
+ucsf_pdgm_t1n:UCSF-PDGM-0385_t1n,copy of a training scan,mri:BraTS-GoAT-02290-t1n,0.9928178502243014
+msd_braintumor:BRATS_256,copy of a training scan,mri:BraTS-GLI-01003-000-t1n,0.9869279000573344
+atlas:sub-r064s003,second copy within its evaluation cohort,atlas:sub-r052s031,0.993296243172468
+msd_braintumor:BRATS_221,copy of a training scan,mri:BraTS-GLI-01493-000-t1n,0.990709714428809
+ucsf_pdgm_t1n:UCSF-PDGM-0433_FU007d_t1n,copy of a training scan,mri:BraTS-GLI-00758-000-t1n,0.981850933641127
+ucsf_pdgm_t2w:UCSF-PDGM-0385_t2w,copy of a training scan,mri:BraTS-GoAT-02290-t2w,0.9845636837049546
+ucsf_pdgm_t1n:UCSF-PDGM-0325_t1n,copy of a training scan,mri:BraTS-GoAT-02475-t1n,0.9876628618042818
+ucsf_pdgm_t1n:UCSF-PDGM-0348_t1n,copy of a training scan,mri:BraTS-GoAT-02280-t1n,0.992710471257292
+ucsf_pdgm_t1n:UCSF-PDGM-0386_t1n,copy of a training scan,mri:BraTS-GoAT-02300-t1n,0.9875293448519528
+atlas:sub-r017s110,second copy within its evaluation cohort,atlas:sub-r015s011,0.983778481383322
+ucsf_pdgm_t1n:UCSF-PDGM-0517_t1n,copy of a training scan,mri:BraTS-GoAT-02312-t1n,0.9881244768079812
+ucsf_pdgm_t1n:UCSF-PDGM-0358_t1n,copy of a training scan,mri:BraTS-GoAT-02393-t1n,0.9814058282386332
+atlas:sub-r046s003,second copy within its evaluation cohort,atlas:sub-r045s003,0.991173647695096
+msd_braintumor:BRATS_218,copy of a training scan,mri:BraTS-GLI-01484-000-t1n,0.9672776243604474
+ucsf_pdgm_t1n:UCSF-PDGM-0176_t1n,copy of a training scan,mri:BraTS-GoAT-02379-t1n,0.9808747145675892
+msd_braintumor:BRATS_366,copy of a training scan,mri:BraTS-GLI-01267-000-t1n,0.9759881913327554
+ucsf_pdgm_t2w:UCSF-PDGM-0433_FU007d_t2w,copy of a training scan,mri:BraTS-GLI-00758-000-t2w,0.9534960130761586
+ucsf_pdgm_t1n:UCSF-PDGM-0494_t1n,copy of a training scan,mri:BraTS-GoAT-02499-t1n,0.988894812051804
+ucsf_pdgm_t1n:UCSF-PDGM-0290_t1n,copy of a training scan,mri:BraTS-GoAT-01501-t1n,0.980062762746782
+atlas:sub-r059s031,second copy within its evaluation cohort,atlas:sub-r017s119,0.9843195307838822
+ucsf_pdgm_t1n:UCSF-PDGM-0532_t1n,copy of a training scan,mri:BraTS-GoAT-02276-t1n,0.989180288824662
+ucsf_pdgm_t1n:UCSF-PDGM-0381_t1n,copy of a training scan,mri:BraTS-GoAT-02282-t1n,0.9842124756710834
+ucsf_pdgm_t1n:UCSF-PDGM-0207_t1n,copy of a training scan,mri:BraTS-GoAT-02269-t1n,0.9759666391368956
+ucsf_pdgm_t2w:UCSF-PDGM-0207_t2w,copy of a training scan,mri:BraTS-GoAT-02269-t2w,0.9529637948585084
+ucsf_pdgm_t2f:UCSF-PDGM-0325_t2f,copy of a training scan,mri:BraTS-GoAT-02475-t2f,0.9635161576775116
+ucsf_pdgm_t2w:UCSF-PDGM-0358_t2w,copy of a training scan,mri:BraTS-GoAT-02393-t2w,0.9271205994593814
+ucsf_pdgm_t1c:UCSF-PDGM-0517_t1c,copy of a training scan,mri:BraTS-GoAT-02312-t1c,0.9707054031120568
+ucsf_pdgm_t1c:UCSF-PDGM-0433_FU007d_t1c,copy of a training scan,mri:BraTS-GLI-00758-000-t1c,0.9628576092077632
+ucsf_pdgm_t1n:UCSF-PDGM-0333_t1n,copy of a training scan,mri:BraTS-GoAT-02462-t1n,0.9822798219597496
+msd_braintumor:BRATS_238,copy of a training scan,mri:BraTS-GLI-00140-000-t1n,0.961112396159106
+atlas:sub-soop1565,second copy within its evaluation cohort,atlas:sub-soop1006,0.9785113760465912
+ucsf_pdgm_t1c:UCSF-PDGM-0358_t1c,copy of a training scan,mri:BraTS-GoAT-02393-t1c,0.9495044779909788
+atlas:sub-soop0783,second copy within its evaluation cohort,atlas:sub-soop0290,0.9718241879224636
+ucsf_pdgm_t1n:UCSF-PDGM-0115_t1n,copy of a training scan,mri:BraTS-GoAT-02561-t1n,0.981906624130192
+ucsf_pdgm_t2f:UCSF-PDGM-0532_t2f,copy of a training scan,mri:BraTS-GoAT-02276-t2f,0.9787182761022758
+ucsf_pdgm_t1c:UCSF-PDGM-0386_t1c,copy of a training scan,mri:BraTS-GoAT-02300-t1c,0.9722194343172104
+ucsf_pdgm_t1n:UCSF-PDGM-0508_t1n,copy of a training scan,mri:BraTS-GoAT-02307-t1n,0.9752046979696948
+ucsf_pdgm_t2f:UCSF-PDGM-0290_t2f,copy of a training scan,mri:BraTS-GoAT-01501-t2f,0.9606617363336148
+ucsf_pdgm_t1n:UCSF-PDGM-0392_t1n,copy of a training scan,mri:BraTS-GoAT-02465-t1n,0.9797504669487758
+atlas:sub-r034s015,second copy within its evaluation cohort,atlas:sub-r003s015,0.980620550551569
+ucsf_pdgm_t2w:UCSF-PDGM-0517_t2w,copy of a training scan,mri:BraTS-GoAT-02312-t2w,0.9546944147881954
+ucsf_pdgm_t1n:UCSF-PDGM-0410_t1n,copy of a training scan,mri:BraTS-GoAT-02442-t1n,0.9758875890913262
+ucsf_pdgm_t1n:UCSF-PDGM-0497_t1n,copy of a training scan,mri:BraTS-GoAT-02538-t1n,0.9796222908335014
+atlas:sub-r017s113,second copy within its evaluation cohort,atlas:sub-r015s003,0.9776096101434124
+ucsf_pdgm_t1c:UCSF-PDGM-0207_t1c,copy of a training scan,mri:BraTS-GoAT-02269-t1c,0.9485889844869788
+ucsf_pdgm_t2w:UCSF-PDGM-0386_t2w,copy of a training scan,mri:BraTS-GoAT-02300-t2w,0.9476832802159724
+ucsf_pdgm_t2f:UCSF-PDGM-0358_t2f,copy of a training scan,mri:BraTS-GoAT-02393-t2f,0.9618213681911196
+ucsf_pdgm_t2f:UCSF-PDGM-0385_t2f,copy of a training scan,mri:BraTS-GoAT-02290-t2f,0.988010937602526
+atlas:sub-r034s006,second copy within its evaluation cohort,atlas:sub-r002s003,0.97392712138083
+ucsf_pdgm_t2w:UCSF-PDGM-0276_t2w,copy of a training scan,mri:BraTS-GoAT-02401-t2w,0.9333003339616714
+ucsf_pdgm_t1c:UCSF-PDGM-0410_t1c,copy of a training scan,mri:BraTS-GoAT-02442-t1c,0.9610530610842714
+ucsf_pdgm_t2w:UCSF-PDGM-0508_t2w,copy of a training scan,mri:BraTS-GoAT-02307-t2w,0.9380206818850552
+ucsf_pdgm_t2f:UCSF-PDGM-0433_FU007d_t2f,copy of a training scan,mri:BraTS-GLI-00758-000-t2f,0.9567154551209176
+ucsf_pdgm_t1n:UCSF-PDGM-0160_t1n,copy of a training scan,mri:BraTS-GoAT-02573-t1n,0.9879917237042456
+ucsf_pdgm_t2f:UCSF-PDGM-0508_t2f,copy of a training scan,mri:BraTS-GoAT-02307-t2f,0.9428841503691342
+ucsf_pdgm_t2w:UCSF-PDGM-0381_t2w,copy of a training scan,mri:BraTS-GoAT-02282-t2w,0.9455353688315384
+ucsf_pdgm_t1n:UCSF-PDGM-0205_t1n,copy of a training scan,mri:BraTS-GoAT-02453-t1n,0.970255962934672
+ucsf_pdgm_t2f:UCSF-PDGM-0207_t2f,copy of a training scan,mri:BraTS-GoAT-02269-t2f,0.956577170673527
+atlas:sub-r017s111,second copy within its evaluation cohort,atlas:sub-r015s025,0.9777971261290912
+msd_braintumor:BRATS_215,second copy within its evaluation cohort,msd_braintumor:BRATS_214,0.9634189715975078
+ucsf_pdgm_t1n:UCSF-PDGM-0276_t1n,copy of a training scan,mri:BraTS-GoAT-02401-t1n,0.9567317766666292
+ucsf_pdgm_t1n:UCSF-PDGM-0073_t1n,copy of a training scan,mri:BraTS-GoAT-02508-t1n,0.9775778087110956
+msd_braintumor:BRATS_185,second copy within its evaluation cohort,msd_braintumor:BRATS_184,0.9596107687485668
+ucsf_pdgm_t1c:UCSF-PDGM-0176_t1c,copy of a training scan,mri:BraTS-GoAT-02379-t1c,0.9480519189890434
+isles22_flair:sub-strokecase0126_flair,second copy within its evaluation cohort,isles22_flair:sub-strokecase0042_flair,0.9484886864959212
+atlas:sub-r018s006,second copy within its evaluation cohort,atlas:sub-r015s011,0.972958831680462
+msd_braintumor:BRATS_187,second copy within its evaluation cohort,msd_braintumor:BRATS_185,0.9604512910400153
+msd_braintumor:BRATS_234,copy of a training scan,mri:BraTS-GLI-01005-000-t1n,0.9469740398157552
+ucsf_pdgm_t1n:UCSF-PDGM-0206_t1n,copy of a training scan,mri:BraTS-GoAT-02297-t1n,0.9661824825149116
+ucsf_pdgm_t2f:UCSF-PDGM-0410_t2f,copy of a training scan,mri:BraTS-GoAT-02442-t2f,0.9403903142099111
+ucsf_pdgm_t1c:UCSF-PDGM-0532_t1c,copy of a training scan,mri:BraTS-GoAT-02276-t1c,0.961404933396133
+ucsf_pdgm_t1n:UCSF-PDGM-0204_t1n,copy of a training scan,mri:BraTS-GoAT-02253-t1n,0.9747136993176948
+atlas:sub-r018s004,second copy within its evaluation cohort,atlas:sub-r017s116,0.9717184935717388
+atlas:sub-r057s042,second copy within its evaluation cohort,atlas:sub-r048s005,0.9764455089304948
+ucsf_pdgm_t2w:UCSF-PDGM-0532_t2w,copy of a training scan,mri:BraTS-GoAT-02276-t2w,0.966711946410178
+ucsf_pdgm_t2f:UCSF-PDGM-0517_t2f,copy of a training scan,mri:BraTS-GoAT-02312-t2f,0.9674539119474892
+ucsf_pdgm_t1n:UCSF-PDGM-0016_t1n,copy of a training scan,mri:BraTS-GoAT-00784-t1n,0.9513974936561
+ucsf_pdgm_t2w:UCSF-PDGM-0494_t2w,copy of a training scan,mri:BraTS-GoAT-02499-t2w,0.9401839083961242
+ucsf_pdgm_t2w:UCSF-PDGM-0497_t2w,copy of a training scan,mri:BraTS-GoAT-02538-t2w,0.93008560578656
+ucsf_pdgm_t1c:UCSF-PDGM-0381_t1c,copy of a training scan,mri:BraTS-GoAT-02282-t1c,0.9701441853906532
+ucsf_pdgm_t1n:UCSF-PDGM-0019_t1n,copy of a training scan,mri:BraTS-GoAT-02273-t1n,0.967308075273812
+ucsf_pdgm_t2w:UCSF-PDGM-0410_t2w,copy of a training scan,mri:BraTS-GoAT-02442-t2w,0.9287908506913198
+ucsf_pdgm_t1c:UCSF-PDGM-0290_t1c,copy of a training scan,mri:BraTS-GoAT-01501-t1c,0.9523077510981078
+msd_braintumor:BRATS_186,second copy within its evaluation cohort,msd_braintumor:BRATS_185,0.9682461221158158
+ucsf_pdgm_t2f:UCSF-PDGM-0392_t2f,copy of a training scan,mri:BraTS-GoAT-02465-t2f,0.944865162341056
+ucsf_pdgm_t1n:UCSF-PDGM-0094_t1n,copy of a training scan,mri:BraTS-GoAT-02381-t1n,0.9490180782444512
+ucsf_pdgm_t1c:UCSF-PDGM-0385_t1c,copy of a training scan,mri:BraTS-GoAT-02290-t1c,0.985699764378141
+msd_braintumor:BRATS_184,second copy within its evaluation cohort,msd_braintumor:BRATS_183,0.9473393098019603
+msd_braintumor:BRATS_410,copy of a training scan,mri:BraTS-GLI-01281-000-t1n,0.9441908841040388
+ucsf_pdgm_t2f:UCSF-PDGM-0276_t2f,copy of a training scan,mri:BraTS-GoAT-02401-t2f,0.9450426301873828
+ucsf_pdgm_t2w:UCSF-PDGM-0348_t2w,copy of a training scan,mri:BraTS-GoAT-02280-t2w,0.9440680838578454
+atlas:sub-r018s001,second copy within its evaluation cohort,atlas:sub-r017s109,0.9761281753282164
+ucsf_pdgm_t2f:UCSF-PDGM-0497_t2f,copy of a training scan,mri:BraTS-GoAT-02538-t2f,0.9597637117723092
+ucsf_pdgm_t2w:UCSF-PDGM-0392_t2w,copy of a training scan,mri:BraTS-GoAT-02465-t2w,0.9261943432970364
+ucsf_pdgm_t1c:UCSF-PDGM-0276_t1c,copy of a training scan,mri:BraTS-GoAT-02401-t1c,0.9349018792738628
+ucsf_pdgm_t1c:UCSF-PDGM-0094_t1c,copy of a training scan,mri:BraTS-GoAT-02381-t1c,0.916015184535632
+atlas:sub-r017s117,second copy within its evaluation cohort,atlas:sub-r015s022,0.966269229072949
+atlas:sub-r017s119,second copy within its evaluation cohort,atlas:sub-r015s005,0.9731155471635792
+ucsf_pdgm_t1c:UCSF-PDGM-0497_t1c,copy of a training scan,mri:BraTS-GoAT-02538-t1c,0.943128235217242
+ucsf_pdgm_t2f:UCSF-PDGM-0386_t2f,copy of a training scan,mri:BraTS-GoAT-02300-t2f,0.9712297413264828
+ucsf_pdgm_t1c:UCSF-PDGM-0073_t1c,copy of a training scan,mri:BraTS-GoAT-02508-t1c,0.9444101131569732
+ucsf_pdgm_t2w:UCSF-PDGM-0325_t2w,copy of a training scan,mri:BraTS-GoAT-02475-t2w,0.9367655711401748
+ucsf_pdgm_t2w:UCSF-PDGM-0176_t2w,copy of a training scan,mri:BraTS-GoAT-02379-t2w,0.9448558946808678
+ucsf_pdgm_t1n:UCSF-PDGM-0122_t1n,copy of a training scan,mri:BraTS-GoAT-02450-t1n,0.9570313141000414
+ucsf_pdgm_t1n:UCSF-PDGM-0341_t1n,copy of a training scan,mri:BraTS-GoAT-02376-t1n,0.9715502685960142
+ucsf_pdgm_t1n:UCSF-PDGM-0210_t1n,copy of a training scan,mri:BraTS-GoAT-02521-t1n,0.9672318526328848
+msd_braintumor:BRATS_188,second copy within its evaluation cohort,msd_braintumor:BRATS_185,0.9525688826058608
+ucsf_pdgm_t2w:UCSF-PDGM-0433_t2w,copy of a training scan,mri:BraTS-GLI-00758-000-t2w,0.9375484571835824
+ucsf_pdgm_t2f:UCSF-PDGM-0094_t2f,copy of a training scan,mri:BraTS-GoAT-02381-t2f,0.9192769856524536
+atlas:sub-r017s116,second copy within its evaluation cohort,atlas:sub-r015s010,0.9708391109114825
+atlas:sub-soop1096,second copy within its evaluation cohort,atlas:sub-soop0829,0.9609131282943002
+atlas:sub-r044s003,second copy within its evaluation cohort,atlas:sub-r015s001,0.97433342378965
+ucsf_pdgm_t2f:UCSF-PDGM-0494_t2f,copy of a training scan,mri:BraTS-GoAT-02499-t2f,0.962509658321024
+ucsf_pdgm_t1c:UCSF-PDGM-0325_t1c,copy of a training scan,mri:BraTS-GoAT-02475-t1c,0.9630415469091532
+ucsf_pdgm_t2w:UCSF-PDGM-0094_t2w,copy of a training scan,mri:BraTS-GoAT-02381-t2w,0.9293328695916744
+ucsf_pdgm_t2f:UCSF-PDGM-0073_t2f,copy of a training scan,mri:BraTS-GoAT-02508-t2f,0.9672050205632876
+atlas:sub-r017s106,second copy within its evaluation cohort,atlas:sub-r015s002,0.9689455516269
+atlas:sub-r059s016,second copy within its evaluation cohort,atlas:sub-r052s022,0.967219830451066
+ucsf_pdgm_t2f:UCSF-PDGM-0381_t2f,copy of a training scan,mri:BraTS-GoAT-02282-t2f,0.9497433176320532
+ucsf_pdgm_t2f:UCSF-PDGM-0206_t2f,copy of a training scan,mri:BraTS-GoAT-02297-t2f,0.9348126684692932
+atlas:sub-r017s104,second copy within its evaluation cohort,atlas:sub-r015s007,0.9737524258703256
+upenn_gbm_t1n:UPENN-GBM-00336_11_t1n,copy of a training scan,mri:BraTS-GLI-01004-000-t1n,0.9521673272382184
+ucsf_pdgm_t2f:UCSF-PDGM-0176_t2f,copy of a training scan,mri:BraTS-GoAT-02379-t2f,0.957200588620084
+ucsf_pdgm_t2w:UCSF-PDGM-0333_t2w,copy of a training scan,mri:BraTS-GoAT-02462-t2w,0.9497404160215208
+ucsf_pdgm_t1c:UCSF-PDGM-0204_t1c,copy of a training scan,mri:BraTS-GoAT-02253-t1c,0.9468121912830012
+ucsf_pdgm_t1n:UCSF-PDGM-0069_t1n,copy of a training scan,mri:BraTS-GoAT-02332-t1n,0.93909685453711
+ucsf_pdgm_t2f:UCSF-PDGM-0069_t2f,copy of a training scan,mri:BraTS-GoAT-02332-t2f,0.9451649712780194
+ucsf_pdgm_t1c:UCSF-PDGM-0348_t1c,copy of a training scan,mri:BraTS-GoAT-02280-t1c,0.9782716294949216
+ucsf_pdgm_t2f:UCSF-PDGM-0096_t2f,copy of a training scan,mri:BraTS-GoAT-02555-t2f,0.9191208635164456
+atlas:sub-soop1298,second copy within its evaluation cohort,atlas:sub-soop1144,0.96113045268025
+atlas:sub-soop0795,second copy within its evaluation cohort,atlas:sub-soop0162,0.9335102580753524
+upenn_gbm_t2f:UPENN-GBM-00336_11_t2f,copy of a training scan,mri:BraTS-GLI-01004-000-t2f,0.9056961108013808
+msd_braintumor:BRATS_072,second copy within its evaluation cohort,msd_braintumor:BRATS_071,0.9672687867220968
+ucsf_pdgm_t2f:UCSF-PDGM-0122_t2f,copy of a training scan,mri:BraTS-GoAT-02450-t2f,0.9241243733961164
+ucsf_pdgm_t2f:UCSF-PDGM-0205_t2f,copy of a training scan,mri:BraTS-GoAT-02453-t2f,0.9436011776109164
+ucsf_pdgm_t1c:UCSF-PDGM-0508_t1c,copy of a training scan,mri:BraTS-GoAT-02307-t1c,0.9353226754297485
+ucsf_pdgm_t2f:UCSF-PDGM-0348_t2f,copy of a training scan,mri:BraTS-GoAT-02280-t2f,0.9593871988310472
+ucsf_pdgm_t1c:UCSF-PDGM-0333_t1c,copy of a training scan,mri:BraTS-GoAT-02462-t1c,0.9324177736677354
+ucsf_pdgm_t2f:UCSF-PDGM-0019_t2f,copy of a training scan,mri:BraTS-GoAT-02273-t2f,0.9481767018714038
+ucsf_pdgm_t1n:UCSF-PDGM-0429_FU003d_t1n,copy of a training scan,mri:BraTS-GLI-00557-000-t1n,0.9351865671348244
+ucsf_pdgm_t2w:UCSF-PDGM-0142_t2w,copy of a training scan,mri:BraTS-GoAT-02311-t2w,0.9087700222592028
+ucsf_pdgm_t1c:UCSF-PDGM-0096_t1c,copy of a training scan,mri:BraTS-GoAT-02555-t1c,0.922700133358168
+ucsf_pdgm_t1c:UCSF-PDGM-0122_t1c,copy of a training scan,mri:BraTS-GoAT-02450-t1c,0.9251201132383532
+ucsf_pdgm_t2f:UCSF-PDGM-0160_t2f,copy of a training scan,mri:BraTS-GoAT-02573-t2f,0.9684973162885328
+ucsf_pdgm_t2w:UCSF-PDGM-0019_t2w,copy of a training scan,mri:BraTS-GoAT-02273-t2w,0.9285815268594828
+msd_braintumor:BRATS_214,second copy within its evaluation cohort,msd_braintumor:BRATS_213,0.9375953427544528
+ucsf_pdgm_t1n:UCSF-PDGM-0096_t1n,copy of a training scan,mri:BraTS-GoAT-02555-t1n,0.9457489076683214
+atlas:sub-r017s101,second copy within its evaluation cohort,atlas:sub-r015s006,0.948873903829912
+ucsf_pdgm_t1n:UCSF-PDGM-0433_t1n,copy of a training scan,mri:BraTS-GLI-00758-000-t1n,0.956883824879872
+ucsf_pdgm_t2w:UCSF-PDGM-0096_t2w,copy of a training scan,mri:BraTS-GoAT-02555-t2w,0.9077431199093526
+ucsf_pdgm_t1c:UCSF-PDGM-0210_t1c,copy of a training scan,mri:BraTS-GoAT-02521-t1c,0.94293086611973
+ucsf_pdgm_t2f:UCSF-PDGM-0142_t2f,copy of a training scan,mri:BraTS-GoAT-02311-t2f,0.9096928014647524
+ucsf_pdgm_t2f:UCSF-PDGM-0333_t2f,copy of a training scan,mri:BraTS-GoAT-02462-t2f,0.9574927224001724
+isles22_adc:sub-strokecase0126_adc,second copy within its evaluation cohort,isles22_adc:sub-strokecase0042_adc,0.9305523354717142
+ucsf_pdgm_t2w:UCSF-PDGM-0160_t2w,copy of a training scan,mri:BraTS-GoAT-02573-t2w,0.9656616650719736
+ucsf_pdgm_t2f:UCSF-PDGM-0115_t2f,copy of a training scan,mri:BraTS-GoAT-02561-t2f,0.9407996572258748
+msd_braintumor:BRATS_070,second copy within its evaluation cohort,msd_braintumor:BRATS_069,0.9540654405828914
+ucsf_pdgm_t2w:UCSF-PDGM-0206_t2w,copy of a training scan,mri:BraTS-GoAT-02297-t2w,0.9131932400019028
+ucsf_pdgm_t1c:UCSF-PDGM-0206_t1c,copy of a training scan,mri:BraTS-GoAT-02297-t1c,0.9057060611698852
+msd_braintumor:BRATS_069,second copy within its evaluation cohort,msd_braintumor:BRATS_068,0.9523786470634822
+ucsf_pdgm_t1c:UCSF-PDGM-0205_t1c,copy of a training scan,mri:BraTS-GoAT-02453-t1c,0.9484633949329476
+msd_braintumor:BRATS_179,second copy within its evaluation cohort,msd_braintumor:BRATS_178,0.9513446807459196
+ucsf_pdgm_t1n:UCSF-PDGM-0068_t1n,copy of a training scan,mri:BraTS-GoAT-02333-t1n,0.9515339647713056
+atlas:sub-r061s001,second copy within its evaluation cohort,atlas:sub-r045s001,0.9452635767027184
+atlas:sub-r017s103,second copy within its evaluation cohort,atlas:sub-r015s001,0.9582187778048692
+ucsf_pdgm_t1c:UCSF-PDGM-0142_t1c,copy of a training scan,mri:BraTS-GoAT-02311-t1c,0.9159932830385796
+ucsf_pdgm_t1n:UCSF-PDGM-0142_t1n,copy of a training scan,mri:BraTS-GoAT-02311-t1n,0.9291141827911696
+ucsf_pdgm_t1c:UCSF-PDGM-0069_t1c,copy of a training scan,mri:BraTS-GoAT-02332-t1c,0.92913712401806
+ucsf_pdgm_t1n:UCSF-PDGM-0022_t1n,copy of a training scan,mri:BraTS-GoAT-02533-t1n,0.924307066550626
+ucsf_pdgm_t2w:UCSF-PDGM-0069_t2w,copy of a training scan,mri:BraTS-GoAT-02332-t2w,0.92455226346436
+ucsf_pdgm_t2f:UCSF-PDGM-0068_t2f,copy of a training scan,mri:BraTS-GoAT-02333-t2f,0.9163362094951898
+ucsf_pdgm_t1c:UCSF-PDGM-0341_t1c,copy of a training scan,mri:BraTS-GoAT-02376-t1c,0.9023503576416544
+msd_braintumor:BRATS_246,second copy within its evaluation cohort,msd_braintumor:BRATS_245,0.9242802074584664
+atlas:sub-r059s015,second copy within its evaluation cohort,atlas:sub-r052s026,0.9385225472615089
+ucsf_pdgm_t1c:UCSF-PDGM-0392_t1c,copy of a training scan,mri:BraTS-GoAT-02465-t1c,0.9585240972381508
+ucsf_pdgm_t2w:UCSF-PDGM-0122_t2w,copy of a training scan,mri:BraTS-GoAT-02450-t2w,0.9245915448343024
+atlas:sub-r061s002,second copy within its evaluation cohort,atlas:sub-r056s006,0.940677037276661
+msd_braintumor:BRATS_073,second copy within its evaluation cohort,msd_braintumor:BRATS_072,0.9551748807470606
+atlas:sub-soop0168,second copy within its evaluation cohort,atlas:sub-soop0164,0.9352358150552744
+ucsf_pdgm_t2w:UCSF-PDGM-0341_t2w,copy of a training scan,mri:BraTS-GoAT-02376-t2w,0.9262572751135346
+ucsf_pdgm_t1c:UCSF-PDGM-0115_t1c,copy of a training scan,mri:BraTS-GoAT-02561-t1c,0.9543545593782168
+atlas:sub-soop1547,second copy within its evaluation cohort,atlas:sub-soop0384,0.9402846326932716
+msd_braintumor:BRATS_176,second copy within its evaluation cohort,msd_braintumor:BRATS_175,0.9082483676807004
+msd_braintumor:BRATS_216,second copy within its evaluation cohort,msd_braintumor:BRATS_215,0.9106305064793104
+ucsf_pdgm_t2f:UCSF-PDGM-0204_t2f,copy of a training scan,mri:BraTS-GoAT-02253-t2f,0.9198932327690084
+ucsf_pdgm_t2f:UCSF-PDGM-0341_t2f,copy of a training scan,mri:BraTS-GoAT-02376-t2f,0.9360450391961732
+ucsf_pdgm_t2f:UCSF-PDGM-0210_t2f,copy of a training scan,mri:BraTS-GoAT-02521-t2f,0.9011460486169696
+msd_braintumor:BRATS_212,second copy within its evaluation cohort,msd_braintumor:BRATS_211,0.9404527867636764
+atlas:sub-soop1625,second copy within its evaluation cohort,atlas:sub-soop0296,0.935004354030778
+atlas:sub-r059s010,second copy within its evaluation cohort,atlas:sub-r052s006,0.9381448477969108
+ucsf_pdgm_t1c:UCSF-PDGM-0068_t1c,copy of a training scan,mri:BraTS-GoAT-02333-t1c,0.9135880519054508
+msd_braintumor:BRATS_107,second copy within its evaluation cohort,msd_braintumor:BRATS_105,0.9289231980881628
+msd_braintumor:BRATS_178,second copy within its evaluation cohort,msd_braintumor:BRATS_177,0.9397233911943774
+atlas:sub-r017s105,second copy within its evaluation cohort,atlas:sub-r015s009,0.9308634145811868
+ms3seg_t1:082,second copy within its evaluation cohort,ms3seg_t1:037,0.9587750794081444
+msd_braintumor:BRATS_101,second copy within its evaluation cohort,msd_braintumor:BRATS_100,0.930229004113269
+msd_braintumor:BRATS_122,second copy within its evaluation cohort,msd_braintumor:BRATS_121,0.9255545719098348
+msd_braintumor:BRATS_150,second copy within its evaluation cohort,msd_braintumor:BRATS_149,0.9305248500688732
+atlas:sub-r061s004,second copy within its evaluation cohort,atlas:sub-r003s007,0.9388610730533176
+msd_braintumor:BRATS_242,second copy within its evaluation cohort,msd_braintumor:BRATS_241,0.9172458639473158
+ucsf_pdgm_t2w:UCSF-PDGM-0205_t2w,copy of a training scan,mri:BraTS-GoAT-02453-t2w,0.9279309860348526
+atlas:sub-soop1452,second copy within its evaluation cohort,atlas:sub-soop1260,0.9362336006630664
+msd_braintumor:BRATS_134,copy of a training scan,mri:BraTS-GLI-00148-000-t1n,0.9404041183082668
+ucsf_pdgm_t1c:UCSF-PDGM-0160_t1c,copy of a training scan,mri:BraTS-GoAT-02573-t1c,0.9704040408827014
+atlas:sub-r052s006,second copy within its evaluation cohort,atlas:sub-r018s004,0.9497342372201528
+atlas:sub-r067s020,second copy within its evaluation cohort,atlas:sub-r019s001,0.916136384303663
+ucsf_pdgm_t2w:UCSF-PDGM-0115_t2w,copy of a training scan,mri:BraTS-GoAT-02561-t2w,0.921847214423471
+atlas:sub-r031s015,second copy within its evaluation cohort,atlas:sub-r028s013,0.9343160900224138
+atlas:sub-soop0360,second copy within its evaluation cohort,atlas:sub-soop0344,0.9607465108054596
+ucsf_pdgm_t2f:UCSF-PDGM-0433_t2f,copy of a training scan,mri:BraTS-GLI-00758-000-t2f,0.9006689723590128
+msd_braintumor:BRATS_211,second copy within its evaluation cohort,msd_braintumor:BRATS_210,0.908468964257072
+ucsf_pdgm_t2f:UCSF-PDGM-0429_FU003d_t2f,copy of a training scan,mri:BraTS-GLI-00557-000-t2f,0.9198302108499422
+ucsf_pdgm_t2w:UCSF-PDGM-0073_t2w,copy of a training scan,mri:BraTS-GoAT-02508-t2w,0.9253487286966068
+ucsf_pdgm_t2f:UCSF-PDGM-0016_t2f,copy of a training scan,mri:BraTS-GoAT-00784-t2f,0.9102843982199872
+ucsf_pdgm_t1c:UCSF-PDGM-0494_t1c,copy of a training scan,mri:BraTS-GoAT-02499-t1c,0.9633975272214974
+msd_braintumor:BRATS_148,copy of a training scan,mri:BraTS-GLI-01454-000-t1n,0.918933197964984
+msd_braintumor:BRATS_121,second copy within its evaluation cohort,msd_braintumor:BRATS_120,0.9138898308584334
+msd_braintumor:BRATS_213,second copy within its evaluation cohort,msd_braintumor:BRATS_211,0.912072925734472
+ucsf_pdgm_t2w:UCSF-PDGM-0204_t2w,copy of a training scan,mri:BraTS-GoAT-02253-t2w,0.9045468862589704
+ucsf_pdgm_t2w:UCSF-PDGM-0429_FU003d_t2w,copy of a training scan,mri:BraTS-GLI-00557-000-t2w,0.912191190237812

@@ -80,3 +80,20 @@ def test_warm_start_loads_a_matching_encoder_and_refuses_a_different_rope(tmp_pa
         assert "rope_min_period_mm" in str(e)
     else:
         raise AssertionError("a RoPE mismatch must not load")
+
+
+def test_schedule_ssl_starts_large_and_settles_even_with_the_tasks():
+    """R15: tasks from the start (short ramp), SSL weight 4 -> 1 by 60% of the run, then held."""
+    j = {"warmup_frac": 0.0, "task_ramp_frac": 0.02, "taper_end_frac": 0.6, "ssl_start": 4.0, "ssl_floor": 1.0}
+    assert schedule(0, 1000, j) == (4.0, 0.0)
+    assert schedule(20, 1000, j)[1] == 1.0
+    w = np.array([schedule(s, 1000, j) for s in range(1000)])
+    assert (np.diff(w[:, 0]) <= 1e-9).all() and 3.9 < w[20, 0] <= 4.0
+    assert schedule(600, 1000, j) == (1.0, 1.0) and schedule(999, 1000, j) == (1.0, 1.0)
+
+
+def test_joint_trainer_is_the_multitask_trainer_plus_ssl():
+    from brain.train import joint, multitask
+    assert issubclass(joint.Trainer, multitask.Trainer)
+    for name in ("task_loss", "apply", "task_inputs", "task_batch"):      # the task side is not a second copy
+        assert getattr(joint.Trainer, name) is getattr(multitask.Trainer, name)

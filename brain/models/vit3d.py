@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Sequence
 
 import torch
@@ -10,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from brain.models.patch_embed import PatchEmbed3D, ScaleEmbed
+from brain.models.patch_embed import ConvStemEmbed3D, PatchEmbed3D, ScaleEmbed
 from brain.models.projector import Projector
 from brain.models.rope3d import RoPE3D
 
@@ -274,6 +275,8 @@ def widen_patch_embed(state: dict, in_chans: int) -> dict:
     """A checkpoint's state for an encoder with ``in_chans`` inputs: a one-channel patch embedding is copied into
     channel 1 and the new channels start at zero, so the widened encoder computes exactly what the checkpoint did on
     channel 1 (``windowing.ROLES``: the canonical window) until training uses the others."""
+    if any(".patch_embed.stem." in k or k.startswith("patch_embed.stem.") for k in state):
+        return state                      # a conv stem's proj reads stem features: nothing to widen
     key = next((k for k in state if k.endswith("patch_embed.proj.weight")), None)
     if key is None or state[key].shape[1] == in_chans:
         return state
@@ -281,6 +284,52 @@ def widen_patch_embed(state: dict, in_chans: int) -> dict:
     wide = w.new_zeros(w.shape[0], in_chans, *w.shape[2:])
     wide[:, :w.shape[1]] = w
     return {**state, key: wide}
+
+
+# sequence / modality types a fused study tells apart (``SequenceFusion``); index 0 = unknown
+SEQ_TYPES = ("unknown", "ct", "t1", "t1c", "t2", "flair", "pd", "dwi", "t2s", "swi", "tof", "other")
+
+
+def seq_type(contrast_std: str, modality: str = "") -> int:
+    """``SEQ_TYPES`` index of a scan from its index row (``contrast_std``, ``modality``)."""
+    c = str(contrast_std or "").lower()
+    if str(modality).lower().startswith("ct") or c.startswith("ct"):
+        return SEQ_TYPES.index("ct")
+    return SEQ_TYPES.index(c) if c in SEQ_TYPES else (SEQ_TYPES.index("other") if c else 0)
+
+
+class SequenceFusion(nn.Module):
+    """Fuses the co-registered scans of one study (R14-F, 2026-11-06) into one token sequence, position by position.
+
+    Input (B, S, L, D): row 0 the anchor scan, rows 1.. its partners (``present`` marks real ones); every row was
+    packed with the study's shared token mask, so position l is the same place in every scan. Output: the mean over the
+    present scans plus an attention residual (query: that mean; keys / values: each scan + its sequence-type
+    embedding). The residual's output projection starts at zero, so a fused study begins as the plain mean.
+    The encoder applies it only to studies with a partner: a single scan keeps the unfused path exactly."""
+
+    def __init__(self, dim: int, heads: int, n_types: int = len(SEQ_TYPES)):
+        super().__init__()
+        self.heads = int(heads)
+        self.seq_emb = nn.Embedding(n_types, dim)
+        nn.init.normal_(self.seq_emb.weight, std=0.02)
+        self.norm_q, self.norm_kv = nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.q, self.k, self.v = nn.Linear(dim, dim), nn.Linear(dim, dim), nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        nn.init.zeros_(self.o.weight)
+        nn.init.zeros_(self.o.bias)
+
+    def forward(self, x: torch.Tensor, present: torch.Tensor, seq: torch.Tensor) -> torch.Tensor:
+        b, s, n, d = x.shape
+        h = self.heads
+        w = present.to(x.dtype).view(b, s, 1, 1)
+        mean = (x * w).sum(1) / w.sum(1).clamp_min(1.0)                                    # (B, L, D)
+        kv = self.norm_kv(x + self.seq_emb(seq).to(x.dtype).view(b, s, 1, d))
+        q = self.q(self.norm_q(mean)).view(b, n, h, d // h)
+        k, v = self.k(kv).view(b, s, n, h, d // h), self.v(kv).view(b, s, n, h, d // h)
+        att = torch.einsum("bnhc,bsnhc->bnhs", q.float(), k.float()) / math.sqrt(d // h)
+        att = att.masked_fill(~present.view(b, 1, 1, s), float("-inf")).softmax(-1).to(x.dtype)
+        out = torch.einsum("bnhs,bsnhc->bnhc", att, v).reshape(b, n, d)
+        return mean + self.o(out)
 
 
 class BrainEncoder(nn.Module):
@@ -310,6 +359,7 @@ class BrainEncoder(nn.Module):
         rope_fp32: bool = False,
         fp32_residual: bool = False,
         n_meta: int = 0,
+        conv_stem: Sequence[int] | None = None,
     ):
         super().__init__()
         if size not in VIT_SIZES:
@@ -324,7 +374,11 @@ class BrainEncoder(nn.Module):
         # fp32 residual stream under autocast (the block outputs stay bf16 and are added to it); without it the stream
         # is bf16 end to end and small updates round away (checkpoints from before 2026-10-25)
         self.fp32_residual = bool(fp32_residual)
-        self.patch_embed = PatchEmbed3D(in_chans, dim, self.patch_xyz)
+        self.in_chans = int(in_chans)
+        # ``conv_stem`` (widths, e.g. (32, 64)): two convolution stages before the token grid (ConvStemEmbed3D)
+        self.conv_stem = tuple(int(w) for w in conv_stem) if conv_stem else None
+        self.patch_embed = (ConvStemEmbed3D(in_chans, dim, self.patch_xyz, self.conv_stem, checkpoint_blocks)
+                            if self.conv_stem else PatchEmbed3D(in_chans, dim, self.patch_xyz))
         self.scale_embed = ScaleEmbed(dim)
         # stochastic depth rises linearly with depth, as in DeiT / Primus
         self.blocks = nn.ModuleList(
@@ -366,6 +420,16 @@ class BrainEncoder(nn.Module):
         nn.init.zeros_(self.meta_emb.weight)
         p = next(self.parameters())
         self.meta_emb.to(device=p.device)
+
+    def enable_fusion(self, after_block: int, heads: int | None = None) -> None:
+        """Study-level input (``SequenceFusion``): a study's scans run blocks [0, after_block) as separate rows, are
+        fused, and blocks [after_block, depth) run on the fused sequence. New weights; a single scan is unaffected."""
+        if not 0 < int(after_block) < len(self.blocks):
+            raise ValueError(f"fusion after_block {after_block} must be inside the {len(self.blocks)} blocks")
+        if getattr(self, "fusion", None) is None:
+            dev = next(self.parameters()).device
+            self.fusion = SequenceFusion(self.embed_dim, int(heads or self.blocks[0].attn.heads)).to(dev)
+        self.fuse_after = int(after_block)
 
     def enable_moe(self, blocks: int, n_experts: int = 5, top_k: int = 2) -> None:
         """Mixture-of-experts MLPs in the last ``blocks`` blocks (``MoEMLP``), each expert a copy of the block's MLP:
@@ -457,6 +521,7 @@ class BrainEncoder(nn.Module):
 
     def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor, taps: Sequence[int] = (),
              task_tokens: torch.Tensor | None = None, task_write: torch.Tensor | None = None,
+             fuse: dict | None = None,
              ) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor], torch.Tensor | None]:
         """Blocks over packed patch tokens (with the prefix, then any task tokens, in front). Returns the normed prefix
         outputs (or None), the normed patch tokens, the pre-norm patch tokens after each block in ``taps``, and the
@@ -479,9 +544,22 @@ class BrainEncoder(nn.Module):
             mask = None if b == 1 else _key_mask(pad, x.dtype)
         tapped = []
         for i, block in enumerate(self.blocks):
+            if fuse is not None and i == self.fuse_after:
+                # rows [0, n_out) are the anchors; ``index`` (n_out, S) the rows of each study (-1: none)
+                n_out, idx = int(fuse["n_out"]), fuse["index"]
+                present = idx >= 0
+                fused = self.fusion(x[idx.clamp_min(0)], present, fuse["seq"])
+                multi = present[:, 1:].any(1).view(-1, 1, 1)
+                x = torch.where(multi, fused, x[:n_out])
+                coords, pad = coords[:n_out], pad[:n_out]
+                mask = None if mask is None else mask[:n_out]
+                if mask is None and n_out > 1 and not t:
+                    mask = _key_mask(pad, x.dtype)
             x = self._run_block(block, x, coords, mask, p + t)
             if i in taps:
                 tapped.append(x[:, p + t:])
+        if fuse is not None:
+            tapped = [tp[: int(fuse["n_out"])] for tp in tapped]
         x = self.norm(x)
         return (x[:, :p] if p else None), x[:, p + t:], tapped, (x[:, p:p + t] if t else None)
 
@@ -501,6 +579,7 @@ class BrainEncoder(nn.Module):
         task_tokens: torch.Tensor | None = None,
         task_write: torch.Tensor | None = None,
         refine: torch.Tensor | None = None,
+        fuse: dict | None = None,
     ) -> dict[str, torch.Tensor]:
         """Dense token features for evaluation. ``view`` is (B, C, X, Y, Z). Dropped tokens are zero. ``refine``
         (B, N): cells encoded as 8 half-size tokens (``_refined``); outputs stay on the coarse grid.
@@ -520,7 +599,10 @@ class BrainEncoder(nn.Module):
         if keep.shape != (b, n):
             raise ValueError(f"keep {tuple(keep.shape)} does not match tokens {(b, n)}")
         seq, seq_coords, pad, _ = pack_kept(tokens, coords_mm, keep)
-        prefix, x, tapped, task_out = self._run(seq, seq_coords, pad, taps, task_tokens, task_write)
+        prefix, x, tapped, task_out = self._run(seq, seq_coords, pad, taps, task_tokens, task_write, fuse)
+        if fuse is not None:               # a study's outputs are its anchor row's (rows [0, n_out))
+            n_out = int(fuse["n_out"])
+            keep, tokens, coords_mm, view = keep[:n_out], tokens[:n_out], coords_mm[:n_out], view[:n_out]
         return {
             "task_tokens": task_out,
             "tokens": scatter_kept(x, keep),

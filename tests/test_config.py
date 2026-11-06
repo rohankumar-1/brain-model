@@ -54,7 +54,7 @@ def test_every_shipped_config_only_uses_known_keys():
     files = sorted(f for f in (ROOT / "configs").glob("*/*.yaml")                    # not the task registry or the
                    if f.name != "registry.yaml" and f.parent.name != "bench")        # benchmark spec / model registry
     assert files
-    method = {"single": "multitask"}               # configs/single: single-task specialists of the multitask trainer
+    method = {"single": "multitask", "pilot": "multitask"}   # configs/single, configs/pilot: multitask-trainer runs
     for f in files:
         walk(d.default_config(method.get(f.parent.name, f.parent.name)), yaml.safe_load(f.read_text()), [f.name])
     assert not bad, bad

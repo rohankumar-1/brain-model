@@ -51,9 +51,11 @@ def load_model(ckpt_path: Path, device: torch.device):
     return model.eval().requires_grad_(False), reg, cfg
 
 
-def _loader(store, labels, volumes, reg, stats, task, split, ids=None, use=None, workers=4):
+def _loader(store, labels, volumes, reg, stats, task, split, ids=None, use=None, workers=4, strip_all=False,
+            strip_match=None, study=None, partners=None):
     ds = MultitaskDataset(store, labels, volumes, reg, stats, split=split, tasks=[task], train=False, use=use,
-                          volume_ids=ids, max_seg=1)
+                          volume_ids=ids, max_seg=1, strip_all=strip_all, strip_match=strip_match, study=study,
+                          partners=partners)
     return make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False), ds
 
 

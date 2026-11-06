@@ -1,0 +1,179 @@
+# R14 (2026-11-03): R13 (75k, cooled) continued to 100k steps with true negatives for lesion segmentation:
+#   * labels v11 = v10 + empty masks (ref @empty, labels.src_empty): RSNA studies read bleed-free for
+#     hemorrhage_segmentation, healthy-volunteer MRI (IXI, AOMIC, NKI, CoRR, HBN, SLIM, WAND, CHBMP, Beijing, OASIS,
+#     ABIDE) for whole_tumor / tumor_core / enhancing_tumor / resection_cavity; as many training scans as positives,
+#     200 per val / test split. Until now the heads never saw a lesion-free brain;
+#   * loss.negative_tasks: those five take losses.negative_seg_loss (Dice on lesion scans only, voxel BCE, a scan
+#     term on the peak logit), not seg_loss, whose Dice on an empty target only rewards predicting nothing;
+#   * aug.skull_strip.match: a skull-on scan asked a tumour task is always stripped (BraTS arrives stripped, so
+#     "no skull" would otherwise stand for "tumour"); its skull tasks leave the draw;
+#   * aug.synth_contrast p 0.2: a training MRI scan is re-rendered from its SynthSeg map with random tissue contrast
+#     (brain.data.synth_contrast, the SynthSeg generator: per-label random mean / noise, left = right, light blur,
+#     re-standardised; real skull and background kept), asked only contrast-invariant targets (anatomy masks and
+#     volumes except WMH, brain mask / volume), metadata contrast unknown. Contrast-defined targets (enhancing tumour,
+#     bleed, CT measures, synthesis) never see a synthetic image; CT is never re-rendered
+#     (runs/diagnostics/synth_contrast/examples.png);
+#   * evaluation: Dice over scans with a lesion, false-positive rate (any voxel predicted) over lesion-free ones.
+#   * audit fixes (2026-11-03): task-token write set rebuilt on resume (R13 kept writing the excluded aneurysm /
+#     vessel / WMH-grade tokens), best checkpoints start afresh on a branched run, resumed runs keep their label
+#     stats and this config's optimizer hyperparameters, non-finite steps skipped, val pick caps negatives at a
+#     quarter, specificity counts in the val score, derived group weight 0.5 (38.5% of task slots at 1.0);
+#     labels v11 also drops fastMRI+ brain_volume (truncated slabs) and five misaligned Seg-CQ500 masks.
+#   * aug.affine.shear_deg 10: y-z shear like an uncorrected CT gantry tilt (~1,600 RSNA scans registered rigid).
+#   No ablation: R14 bundles these (user, 2026-11-03: improve the model now, ablate once it is finished).
+#   Schedule re-warmed at 75k (1000 steps to 3e-4), constant, cooled over the last 6000 steps.
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:4 -c 48 --mem=360G -t 06:00:00 -J r14 \   (6 h chunks, requeues)
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r14.yaml,EXTRA_ARGS=--reset-schedule \
+#     jobs/train.sbatch
+#
+# R13's header:
+# R13 (2026-11-01, written, not started): R12 branched at its step-50k snapshot (constant-LR phase, before the
+# cooldown) with token maps added, to 75k steps:
+#   * model.token_map: a logit per encoder token for a slot (BrainQuery.token_logits: final patch tokens x the slot's
+#     answer vector), new on resume (optimizer state resets, as on any added head);
+#   * loss.token_weight 0.5: every segmentation slot also learns which 16x16x8 mm tokens its mask reaches into
+#     (losses.token_occupancy_loss, class-balanced BCE), a coarse target straight into the encoder;
+#   * loss.slice_weight 0.5: RSNA haemorrhage slots learn where along the scan the bleed is from the competition's
+#     per-slice labels (brain.prep.rsna_slices -> data.rsna_slices; losses.slab_mil_loss: each run of positive slices
+#     must hold a firing token, tokens in negative slices must not; ~20k training scans vs ~700 bleed masks);
+#   * token gate views.gate mode frac (>= 25% foreground voxels) instead of the centre voxel: 0.14% vs 1.2% of brain
+#     voxels dropped, 14% more tokens;
+#   * aneurysm tasks and seg_vessels dropped, RSNA-ICA scans out of training (data.exclude_datasets) (user, 2026-11-01);
+#   * fastMRI+ (user, 2026-11-02): labels v10 = v9 + nine radiologist scan-level findings on 999 NYU clinical MRIs
+#     (registry group radiology, half group weight), and their focal boxes (WM lesion, post-treatment / resection,
+#     mass, edema, lacune / encephalomalacia) as token-map bags (data.fastmri_boxes, loss.box_weight 0.5; outside the
+#     boxes unlabelled on positive scans, every in-view token negative on negative scans). New tasks join R12's
+#     task rows by id (multitask.remap_tasks);
+#   * schedule re-warmed from 50k (1000 steps to 3e-4), constant, cooled down over the last 6000 steps.
+#   (2026-11-02: index appended by hand (append-only, sha1 39ddb655); labels v10 27676895 -> r13 27676896)
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:4 -c 48 --mem=360G -t 06:00:00 -J r13 \   (6 h chunks, requeues)
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r13.yaml,EXTRA_ARGS=--reset-schedule \
+#     jobs/train.sbatch
+#
+# R12's header:
+# R12 (2026-11-01): R10 trained another 30k steps (resumed from runs/multitask/r10/last.pt: weights, task tokens,
+# balancer, weight average, step 30000 -> 60000), with
+#   * labels v9 and R11's fixes (sparse aneurysm_location loss, TOF MRA meta "unknown"; R11 below, never run);
+#   * HL-Gauss regression (model.regression.kind hlgauss, Farebrother et al. 2024): 80 bins on [-5, 5] standardised
+#     units, Gaussian targets of 0.75 bin widths, KL loss. The bin head is warm-started from R10's scalar head
+#     (BrainQuery.bins_from_scalar: same predictions at step 30000); optimizer state starts fresh;
+#   * a re-warmed warmup-stable-decay schedule (engine --reset-schedule starts it at the resume step): 1000 warmup
+#     steps to 3e-4 (half R10's peak, so the converged weights are not thrown far), constant, 1 - sqrt cooldown over
+#     the last 6000 steps. While still in the constant phase the run can be extended by raising max_steps.
+#   * best checkpoint by validation score, not loss (HL-Gauss changes the regression loss scale).
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:4 -c 48 --mem=360G -t 06:00:00 -J r12 \   (6 h chunks, requeues)
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r12.yaml,EXTRA_ARGS=--reset-schedule \
+#     jobs/train.sbatch
+#
+# R11's header, for the label and loss changes:
+# R11 (2026-11-01, written, not started): R10 (configs/multitask/r10.yaml) with the aneurysm fixes:
+#   * aneurysm_location trains with losses.sparse_seg_loss (registry ``sparse``): weighted voxel BCE, Dice on scans
+#     with an aneurysm only, a 16 mm cell term and a scan-level peak term. R10's plain BCE + Dice collapsed to an
+#     empty map (runs/diagnostics/aneurysm_finder.py: peak logit <= -3.9 on every test scan, peak AUC 0.49);
+#   * RSNA TOF MRA reads as "unknown" contrast in the metadata input, not T1 (volumes.DATASET_CONTRAST).
+#   * labels v9 (= v8 + below): SynthSeg targets filtered per structure by SynthSeg 2.0's QC network (group score
+#     >= 0.65, brain.prep.synthseg_qc; hand-set rules only where unscored); SynthRAD CT takes every SynthSeg target
+#     from its paired MR; WMH volume adult FLAIR only; wmh_grade excluded.
+#   * labels v8: tool-derived labels (SynthSeg, WMH, brain mask, image measures) dropped on scans failing brain_ok /
+#     reg_ok (19,734 training rows, 6,139 scans); CSF targets MRI-only, SynthRAD CT gets its paired MR's CSF label.
+# Everything else as R10 (4 GPUs, batch 32, LR 6e-4, task-aware augmentation, weight average). Check after:
+# python runs/diagnostics/aneurysm_finder.py --ckpt runs/multitask/r11/last.pt (go / no-go for find -> refine).
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:4 -c 48 --mem=360G -t 06:00:00 -J r11 \   (6 h chunks, requeues)
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r11.yaml jobs/train.sbatch
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v11
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 10
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets: [rsna_ica]    # RSNA-ICA out of training for now (user, 2026-11-01)
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: runs/v4/scratch_s42/last.pt
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: false
+  fp32_residual: false
+  meta: {enabled: true, drop: 0.2}
+  task_tokens: {enabled: true, share: true, write_bias: 10.0, write_ramp_steps: 2000}
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac            # a token counts when >= 25% of its voxels are foreground (centre mode lost 1.2% of brain)
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  group_weights: {synthesis: 0.5, radiology: 0.5, derived: 0.5}   # derived: 38.5% of task slots at 1.0 (audit 2026-11-03)
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf, wmh_grade,
+    aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca, aneurysm_acom, aneurysm_aca,
+    aneurysm_pcom, aneurysm_basilar_tip, aneurysm_posterior_other, aneurysm_location, seg_vessels]
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+    shear_deg: 10.0           # residual CT gantry tilt (rigid-registered RSNA keep theirs)
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
+  synth_contrast: {p: 0.2}
+  task_aware: true
+loss: {balance: uncertainty, ema_decay: 0.99, seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
+optim:
+  lr: 0.0003
+  enc_lr_mult: 1.0
+  layer_decay: 0.75
+  weight_decay: 0.05
+  warmup_steps: 1000
+  freeze_steps: 0
+  clip_grad: 1.0
+  batch_size: 8
+  schedule: wsd
+  decay_steps: 6000
+  betas: [0.9, 0.999]
+train: {max_steps: 100000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false}
+output: {out_dir: runs/multitask/r14, resume_from: runs/multitask/r13/last.pt}

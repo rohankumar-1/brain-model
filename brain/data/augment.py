@@ -258,19 +258,47 @@ def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None,
     return x
 
 
+class _Seeded:
+    """Run the enclosed draws from ``seed`` (None: the global stream, unchanged), without disturbing the global
+    stream: ``appearance(..., tie_seed=s)`` called once per view with the same ``s`` gives every view of a row the same
+    contrast (histogram match, contrast curve, window jitter) while noise / blur / bias stay independent."""
+
+    def __init__(self, seed: int | None, k: int, device):
+        self.seed, self.k, self.device = seed, k, device
+        self.ctx = None
+
+    def __enter__(self):
+        if self.seed is None:
+            return self
+        devs = [self.device] if torch.device(self.device).type == "cuda" else []
+        self.ctx = torch.random.fork_rng(devices=devs)
+        self.ctx.__enter__()
+        torch.manual_seed(int(self.seed) * 7 + self.k)
+        return self
+
+    def __exit__(self, *exc):
+        if self.ctx is not None:
+            self.ctx.__exit__(*exc)
+        return False
+
+
 def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
                thick: tuple[torch.Tensor, torch.Tensor] | None = None,
                vol: torch.Tensor | None = None, contrast: torch.Tensor | None = None,
                quant: torch.Tensor | None = None, protect: torch.Tensor | None = None,
-               sharp: torch.Tensor | None = None) -> torch.Tensor:
+               sharp: torch.Tensor | None = None, tie_seed: int | None = None) -> torch.Tensor:
     """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
     ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching against another volume of the same contrast
     group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
-    measured on the unaugmented intensities); ``sharp`` rows no through-plane or isotropic blur (small targets)."""
+    measured on the unaugmented intensities); ``sharp`` rows no through-plane or isotropic blur (small targets).
+    ``tie_seed`` (roles mode): the contrast draws come from that seed (``_Seeded``), so calls with the same seed and
+    the same rows share each row's contrast (R15: SSL views agree on content, not across contrasts)."""
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
     if (aug.get("window") or {}).get("mode") == "roles":
-        return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp)
+        return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp, tie_seed)
+    if tie_seed is not None:
+        raise ValueError("tie_seed needs window.mode roles")
     if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
         x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
@@ -287,14 +315,16 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     return degrade(y, aug, skip_noise=noisy, skip_drift=protect, skip_blur=sharp)
 
 
-def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp=None) -> torch.Tensor:
+def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp=None,
+                      tie_seed=None) -> torch.Tensor:
     """``appearance`` for a three-channel encoder (``window.mode: roles``): every intensity augmentation in native units,
     then the three role windows (``windowing.role_windows``, jittered by ``window.jitter``) last, so CT channels keep
     their physical meaning (blood ~60 HU in each). The contrast curve re-renders MRI rows only. Returns (R, 3, ...), or
     (R, 1, ...) with ``window.channels`` 1 (one role window per row: the one-channel control)."""
     r, dev = x.shape[0], x.device
     if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
-        x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
+        with _Seeded(tie_seed, 1, dev):
+            x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"], skip=protect)
     if _enabled(aug.get("through_plane")):
@@ -308,7 +338,8 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
         lo, hi = noise.get("sigma_hu", (2.0, 15.0))              # CT: Gaussian noise in HU
         x = x + (ct.float() * _uniform(r, lo, hi, dev)).view(r, 1, 1, 1, 1) * torch.randn_like(x)
     if _enabled(aug.get("curve")):
-        x = mri_curve(x, modality, fg, aug["curve"])
+        with _Seeded(tie_seed, 2, dev):
+            x = mri_curve(x, modality, fg, aug["curve"])
     bl = aug.get("blur") or {}
     if _enabled(bl):
         on = torch.rand(r, device=dev) < float(bl["p"])
@@ -317,7 +348,8 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
         x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
     win = aug.get("window") or {}
-    y = role_windows(x, modality, float(win.get("jitter", 0.0)))
+    with _Seeded(tie_seed, 3, dev):
+        y = role_windows(x, modality, float(win.get("jitter", 0.0)))
     if int(win.get("channels", 3)) == 1:
         # the matched one-channel control: this same pipeline, one role window per row drawn uniformly (frozen
         # evaluation's ``multi`` passes use these windows), so the channel count is the only difference from roles

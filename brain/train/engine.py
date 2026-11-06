@@ -72,12 +72,16 @@ class WeightEMA:
     @torch.no_grad()
     def update(self, module: torch.nn.Module) -> None:
         d = min(self.decay, (1 + self.n) / (10 + self.n))
+        avg, live = [], []
         for k, v in module.state_dict().items():
             a = self.avg[k]
             if a.is_floating_point():
-                a.mul_(d).add_(v.detach().float(), alpha=1 - d)
+                avg.append(a)
+                live.append(v.detach() if v.dtype == a.dtype else v.detach().float())
             else:
                 a.copy_(v)
+        if avg:                                  # one fused update: a <- d a + (1 - d) v
+            torch._foreach_lerp_(avg, live, 1 - d)
         self.n += 1
 
     def state(self) -> dict:
@@ -202,7 +206,7 @@ def run(argv: list[str] | None = None) -> None:
     last_path, best_path = out_dir / "last.pt", out_dir / "best.pt"
     best_metric = str(t_cfg.get("best_metric", "loss"))
 
-    step, history, ckpt, resume_src = 0, [], None, None
+    step, history, ckpt, resume_src, branched = 0, [], None, None, False
     best_val, best_step = float("-inf") if best_metric in HIGHER_IS_BETTER else float("inf"), 0
     synthetic_persist = args.synthetic and os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"
     if not (args.no_resume or (args.synthetic and not synthetic_persist)):
@@ -215,7 +219,12 @@ def run(argv: list[str] | None = None) -> None:
             ckpt, resume_src = None, None
         else:
             step, history = int(ckpt["step"]), list(ckpt.get("history") or [])
-            if ckpt.get("best_metric", best_metric) == best_metric:   # a changed best_metric starts its best afresh
+            # a run branched from another run's checkpoint (resume_from outside out_dir) starts its best afresh: the
+            # parent's best was measured on its own labels / validation pick
+            branched = Path(resume_src).resolve().parent != Path(out_dir).resolve()
+            if branched:
+                log(f"[resume] branched from {resume_src}: best checkpoints start afresh")
+            if not branched and ckpt.get("best_metric", best_metric) == best_metric:   # a changed best_metric too
                 best_val, best_step = float(ckpt.get("best_val", best_val)), int(ckpt.get("best_step", best_step))
     # The LR schedule is part of the run: a resumed run keeps the one it started with (saved in every checkpoint),
     # so a changed config or --max-steps cannot silently bend the cosine; --reset-schedule adopts the config's.
@@ -258,8 +267,8 @@ def run(argv: list[str] | None = None) -> None:
     ema = WeightEMA(trainer.module, float(t_cfg["ema_decay"]), (ckpt or {}).get("ema")) \
         if rt.main and t_cfg.get("ema_decay") else None
     best_ema = float("-inf") if best_metric in HIGHER_IS_BETTER else float("inf")
-    if (ckpt or {}).get("best_metric", best_metric) == best_metric:
-        best_ema = float((ckpt or {}).get("best_ema", best_ema))
+    if ckpt is not None and not branched and ckpt.get("best_metric", best_metric) == best_metric:
+        best_ema = float(ckpt.get("best_ema", best_ema))
     if ema is not None:
         log(f"[ema] decay {ema.decay} (updates so far {ema.n})")
 

@@ -40,6 +40,10 @@ OUT_DIR = STORE / "labels" / "multitask_v2"     # v1 (labels/multitask) stays as
 GRID_ML = 256 * 256 * 160 / 1000.0          # store grid volume in ml (1 mm voxels): brain_frac -> template-space ml
 # volumes.csv family -> FOMO participants.tsv dataset
 FOMO_PT = {"fomo_" + short: pt for pt, short in PT_SHORT.items()}
+# non-FOMO cohorts whose participants table follows FOMO's format (dataset, participant_id, session_id, sex, age):
+# family -> its labels/sources/<family>/participants.tsv (labels v12: Pedi-Cranial-CT-Healthy, 99 children 0-10 y)
+EXTRA_PARTICIPANTS = {"pedi_cranial_ct": "pedi_cranial_ct"}
+FOMO_PT.update(EXTRA_PARTICIPANTS)
 LIVE = ("mask_asym", "intensity_asym", "ct_csf_frac", "ct_brain_hu", "ct_calcification", "ct_skull_hu")
 COLS = ["volume_id", "task", "value", "ref", "split"]
 
@@ -124,6 +128,11 @@ def _participants() -> pd.DataFrame:
         missing = pd.to_numeric(p["age"], errors="coerce").isna().to_numpy()
         p["age"] = p["age"].astype(object)                   # read as text ("n/a" rows); values parse downstream
         p.loc[missing, "age"] = fill[missing]
+    for fam in EXTRA_PARTICIPANTS:
+        path = label_file(fam, "participants.tsv")
+        if Path(path).exists():
+            e = pd.read_csv(path, sep="\t").astype({"dataset": str, "participant_id": str, "session_id": str})
+            p = pd.concat([p, e[[c for c in e.columns if c in p.columns]]], ignore_index=True)
     return p
 
 
@@ -214,13 +223,43 @@ def src_brain_mask(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     return _rows(v[_mask_ok(v)], np.nan, "@brain")
 
 
+def src_const(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """A fixed label for every scan of ``families`` (labels v12: healthy-volunteer cohorts are bleed-free, so the
+    haemorrhage tasks get value 0 on Pedi-Cranial-CT-Healthy)."""
+    rows = v[v["dataset_family"].isin(list(s["families"]))]
+    return _rows(rows, float(s["value"]))
+
+
+def src_hu(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """A CT Hounsfield-range mask computed from the scan itself at load time (labels v12, ref ``@hu:lo:hi[:brain]``):
+    ``range`` [lo, hi] HU, ``in_brain`` restricts it to the SynthStrip brain mask (QC-passed scans only). Exact by
+    definition, so it supervises CT anatomy without a segmentation tool (skull >= 300 HU; intracranial CSF 0-15 HU).
+    Use with ``modality: ct`` (and contrast CT out)."""
+    lo, hi = (float(x) for x in s["range"])
+    rows = v[_mask_ok(v)] if s.get("in_brain") else v
+    return _rows(rows, np.nan, f"@hu:{lo:g}:{hi:g}" + (":brain" if s.get("in_brain") else ""))
+
+
 def src_live(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     if s["name"] not in LIVE:
         raise ValueError(f"unknown live target {s['name']}")
     rows = v[_mask_ok(v)]
     if s.get("modality"):
         rows = rows[rows["modality"].astype(str).str.lower().str.startswith(s["modality"])]
-    return _rows(rows, np.nan, f"@live:{s['name']}")
+    # pre-computed once per volume (brain.prep.live_targets): a plain value, no work in the loader; volumes the table
+    # lacks keep the load-time computation (``@live:``)
+    from brain.prep.live_targets import load_table
+
+    tab = load_table()
+    if tab is None:
+        return _rows(rows, np.nan, f"@live:{s['name']}")
+    val = rows["volume_id"].astype(str).map(tab[s["name"]])
+    have = rows["volume_id"].astype(str).isin(tab.index)
+    pre = rows[have & val.notna()]
+    out = [_rows(pre, val[pre.index].astype(float).to_numpy())]
+    if (~have).any():
+        out.append(_rows(rows[~have], np.nan, f"@live:{s['name']}"))
+    return pd.concat(out, ignore_index=True)
 
 
 def _ids(s: dict) -> str:
@@ -267,8 +306,46 @@ def src_store_mask(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     rows = v[v["dataset_family"].isin(list(s["families"]))]
     rel = [store.path_for(Path(""), f, c, s["mask"]) for f, c in zip(rows["folder"], rows["case_id"].astype(str))]
     have = np.asarray([(STORE / p).exists() for p in rel], dtype=bool)
-    refs = np.asarray([f"{p}|{_ids(s)}" for p, h in zip(rel, have) if h], dtype=object)
+    ign = f"|{','.join(str(int(i)) for i in s['ignore'])}" if s.get("ignore") else ""   # values out of the loss
+    refs = np.asarray([f"{p}|{_ids(s)}{ign}" for p, h in zip(rel, have) if h], dtype=object)
     return _rows(rows[have], np.nan, refs)
+
+
+def src_empty(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """True negatives of a lesion segmentation task (labels v11, 2026-11-03): scans known to be free of the lesion get
+    an all-zero target (ref ``@empty``), so the head sees healthy brains, not only lesion cohorts. ``families``:
+    cohorts free of it (healthy volunteers for tumour); ``rsna_negative``: RSNA ICH studies read bleed-free (every
+    slice negative, so ``any`` = 0); ``fastmri_normal``: fastMRI+ scans the radiologist read normal for age with no
+    mass and no post-operative change (labels v12: the only post-contrast T1 negatives, so the T1c-only enhancing /
+    core masks are not all-positive on T1c). Other unlabelled clinical scans are not negatives: a missing mask there is
+    unknown. ``build`` caps the rows (``empty_cap``)."""
+    rows = v[v["dataset_family"].isin(list(s.get("families") or []))] if s.get("families") else v
+    if s.get("fastmri_normal"):
+        f = pd.read_csv(STORE / "labels" / "fastmri_findings.csv").astype({"case_id": str})
+        ok = set(f.loc[(f["mri_normal_for_age"] == 1) & (f["mri_mass"] == 0) & (f["mri_postop"] == 0), "case_id"])
+        rows = v[v["dataset"].astype(str).str.startswith("fastmri") & v["case_id"].astype(str).isin(ok)]
+    if s.get("rsna_negative"):
+        lab = build_rsna_volume_labels()
+        neg = set(lab.loc[lab["any"] == 0, "volume_id"].astype(str))
+        rows = v[(v["dataset_family"] == "rsna_ich") & v["volume_id"].astype(str).isin(neg)]
+    if s.get("strippable_only"):   # tumour negatives: training strips them (aug.skull_strip.match); a scan that
+        # cannot be stripped would stay skull-on beside skull-stripped BraTS positives, the cue the matching removes
+        stripped = v["stripped_input"].astype(str).str.lower().isin(["true", "1", "1.0"]) if "stripped_input" in v \
+            else pd.Series(False, index=v.index)
+        rows = rows[_mask_ok(rows) & ~stripped.loc[rows.index]]
+    return _rows(rows, np.nan, "@empty")
+
+
+def empty_cap(f: pd.DataFrame, n_pos_train: int, s: dict) -> pd.DataFrame:
+    """An ``empty`` source's rows, capped: ``per_positive`` x the task's training positives on the train split and
+    ``eval_n`` per val / test split, picked by a stable hash of the volume id (the same scans on every rebuild)."""
+    import hashlib
+
+    key = f["volume_id"].astype(str).map(lambda x: hashlib.md5(x.encode()).hexdigest())
+    f = f.assign(_k=key).sort_values("_k")
+    cap = {"train": int(round(float(s.get("per_positive", 1.0)) * n_pos_train))}
+    out = [g.head(cap.get(sp, int(s.get("eval_n", 200)))) for sp, g in f.groupby("split")]
+    return pd.concat(out).drop(columns="_k") if out else f.drop(columns="_k")
 
 
 def src_cq500(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
@@ -528,9 +605,9 @@ SOURCES = {
     "ssl_recon": src_ssl_recon, "synth": src_synth,
     "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings,
     "family_class": src_family_class,
-    "brain_volume": src_brain_volume, "brain_mask": src_brain_mask, "live": src_live,
+    "brain_volume": src_brain_volume, "brain_mask": src_brain_mask, "live": src_live, "hu": src_hu, "const": src_const,
     "brats_seg": src_brats_seg, "brats_seg_volume": src_brats_seg_volume, "mask_column": src_mask_column, "store_mask": src_store_mask,
-    "cq500": src_cq500, "downstream": src_downstream,
+    "cq500": src_cq500, "downstream": src_downstream, "empty": src_empty,
     "synthseg_seg": src_synthseg_seg, "synthseg_measure": src_synthseg_measure,
     "synthseg_scan_measure": src_synthseg_scan_measure, "wmh": src_wmh,
 }
@@ -635,7 +712,11 @@ def refine(f: pd.DataFrame, s: dict, volumes: pd.DataFrame) -> pd.DataFrame:
     target that is noise on CT); ``ct_max_thick_mm`` drops CT volumes whose slices are thicker (unknown thickness
     too); ``exclude_datasets`` (fnmatch patterns) drops those datasets' volumes; ``bins``
     (ascending edges) turns a scalar into ordered classes 0..len(bins) (value < bins[0] is class 0); ``threshold``
-    turns it into a binary label (value >= threshold)."""
+    turns it into a binary label (value >= threshold); ``contrasts`` keeps volumes whose ``contrast_std`` is listed
+    (labels v12: enhancing tumour / tumour core on post-contrast T1 only, the one sequence that shows enhancement)."""
+    if s.get("contrasts"):
+        cs = dict(zip(volumes["volume_id"].astype(str), volumes["contrast_std"].astype(str).str.lower()))
+        f = f[f["volume_id"].astype(str).map(cs).isin([str(c).lower() for c in s["contrasts"]])]
     if s.get("modality") and "modality" not in f:
         mod = dict(zip(volumes["volume_id"].astype(str), volumes["modality"].astype(str).str.lower()))
         f = f[f["volume_id"].astype(str).map(mod).fillna("").str.startswith(str(s["modality"]))]
@@ -647,6 +728,9 @@ def refine(f: pd.DataFrame, s: dict, volumes: pd.DataFrame) -> pd.DataFrame:
         ct = vid.map(dict(zip(u["volume_id"].astype(str), u["modality"].astype(str).str.lower()))).fillna("").str.startswith("ct")
         mm = pd.to_numeric(vid.map(dict(zip(u["volume_id"].astype(str), u["thick_mm"]))), errors="coerce")
         f = f[~ct | (mm <= float(s["ct_max_thick_mm"]))]
+    if s.get("exclude_cases"):                    # named cases whose label failed a check (e.g. a misaligned mask)
+        case = dict(zip(volumes["volume_id"].astype(str), volumes["case_id"].astype(str)))
+        f = f[~f["volume_id"].astype(str).map(case).isin({str(c) for c in s["exclude_cases"]})]
     if s.get("exclude_datasets"):                 # e.g. contrast CTA out of the non-contrast CT measures
         from fnmatch import fnmatch
 
@@ -665,7 +749,8 @@ def refine(f: pd.DataFrame, s: dict, volumes: pd.DataFrame) -> pd.DataFrame:
 # labels an external tool computed from the scan itself (SynthSeg, the WMH segmenter, SynthStrip's brain mask and the
 # measures taken inside it): wrong whenever the scan or its processing is broken. Human and study-level labels
 # (radiologist reads, expert masks, demographics) stay on such scans.
-TOOL_SOURCES = {"synthseg_seg", "synthseg_measure", "synthseg_scan_measure", "wmh", "live", "brain_volume", "brain_mask"}
+TOOL_SOURCES = {"synthseg_seg", "synthseg_measure", "synthseg_scan_measure", "wmh", "live", "brain_volume", "brain_mask",
+                "hu"}
 
 
 def _mirror_synthrad_ct(f: pd.DataFrame, volumes: pd.DataFrame) -> pd.DataFrame:
@@ -704,6 +789,9 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
             if "split" not in f:
                 f["split"] = f["volume_id"].map(split)
             f["split"] = f["split"].fillna(f["volume_id"].astype(str).map(split))    # mirrored rows
+            if fn is src_empty:                    # after the task's positive sources (listed first in the registry)
+                n_pos = sum(int(((g["task"] == t.id) & (g["split"] == "train") & (g["use"] == "train")).sum()) for g in frames)
+                f = empty_cap(f, n_pos, s)
             f["task"] = t.id
             f["use"] = use
             frames.append(f)

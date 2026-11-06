@@ -52,7 +52,8 @@ def init_runtime(seed: int) -> Runtime:
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cudnn.benchmark = False
+        # cuDNN autotuning for the fixed-shape 3D convolutions (decoder, conv stem); BRAIN_CUDNN_BENCHMARK=1 to enable
+        torch.backends.cudnn.benchmark = os.environ.get("BRAIN_CUDNN_BENCHMARK", "0") == "1"
     return Runtime(rank, world, local, device)
 
 

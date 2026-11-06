@@ -26,7 +26,13 @@ def current_results(t: pd.DataFrame, b) -> pd.Series:
     validation (v2; v1 CV results are left out and counted as stale)."""
     ok = t.index_sha1.isin(b.index_shas) if b.index_sha1 else pd.Series(True, index=t.index)
     ok &= t.variant == "multi"        # the suite's default window (CT: brain, subdural, bone), plain encoding
-    return ok & (t.cv != "cv") if b.version >= 2 else ok
+    ok = ok & (t.cv != "cv") if b.version >= 2 else ok
+    if b.version >= 3:                # v3: pooled heads + tok_conv from v3 runs only (decontaminated test sets)
+        ok &= ~t["head"].astype(str).str.match(r"^(cls|grid|plane|pca_global|pca)_")      # v2's axial / CLS views
+        since = b.raw.get("results_from")
+        if since:
+            ok &= pd.to_datetime(t["finished_utc"], utc=True) >= pd.Timestamp(since)
+    return ok
 
 
 def discover(t: pd.DataFrame, tasks: list[str], min_tasks: int = 5) -> list[str]:

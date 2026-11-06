@@ -601,7 +601,10 @@ def assert_no_leak(vols: pd.DataFrame, slices: pd.DataFrame, bhsd: set[str]) -> 
 
 
 def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
-          manifests: str = "manifest_*.jsonl", inherit_splits: Path | None = None, slice_table: bool = True) -> None:
+          manifests: str = "manifest_*.jsonl", inherit_splits: Path | None = None, slice_table: bool = True,
+          out_dir: Path | None = None) -> None:
+    """``out_dir``: write volumes.csv / subjects.csv / bhsd_studies.csv there instead of into the store (a candidate
+    index built beside the live one, e.g. jobs/index_append.sbatch); the SSL slice tables still go to ``root``."""
     bhsd = bhsd_case_ids()
     print(f"[bhsd] {len(bhsd)} RSNA studies with hemorrhage masks", flush=True)
     load_rsna_patients(root)
@@ -698,8 +701,8 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
         # volume) is for the 2D trainers. The leak check runs on the SSL volume rows instead.
         slices = ssl_vols.loc[ssl_vols["split"].isin(["train", "val"]), ["volume_id", "dedup_key", "split", "modality"]]
         for stale in ("slices.parquet", "slices.csv", "manifest.csv", "empty_slice_removals.csv"):
-            if (root / stale).exists():
-                (root / stale).unlink()
+            if ((out_dir or root) / stale).exists():                 # a candidate build leaves the store alone
+                ((out_dir or root) / stale).unlink()
                 print(f"[ssl] removed stale {stale} (no slice table this build)", flush=True)
     elif keep_ssl_index:
         old_vols_path, old_slices_path = root / "volumes.csv", root / "slices.parquet"
@@ -747,11 +750,12 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
                  pretrain=("pretrain", "max"), n_volumes=("volume_id", "nunique"),
                  bhsd=("bhsd", "max")))
 
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "labels").mkdir(exist_ok=True)
-    pd.Series(sorted(bhsd), name="case_id").to_csv(root / "labels" / "bhsd_studies.csv", index=False)
-    vols.to_csv(root / "volumes.csv", index=False)
-    subj.to_csv(root / "subjects.csv", index=False)
+    out = out_dir or root
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "labels").mkdir(exist_ok=True)
+    pd.Series(sorted(bhsd), name="case_id").to_csv(out / "labels" / "bhsd_studies.csv", index=False)
+    vols.to_csv(out / "volumes.csv", index=False)
+    subj.to_csv(out / "subjects.csv", index=False)
     if write_ssl:
         slices.to_parquet(root / "slices.parquet", index=False)
         slices.to_csv(root / "slices.csv", index=False)
@@ -782,9 +786,11 @@ def main() -> None:
                     help="volumes.csv whose subject splits are kept (new subjects are assigned fresh)")
     ap.add_argument("--no-slices", action="store_true",
                     help="skip the 2D slice table (reads every SSL volume); volumes.csv is all the 3D code needs")
+    ap.add_argument("--out-dir", type=Path, default=None,
+                    help="write volumes.csv / subjects.csv here instead of --root (leave the live index untouched)")
     a = ap.parse_args()
     build(a.root, a.v3_volumes, a.workers, keep_ssl_index=a.keep_ssl_index, manifests=a.manifests,
-          inherit_splits=a.inherit_splits, slice_table=not a.no_slices)
+          inherit_splits=a.inherit_splits, slice_table=not a.no_slices, out_dir=a.out_dir)
 
 
 if __name__ == "__main__":

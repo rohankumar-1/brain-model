@@ -9,7 +9,17 @@
 # early-stopped on one half of each fold's validation subjects and scored on the other), and every validation set holds
 # each class; v1's CV validation scores were inflated for tok_conv (+0.17 over test), which biased the v1 readout pins.
 # Fixed-split tasks are unchanged. v1 results on CV tasks are a different protocol and are left out of v2 comparisons.
-version: 2
+# v3 (2026-11-05): (1) readout "pooled": a linear probe and BrainDINO's MLP head on the mean foreground token (not the
+# CLS token: no multitask objective trains it in task-token models, and the v2 pins read it for CQ500), plus a linear
+# probe on 8 octant means; (2) decontaminated evaluation sets: 234 volumes that are pixel-verified copies of training
+# scans (UCSF-PDGM = BraTS-GoAT, MSD = BraTS-GLI) or second copies inside one cohort (ATLAS, MSD, ADNI) leave every task
+# (configs/bench/exclude_v3.csv, brain.downstream.tasks.load_task); (3) readouts re-pinned on current models. v2 results
+# are a different protocol: not compared with v3.
+version: 3
+readout: pooled
+# v3 results are runs finished after this (the last v2 run ended 2026-11-05T23:00Z, the first v3 one started 23:21Z):
+# older rows share head names (tok_conv) but were scored on the contaminated test sets
+results_from: "2026-11-05T23:10:00Z"
 # the store index the splits come from (sha1 of volumes.csv, 2026-10-26 re-index after the CQ500 DICOM re-conversion);
 # results computed on another index are flagged in the leaderboard
 index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
@@ -20,13 +30,14 @@ index_compatible:
     # change vs the pinned index (index-check flags only pretrain: BraTS twins of UCSF / UPENN left SSL, and 48 CQ500 rows
     # whose ids seg_cq500 shares, identical when matched on dataset + path). UCSF splits differ from 59c96 (32 re-keyed).
   - 39ddb6552ec627247bfe48e17bb00dbebc54e046   # 2026-11-02: + fastMRI+ (999 annotated NYU MRIs), append-only (index-check)
+  - ccbe8490278019319580d524ac3142cac65ede90   # 2026-11-06: + Pedi-Cranial-CT-Healthy (99 children's CT), append-only (index-check)
 # the model every other one is paired against (a checkpoint or a models.yaml name)
 reference: BQ-R6
 # the label table in-domain and few-shot scoring read (BrainQuery models with task heads), whatever a checkpoint
 # trained on: one table, one set of splits for every model
 labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
 # the pinned readout per task (written by python -m brain.bench pin)
-readouts: configs/bench/readouts_v2.yaml
+readouts: configs/bench/readouts_v3.yaml   # written by python -m brain.bench pin once the v3 re-scoring is in
 
 # transfer: frozen-encoder downstream tasks (brain.downstream.suite) that can tell models apart. Chosen 2026-10-25 from
 #   the results of v3, runs 2-6 and the joint pilot, in skill units (brain.eval.skill): 95% interval narrower than 0.65,
@@ -89,6 +100,10 @@ seen:
   # RSNA studies (added 2026-10-27; before, multitask models were scored on rsna_ich as if it were transfer)
   rsna_ich: [hemorrhage_any, hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular,
              hemorrhage_subarachnoid, hemorrhage_subdural, hemorrhage_segmentation]
+  # BraTS 2023 GLI / MEN segmentation transfer: the multitask runs train the tumour masks and volume on these
+  # cohorts' train split, which the transfer probe also fits on (added 2026-11-03, audit)
+  brats2023_gli: &tumor_masks [whole_tumor, tumor_core, enhancing_tumor, tumor_volume]
+  brats2023_men: *tumor_masks
 
 # adaptation: few-shot on the held-out tasks (brain.multitask.fewshot), task embedding fitted on k labelled scans.
 # Multitask / joint checkpoints only (the run report).

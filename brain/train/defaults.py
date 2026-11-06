@@ -27,12 +27,13 @@ LEJEPA3D: dict[str, Any] = {
         "volume_size_xyz": list(GRID_XYZ),
         "num_workers": 10,
         "balance_alpha": 1.0,  # family sampling mass ~ n**alpha: 1 natural mix, 0 uniform over families
+        "subject_beta": 0.0,   # a subject's volumes share n_subject ** -beta of the mass (1: a subject counts once)
         "balance_groups": None,  # {group: [family, ...]}: two-level balance (volumes.family_weights)
         # datasets / families (fnmatch patterns) this pretraining round leaves out of the SSL pool (volumes.excluded)
         "ssl_exclude": [],
     },
     "model": {
-        "size": "tiny", "in_chans": 1, "proj_dim": 128, "proj_hidden": 2048, "qk_norm": True,
+        "size": "tiny", "in_chans": 1, "proj_dim": 128, "proj_hidden": 2048, "qk_norm": True, "conv_stem": None,
         "rope_base_mm": 100.0, "checkpoint": True, "proj_norm": "batch", "length_buckets": 4,
         # Token head for the dense loss: 0 builds none (a plain pooled-only model).
         "dense_dim": 128, "dense_hidden": 512,
@@ -79,6 +80,9 @@ LEJEPA3D: dict[str, Any] = {
         "geometric": {"p": 0.0, "rot_deg": [10.0, 10.0, 15.0], "scale": [0.85, 1.15], "flip_lr": 0.5},
         # MRI histogram matching to another volume of the same contrast group (augment.histogram_match); p 0 = off.
         "histmatch": {"p": 0.0, "alpha": [0.3, 0.7]},
+        # one contrast draw per volume shared by all its views (roles mode; batch3d.prepare): the agreement terms then
+        # teach invariance to crop and degradation, not to contrast (R15); False = an independent draw per view
+        "tie_views": False,
     },
     "loss": {
         "lamb": 0.02,
@@ -135,11 +139,12 @@ def _multitask_defaults() -> dict[str, Any]:
         "data": {"store_root": "data/processed/slices_zarr", "index_name": "volumes.csv",
                  "labels_dir": "data/processed/slices_zarr/labels/multitask_v2", "registry": None,
                  "volume_size_xyz": list(GRID_XYZ), "default_spacing_mm": [1.0, 1.0, 1.0],
-                 "num_workers": 10, "balance_alpha": 0.5,
+                 "num_workers": 10, "balance_alpha": 0.5, "subject_beta": 0.0,
                  # RSNA slice labels (brain.prep.rsna_slices parquet) for loss.slice_weight
                  "rsna_slices": None,
                  # dataset-name prefixes whose scans leave training and validation entirely (multitask.data.drop_datasets)
                  "exclude_datasets": [],
+                 "exclude_volumes": None,       # a CSV of volume_ids out of every task (and the joint SSL pool)
                  # fastMRI+ box tables (brain.prep.fastmri_labels parquet) for loss.box_weight
                  "fastmri_boxes": None,
                  # the BraTS re-releases count as one family for sampling
@@ -149,6 +154,8 @@ def _multitask_defaults() -> dict[str, Any]:
                   # task tokens in the encoder (OMNI); the patches' attention to them opens over write_ramp_steps
                   # from write_bias logits so a warm-started encoder is not shifted at step 0
                   "task_tokens": {"enabled": True, "write_bias": 10.0, "write_ramp_steps": 2000, "share": False},
+                  # study-level input (R14-F): {after_block, heads}: a study's co-registered scans fused inside the encoder
+                  "fusion": None,
                   # MoE MLPs in the top ``blocks`` encoder blocks (0 = off; tried 2026-10-26, no clear gain over tokens)
                   "moe": {"blocks": 0, "experts": 5, "top_k": 2, "aux_weight": 0.05},
                   # regression head: ``scalar`` (smooth L1) or ``hlgauss`` (bins over the standardised range, Gaussian
@@ -161,10 +168,16 @@ def _multitask_defaults() -> dict[str, Any]:
                   "arch": "vit", "resnet": {"widths": [64, 128, 240, 384], "blocks": [2, 2, 2, 2]},
                   # ViT size when training from scratch (no init_from); None = the init_from checkpoint's
                   "size": None,
+                  # from-scratch ViT only: widths of a two-stage convolution stem before the token grid
+                  # (patch_embed.ConvStemEmbed3D, e.g. [32, 64]); None = the plain linear patch embedding
+                  "conv_stem": None,
                   # ``dim``: the heads' width. layers / heads / cross_task: the slot readout of checkpoints before
                   # task tokens (task_tokens.enabled: false)
                   "slot": {"dim": 256, "layers": 3, "heads": 8, "cross_task": True},
-                  "seg": {"widths": [128, 64, 32, 16]}},
+                  # shared: decode once per volume with a 1x1 output per task (SharedSegDecoder; tasks.all_seg asks
+                  # every mask), instead of once per segmentation slot
+                  # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout
+                  "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0}},
         # gate mode: "center" (a token's centre voxel), "max" or "frac" (>= min_frac of its voxels; data.gate.token_keep)
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
                                                      "min_frac": 0.25}},
@@ -175,10 +188,11 @@ def _multitask_defaults() -> dict[str, Any]:
         # reconstruction row) that are masked and ask only self-supervised tasks; mask_ratio: their hidden foreground share
         # max_dense: decoder slots per sample for dense tasks on their own (None: they share max_seg)
         "tasks": {"ssl": False, "mask_p": 0.0, "mask_ratio": 0.6, "max_dense": None,
-                  "k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "group_weights": {}, "groups": None,
+                  "k_max": 8, "p_all": 0.2, "rare_beta": 0.5, "max_seg": 2, "all_seg": False, "lesion_ignore": False, "study": None, "group_weights": {},
+                  "groups": None,
                   "ids": None, "exclude": ["mmse", "autism_severity", "adhd", "parkinsons", "glioma_survival_12m",
                                            "glioma_lower_grade", "glioma_idh"]},
-        "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0},
+        "aug": {"flip_lr": 0.5, "affine": {"p": 0.8, "rot_deg": [8, 8, 12], "shift_mm": 8.0, "shear_deg": 0.0},   # shear: gantry tilt
                 # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
                 # bias is MRI only and mild (intensity asymmetry is a target); noise is Rician on MRI, Gaussian on CT
                 "appearance": {"bias": {"p": 0.3, "amp": 0.2}, "through_plane": {"p": 0.3, "fwhm_vox": [2.0, 6.0]},
@@ -188,14 +202,22 @@ def _multitask_defaults() -> dict[str, Any]:
                 "fov_cut": {"p": 0.2, "mm": [10, 40]},
                 # skull-strip skull-on MRI with its SynthStrip mask (never rows asking a needs_skull task): the tumour
                 # and stroke cohorts arrive stripped, so "no skull" would otherwise mean "lesion cohort"
-                "skull_strip": {"p": 0.3},
+                # match: tasks whose positives arrive skull-stripped (BraTS); a strippable scan asked one is always
+                # stripped, so "no skull" cannot stand for "tumour" once healthy scans carry empty masks (labels v11)
+                "skull_strip": {"p": 0.3, "match": []},
+                # synthetic tissue contrast (brain.data.synth_contrast): with chance p an MRI scan is re-rendered from
+                # its SynthSeg map; only contrast-invariant tasks (groups / tasks minus exclude) are asked of it
+                "synth_contrast": {"p": 0.0, "groups": ["anatomy_seg", "anatomy_volume"],
+                                   "tasks": ["brain_mask", "brain_volume"], "exclude": ["vol_wmh", "wmh_grade"],
+                                   "mean": [-2.0, 3.0], "std": [0.05, 0.6], "blur": [0.3, 1.0]},
                 # rows asking a registry ``fine`` task (small targets) get no blur, field-of-view cut or stripping
                 "task_aware": False},
+        # negative_tasks: segmentation tasks with true negatives (labels v11 empty masks): losses.negative_seg_loss.
         # sparse_pos_weight: target-voxel / target-cell weight of losses.sparse_seg_loss (registry ``sparse`` tasks).
         # token_weight / slice_weight (need model.token_map): token-map losses added to a slot's loss, on mask tasks'
         # token occupancy (losses.token_occupancy_loss) and on RSNA slice labels (losses.slab_mil_loss)
         "loss": {"balance": "uncertainty", "ema_decay": 0.99, "seg_stride": 2, "sparse_pos_weight": 20.0,
-                 "token_weight": 0.0, "slice_weight": 0.0, "box_weight": 0.0},
+                 "negative_tasks": [], "token_weight": 0.0, "slice_weight": 0.0, "box_weight": 0.0},
         # freeze_steps: slot-readout runs only (the encoder trains from step 0 with task tokens inside it)
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
                   "warmup_steps": 1000, "freeze_steps": 0, "clip_grad": 1.0, "batch_size": 8},
@@ -222,15 +244,20 @@ def _joint_defaults() -> dict[str, Any]:
     sections (their keys do not collide: LeJEPA ``aug`` / ``loss`` / ``model`` keys and the multitask ones are disjoint),
     the encoder fixes as options and the curriculum under ``joint``."""
     c = _merge(MULTITASK, LEJEPA3D)
-    c["model"].update(init_from=None, n_cls=1,
+    c["model"].update(init_from=None, n_cls=1, drop_path=0.0,
                       # RoPE frequencies from a 32 mm shortest period (None: the original 6.3 mm, ~38% aliased pairs)
                       rope_min_period_mm=None)
     c["views"].setdefault("gate", {}).update(mode="center")        # "max": any voxel of the patch counts
     # the curriculum in fractions of max_steps, or in steps (warmup_steps / task_ramp_steps / taper_end_steps win when
     # set: a run that may be extended keeps its curriculum fixed instead of stretching it)
-    c["joint"] = {"ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
+    # ssl_start: the SSL weight while it tapers from the start (1.0 = equal to the tasks' full weight); R15 4 -> floor 1
+    c["joint"] = {"ssl_start": 1.0, "ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
                   "warmup_steps": None, "task_ramp_steps": None, "taper_end_steps": None,
-                  "task_batch_size": 4, "task_workers": 6, "normalize": True}
+                  "ssl_batch_size": 4, "normalize": True,
+                  "task_batch_size": None, "task_workers": None}    # legacy (pre-2026-11-06 joint trainer): ignored
+    # the task side is brain.train.multitask's trainer: optim.batch_size = task volumes per GPU; from scratch the encoder
+    # trains at the full LR (no multitask post-training discount, no layer-wise decay)
+    c["optim"].update(batch_size=4, enc_lr_mult=1.0, layer_decay=1.0)
     c["train"]["best_metric"] = "score"                             # validation skill; none until tasks ramp in
     c["output"]["out_dir"] = "runs/joint"
     return c

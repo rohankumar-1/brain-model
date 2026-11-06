@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import replace, dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -1117,7 +1117,48 @@ def load_msd_task(
     return _bundle_from_frame("msd", "binary", vols, y, [target], modality="mri")
 
 
-def load_task(
+# Benchmark v3 decontamination (2026-11-05): evaluation scans that are the same scan as a training / pre-training scan,
+# or a second copy of one inside their own cohort (it would sit in two cross-validation folds), verified at the pixel
+# level (runs/diagnostics/dup_verify.py -> runs/diagnostics/build_bench_exclude.py). BRAIN_BENCH_EXCLUDE=none disables.
+BENCH_EXCLUDE = Path(__file__).resolve().parents[2] / "configs" / "bench" / "exclude_v3.csv"
+
+
+def bench_exclusions() -> set[str]:
+    import os
+
+    path = os.environ.get("BRAIN_BENCH_EXCLUDE", str(BENCH_EXCLUDE))
+    if path == "none":
+        return set()
+    # rows of DUA cohorts (ADNI / PPMI ids may not be published) live in a git-ignored, owner-only twin file
+    paths = [Path(path), Path(path).with_name(Path(path).stem + ".private.csv")]
+    return set().union(*(set(pd.read_csv(q)["volume_id"].astype(str)) for q in paths if q.exists()))
+
+
+def drop_volumes(task: TaskBundle, drop: set[str]) -> TaskBundle:
+    """``task`` without the volumes in ``drop`` (ids, labels and every per-volume map together)."""
+    keep = [i for i, v in enumerate(task.volume_ids) if str(v) not in drop]
+    if len(keep) == len(task.volume_ids):
+        return task
+    ids = [task.volume_ids[i] for i in keep]
+    kept = set(ids)
+    sub = lambda d: {k: v for k, v in d.items() if k in kept}  # noqa: E731
+    y = task.y[keep] if getattr(task.y, "shape", None) and len(task.y) == len(task.volume_ids) else task.y
+    return replace(task, volume_ids=ids, y=y, splits=sub(task.splits), cohort=sub(task.cohort),
+                   image_paths=sub(task.image_paths), mask_paths=sub(task.mask_paths), modalities=sub(task.modalities))
+
+
+def load_task(name: str, volumes: pd.DataFrame, **kw) -> TaskBundle:
+    """A downstream task, without the benchmark's decontamination exclusions (``bench_exclusions``)."""
+    task = _load_task(name, volumes, **kw)
+    drop = bench_exclusions()
+    out = drop_volumes(task, drop) if drop else task
+    if len(out.volume_ids) != len(task.volume_ids):
+        print(f"[task] {name}: {len(task.volume_ids) - len(out.volume_ids)} volumes excluded (benchmark "
+              f"decontamination, {BENCH_EXCLUDE.name})", flush=True)
+    return out
+
+
+def _load_task(
     name: str,
     volumes: pd.DataFrame,
     *,

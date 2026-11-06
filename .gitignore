@@ -16,3 +16,6 @@ results/
 docs/build/
 weights
 temp/
+
+# DUA-restricted id lists (ADNI / PPMI): never in git
+*.private.csv

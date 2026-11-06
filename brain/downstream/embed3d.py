@@ -390,7 +390,10 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
                             in_chans=int(m.get("in_chans", 1)), patch_xyz=patch, checkpoint_blocks=False).to(device)
         if pretrained:
             net.load_state_dict(state)
-        return FrozenEncoder3D(net.eval().requires_grad_(False), patch, native, spacing)
+        enc = FrozenEncoder3D(net.eval().requires_grad_(False), patch, native, spacing)
+        if isinstance(v.get("gate"), dict):           # the token gate it trained with, as for the ViT below
+            enc.gate = v["gate"]
+        return enc
     size = str(m.get("size", "tiny"))
     if size not in VIT_SIZES:
         dim = int(state["patch_embed.proj.weight"].shape[0])
@@ -411,12 +414,15 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         mlp=str(m.get("mlp", "gelu")), layer_scale=m.get("layer_scale"),
         rope_min_period_mm=m.get("rope_min_period_mm"),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
-        n_meta=n_meta(m),
+        n_meta=n_meta(m), conv_stem=m.get("conv_stem") or None,
     ).to(device)
     moe_blocks = {int(k.split(".")[1]) for k in state if ".mlp.experts." in k}
     if moe_blocks:                    # mixture-of-experts top blocks (multitask ``model.moe``): rebuild before loading
         n_exp = 1 + max(int(k.split(".")[4]) for k in state if ".mlp.experts." in k)
         net.enable_moe(net.depth - min(moe_blocks), n_exp, int((m.get("moe") or {}).get("top_k", 2)))
+    if any(str(k).startswith("fusion.") for k in state):     # study-level input (R14-F): rebuild before loading
+        fu = m.get("fusion") or {}
+        net.enable_fusion(int(fu.get("after_block", net.depth - 4)), fu.get("heads"))
     if pretrained:
         net.load_state_dict(state)
     net.eval().requires_grad_(False)

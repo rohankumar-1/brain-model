@@ -41,6 +41,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         rope_min_period_mm=m.get("rope_min_period_mm"),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
         n_meta=n_meta(m),
+        conv_stem=m.get("conv_stem") or None,             # two convolution stages before the token grid
         checkpoint_blocks=bool(m.get("checkpoint", True)),
         proj_norm=str(m.get("proj_norm", "batch")),
         dense_dim=int(m.get("dense_dim", 0)) if dense else 0,
@@ -50,6 +51,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         if predict and float(pr.get("pixel_weight", 0.0)) > 0 else 0,
         n_cls=int(m.get("n_cls", 0)),
         n_registers=int(m.get("n_registers", 0)),
+        drop_path=float(m.get("drop_path", 0.0)),          # stochastic depth (max rate, linear over depth)
     ).to(device)
 
 

@@ -30,7 +30,7 @@ GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich",
                  "derived": "derived", "anatomy_seg": "aseg", "anatomy_volume": "avol", "lesion": "lesion",
                  "ssl_recon": "recon", "synthesis": "synth"}
 # heads a resumed run may add (absent from its checkpoint): HL-Gauss bins, the token map
-NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias")
+NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.")
 TYPE_COLUMNS = {"binary": "t_bin", "regression": "t_reg", "multiclass": "t_cls", "segmentation": "t_seg",
                 "survival": "t_surv", "dense": "t_dense"}
 
@@ -51,12 +51,13 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         return enc.to(device).train().requires_grad_(True)
     if synthetic or not m.get("init_from"):
         # the config records how the encoder was built (frozen evaluation rebuilds it from these, with other defaults)
-        m.update(size=m.get("size") or "test", qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32)
+        m.update(size=m.get("size") or "test", qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
+                 conv_stem=list(m.get("conv_stem") or []))
         enc = BrainEncoder(size=m["size"], patch_xyz=tuple(cfg["views"]["patch_xyz"]),
                            in_chans=int(m.get("in_chans", 1)),
                            qk_norm=True, n_cls=m["n_cls"], proj_dim=16, proj_hidden=32,
                            rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
-                           n_meta=n_meta(m))
+                           n_meta=n_meta(m), conv_stem=m["conv_stem"] or None)
     else:
         src = torch.load(resolve(m["init_from"]), map_location="cpu", weights_only=False)
         enc = load_brain3d(src, torch.device("cpu")).model
@@ -67,7 +68,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         cfg["views"] = {**(scfg.get("views") or {}), "gate": cfg["views"].get("gate")}
         cfg["views"]["patch_xyz"] = list(enc.patch_xyz)
         m["size"] = enc.size
-        m["in_chans"] = int(enc.patch_embed.proj.in_channels)      # data.prepare windows the input to match
+        m["in_chans"] = int(enc.in_chans)                          # data.prepare windows the input to match
         # the SSL pool the encoder saw, for benchmark overlap records (records.ssl_exclude reads the run's config)
         cfg["data"]["ssl_exclude"] = list((scfg.get("data") or {}).get("ssl_exclude") or [])
         # the encoder keeps the numerics it was trained with (the defaults' True would not describe it)
@@ -75,6 +76,11 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         if n_meta(m) and enc.meta_emb is None:                # metadata on an encoder trained without it
             enc.enable_meta(n_meta(m))
     enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
+    if hasattr(enc.patch_embed, "checkpoint"):                       # a conv stem follows the encoder's setting
+        enc.patch_embed.checkpoint = enc.checkpoint_blocks
+    fu = m.get("fusion") or {}
+    if fu.get("after_block"):                 # study-level input (R14-F): sequence fusion inside the encoder
+        enc.enable_fusion(int(fu["after_block"]), fu.get("heads"))
     return enc.to(device).train().requires_grad_(True)
 
 
@@ -141,7 +147,7 @@ class Trainer(engine.Trainer):
         self.train_ids = self.reg.train_ids(tk)
         if not self.train_ids:
             raise SystemExit(f"tasks {tk} selects no trained task (groups: {self.reg.groups})")
-        enc = build_encoder(cfg, dev, args.synthetic)
+        enc = self.build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
         self.raw = BrainQuery(enc, self.reg, cfg["model"]).to(dev)
         if self.raw.tokens and self.freeze_steps:
@@ -175,6 +181,9 @@ class Trainer(engine.Trainer):
         px, py, pz = (int(v) for v in self.patch)
         self.cell_zyx = tuple(max(1, v // self.stride) for v in (pz, py, px))
         self.pos_weight = float(cfg["loss"].get("sparse_pos_weight", 20.0))
+        # lesion tasks with true negatives (labels v11 empty masks): losses.negative_seg_loss
+        neg = set(cfg["loss"].get("negative_tasks") or [])
+        self.negatives = torch.tensor([t.id in neg for t in self.reg.tasks], device=dev) if neg else None
         # token maps: mask tasks' token occupancy (token_weight) and RSNA slice labels (slice_weight)
         self.tok_w = float(cfg["loss"].get("token_weight", 0.0))
         self.slice_w = float(cfg["loss"].get("slice_weight", 0.0))
@@ -192,7 +201,8 @@ class Trainer(engine.Trainer):
         seed = int(cfg["seed"]) + rt.rank
         self.loader, self.val_loader, self.stats, n_train = task_loaders(
             cfg, self.reg, self.train_ids, batch=self.batch, workers=int(d.get("num_workers", 10)), seed=seed + int(step),
-            main=rt.main, distributed=rt.world > 1, synthetic=args.synthetic)
+            main=rt.main, distributed=rt.world > 1, synthetic=args.synthetic,
+            saved_stats=(ckpt or {}).get("label_stats"))
         self._banner_extra = f"train_volumes={n_train}"
         self.iter = iter(self.loader)
         self.epoch = 0
@@ -216,21 +226,35 @@ class Trainer(engine.Trainer):
                 raise SystemExit(f"[resume] state mismatch: missing={res.missing_keys[:4]} "
                                  f"unexpected={res.unexpected_keys[:4]}")
             self.balancer.load_state_dict(ckpt["balancer"])
+            if self.raw.tokens:      # the saved write mask (a persistent buffer) is the parent run's task set
+                self.raw.set_token_tasks([self.reg.index[t] for t in self.train_ids])
             if new or retasked:     # heads or tasks added on resume: the saved optimizer no longer fits
                 if any(k.startswith("regress_bins.") for k in new):
                     self.raw.bins_from_scalar()          # HL-Gauss bins start from the scalar head's predictions
                 rt.log(f"[resume] new heads {sorted({k.split('.')[0] for k in new})}; optimizer state reset")
             else:
                 if "optimizer" in ckpt:              # weights-only snapshots (keep_full false) carry none
+                    # load_state_dict restores the saved groups' hyperparameters too: keep this config's
+                    fresh = [{k: g[k] for k in ("lr_scale", "weight_decay", "betas") if k in g}
+                             for g in self.opt.param_groups]
                     self.opt.load_state_dict(ckpt["optimizer"])
-        self.net = torch.nn.parallel.DistributedDataParallel(self.raw, device_ids=[rt.local],
-                                                             find_unused_parameters=True) \
-            if rt.world > 1 else self.raw
+                    for g, f in zip(self.opt.param_groups, fresh):
+                        g.update(f)
+        self.net = self.wrap(rt)
         n_enc = sum(p.numel() for p in enc.parameters())
         n_all = sum(p.numel() for p in self.raw.parameters())
         self._banner = (f"enc={enc.size} patch={self.patch} enc_params={n_enc:,} head_params={n_all - n_enc:,} "
                         f"tasks={len(self.train_ids)}/{len(self.reg)} batch={self.batch}x{rt.world} "
                         f"freeze={self.freeze_steps} " + getattr(self, "_banner_extra", ""))
+
+    def build_encoder(self, cfg: dict, device: torch.device, synthetic: bool):
+        """The encoder (overridden by brain.train.joint, whose encoder also carries the SSL projector)."""
+        return build_encoder(cfg, device, synthetic)
+
+    def wrap(self, rt):
+        """The module one training forward runs through (DDP over ``self.raw`` on several GPUs)."""
+        return torch.nn.parallel.DistributedDataParallel(self.raw, device_ids=[rt.local], find_unused_parameters=True) \
+            if rt.world > 1 else self.raw
 
     def banner(self) -> str:
         return self._banner
@@ -248,25 +272,59 @@ class Trainer(engine.Trainer):
 
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
         self.tokens.at_step(step)
-        raw = self._next()
-        b = prepare(raw, self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe,
-                    aug_unsafe=self.aug_unsafe, sharp=self.sharp)
+        b = self.task_batch()
         self.opt.zero_grad(set_to_none=True)
+        args, kw, pairs = self.task_inputs(b, step)
+        with torch.autocast(**self.amp):
+            out = self.net(*args, **kw)
+        total, per_task, has = self.task_loss(out, b, pairs)
+        total = total + self.tokens.moe_loss()
+        self.apply(total, step)
+        self.log_tasks(per_task, has, b)
+        return {"loss": total.detach(), "k": (b["task"] >= 0).float().sum(1).mean()}
+
+    # the step in parts, so brain.train.joint adds its SSL branch without a second copy of the task side
+    def task_batch(self) -> dict:
+        return prepare(self._next(), self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe,
+                       aug_unsafe=self.aug_unsafe, sharp=self.sharp)
+
+    def task_inputs(self, b: dict, step: int) -> tuple[tuple, dict, tuple]:
+        """(positional args, keyword args) of BrainQuery's forward, and the token-map pairs ``task_loss`` needs."""
         seg_tok, slab_pair = self._token_pairs(b)
         tok_pair = torch.cat([seg_tok, slab_pair]) if len(seg_tok) or len(slab_pair) else None
-        with torch.autocast(**self.amp):
-            out = self.net(b["x"], b["keep"], b["task"], b["seg_pair"], encoder_grad=step >= self.freeze_steps,
-                           meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair)
+        kw = dict(encoder_grad=step >= self.freeze_steps, meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
+                  study=b.get("study"))
+        return (b["x"], b["keep"], b["task"], b["seg_pair"]), kw, (seg_tok, slab_pair)
+
+    def task_loss(self, out: dict, b: dict, pairs: tuple) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(balanced total, per-task losses, has) of one task batch."""
+        seg_tok, slab_pair = pairs
         loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride,
-                                dense=b, sparse=self.sparse, cell_zyx=self.cell_zyx, pos_weight=self.pos_weight)
+                                dense=b, sparse=self.sparse, cell_zyx=self.cell_zyx, pos_weight=self.pos_weight,
+                                negatives=self.negatives)
         if out.get("tok") is not None:
             loss = self._token_losses(b, out["tok"], loss, len(seg_tok), slab_pair)
         total, per_task = self.balancer(loss, has, b["task"])
-        total = total + self.tokens.moe_loss()
+        return total, per_task, has
+
+    def apply(self, total: torch.Tensor, step: int) -> None:
+        """Backward, clip, and the update; a non-finite loss or gradient (one bad batch) skips the update instead of
+        writing NaN into every weight. The optimizer's step is taken on every rank alike (the norm is of DDP-averaged
+        gradients)."""
         total.backward()
         self.balancer.sync_grads()
-        torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
-        self.opt.step()
+        norm = torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
+        ok = torch.isfinite(norm) & torch.isfinite(total.detach())
+        if bool(ok):
+            self.opt.step()
+        else:
+            self.opt.zero_grad(set_to_none=True)
+            self.n_skipped = getattr(self, "n_skipped", 0) + 1
+            if self.n_skipped <= 5 or self.n_skipped % 100 == 0:
+                print(f"[nan] step {step}: non-finite loss / gradient, update skipped ({self.n_skipped} so far)",
+                      flush=True)
+
+    def log_tasks(self, per_task: torch.Tensor, has: torch.Tensor, b: dict) -> None:
         present = torch.zeros_like(per_task, dtype=torch.bool)
         present[b["task"][has]] = True
         for of, acc, cnt in ((self.group_of, self.g_sum, self.g_cnt), (self.type_of, self.t_sum, self.t_cnt)):
@@ -276,7 +334,6 @@ class Trainer(engine.Trainer):
             on = g_n > 0
             acc += torch.where(on, g_loss / g_n.clamp_min(1), torch.zeros_like(g_loss))
             cnt += on.float()
-        return {"loss": total.detach(), "k": (b["task"] >= 0).float().sum(1).mean()}
 
     def _token_pairs(self, b: dict) -> tuple[torch.Tensor, torch.Tensor]:
         """The slots whose token maps train this step: every segmentation slot (token_weight) and the RSNA haemorrhage

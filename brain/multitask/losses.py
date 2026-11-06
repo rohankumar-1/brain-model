@@ -40,6 +40,25 @@ def seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return bce + dice
 
 
+def negative_seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """(P,) ``seg_loss`` for a lesion task with true negatives (registry ``negatives``: lesion-free scans carry an
+    all-zero mask, labels v11). Soft Dice on scans with a lesion only: on an empty one it only rewards predicting
+    nothing, the collapse ``sparse_seg_loss`` was built against. BCE on every (valid) voxel, and a scan BCE on the
+    map's peak logit against "this scan has a lesion", so a stray blob on a healthy scan costs more than its voxels."""
+    logits, target = logits.float(), target.float()
+    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
+    target = target[:, :1]
+    dims = (1, 2, 3, 4)
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    bce = (bce * w).sum(dims) / w.sum(dims).clamp_min(1.0)
+    p = logits.sigmoid() * w
+    has = target.amax(dims) > 0
+    dice = (1 - (2 * (p * target).sum(dims) + 1) / (p.sum(dims) + target.sum(dims) + 1)) * has.float()
+    peak = logits.masked_fill(w < 0.5, -1e4).amax(dims)
+    scan = F.binary_cross_entropy_with_logits(peak, has.float(), reduction="none")
+    return bce + dice + scan
+
+
 def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[int, int, int],
                     pos_weight: float = 20.0) -> torch.Tensor:
     """(P,) loss for a tiny target that many scans lack (registry ``sparse``: aneurysm balls of a few hundred voxels,
@@ -134,10 +153,12 @@ def slab_mil_loss(logits: torch.Tensor, lab: torch.Tensor, keep: torch.Tensor) -
 
 def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch.Tensor, seg: torch.Tensor,
                 seg_pair: torch.Tensor, stride: int = 2, dense: dict | None = None, sparse: torch.Tensor | None = None,
-                cell_zyx: tuple[int, int, int] | None = None, pos_weight: float = 20.0) -> tuple[torch.Tensor, torch.Tensor]:
+                cell_zyx: tuple[int, int, int] | None = None, pos_weight: float = 20.0,
+                negatives: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-slot loss (B, K) and a mask of slots that carry one. ``dense``: the prepared batch (``dense_pair``,
     ``dense_tgt``, ``dense_w``) when it has dense slots. ``sparse`` (n_tasks bool, registry ``sparse``) with
-    ``cell_zyx`` (output voxels per encoder token): those segmentation slots take ``sparse_seg_loss``."""
+    ``cell_zyx`` (output voxels per encoder token): those segmentation slots take ``sparse_seg_loss``.
+    ``negatives`` (n_tasks bool, registry ``negatives``): those take ``negative_seg_loss``."""
     tt = torch.where(task >= 0, task_type[task.clamp_min(0)], torch.full_like(task, -1))
     loss = torch.zeros_like(y, dtype=torch.float32)
     has = torch.zeros_like(task, dtype=torch.bool)
@@ -166,6 +187,11 @@ def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch
             if sp.any():
                 sl = sl.clone()
                 sl[sp] = sparse_seg_loss(out["seg"][sp], tgt[sp], cell_zyx, pos_weight)
+        if negatives is not None:
+            ng = negatives.to(task.device)[task[seg_pair[:, 0], seg_pair[:, 1]]]
+            if ng.any():
+                sl = sl.clone()
+                sl[ng] = negative_seg_loss(out["seg"][ng], tgt[ng])
         loss = loss.index_put((seg_pair[:, 0], seg_pair[:, 1]), sl)
         has = has.index_put((seg_pair[:, 0], seg_pair[:, 1]), torch.ones_like(sl, dtype=torch.bool))
     if out.get("dense") is not None and dense is not None and len(dense["dense_pair"]):

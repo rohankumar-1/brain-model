@@ -535,11 +535,18 @@ def train_decoder(dec, cache, task, split, *, steps, batch_size, lr, seed, eval_
         grid = crop if crop is not None else None
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             _, loss = _decode_loss(dec(x, grid=grid) if grid else dec(x), y, task.regions)
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(dec.parameters(), 1.0)
-        opt.step()
-        run += float(loss)
+        if not torch.isfinite(loss):
+            # 2026-11-05: AISD trained on NaN from the start for every encoder (not reproducible in memory); name the
+            # batch and skip the step instead of poisoning the decoder
+            bad = [(int(i), int(k)) for i, k in zip(pick, ks)]
+            print(f"[seg3d] non-finite loss at step {step}: x finite={bool(torch.isfinite(x).all())} "
+                  f"y range=({int(y.min())},{int(y.max())}) volumes/copies={bad}", flush=True)
+        else:
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(dec.parameters(), 1.0)
+            opt.step()
+            run += float(loss)
         if step % eval_every == 0 or step == steps:
             row = {"step": step, "train_loss": run / min(eval_every, step), "lr": float(opt.param_groups[0]["lr"])}
             run = 0.0

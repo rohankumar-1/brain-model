@@ -26,7 +26,7 @@ tasks:
     sources:
       - {source: fomo_participants, field: age,
          families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian,
-                    fomo_infant, fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_abd, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland]}
+                    fomo_infant, fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_abd, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland, pedi_cranial_ct]}
       - {source: downstream, task: ms3seg_age, use: eval}
       - {source: downstream, task: oasis1_age, use: eval}
       - {source: downstream, task: ixi_age, use: eval}
@@ -39,7 +39,7 @@ tasks:
     sources:
       - {source: fomo_participants, field: sex, map: {M: 1, F: 0, m: 1, f: 0, male: 1, female: 0},
          families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian,
-                    fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland, fomo_ahead, fomo_beijing]}
+                    fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland, fomo_ahead, fomo_beijing, pedi_cranial_ct]}
 
   # ---------------------------------------------------------------- diagnosis
   - id: neuro_diagnosis
@@ -104,34 +104,34 @@ tasks:
     descriptions:
       - "Is there any intracranial hemorrhage on this head CT?"
       - "Detect bleeding inside the skull."
-    sources: [{source: rsna, subtype: any}]
+    sources: [{source: rsna, subtype: any}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_epidural
     fine: true
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an epidural hematoma?", "Detect blood between the skull and the dura."]
-    sources: [{source: rsna, subtype: epidural}]
+    sources: [{source: rsna, subtype: epidural}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_intraparenchymal
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an intraparenchymal hemorrhage?", "Detect bleeding within the brain tissue."]
-    sources: [{source: rsna, subtype: intraparenchymal}]
+    sources: [{source: rsna, subtype: intraparenchymal}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_intraventricular
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there intraventricular hemorrhage?", "Detect blood inside the ventricles."]
-    sources: [{source: rsna, subtype: intraventricular}]
+    sources: [{source: rsna, subtype: intraventricular}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_subarachnoid
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there subarachnoid hemorrhage?", "Detect blood in the subarachnoid space and sulci."]
-    sources: [{source: rsna, subtype: subarachnoid}]
+    sources: [{source: rsna, subtype: subarachnoid}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_subdural
     fine: true
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there a subdural hematoma?", "Detect a crescent of blood between the dura and the brain."]
-    sources: [{source: rsna, subtype: subdural}]
+    sources: [{source: rsna, subtype: subdural}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
 
   # ---------------------------------------------------------------- intracranial aneurysm (RSNA-ICA, 2026-10-29)
   # CTA, TOF MRA, T2 and post-contrast T1 series; train split only (the test split is the downstream
@@ -220,7 +220,20 @@ tasks:
     sources:
       - {source: mask_column, families: [bhsd], column: mask_ich, ids: [1, 2, 3, 4, 5]}
       - {source: mask_column, families: [hemseg], column: mask_ich, ids: [1]}      # HemSeg-500: IPH- or IVH-only
-      - {source: downstream, task: seg_cq500, use: eval}
+      # RSNA studies with two-tool pseudo-masks (brain.prep.rsna_bleed_masks: TotalSegmentator cerebral_bleed + the
+      # haemorrhage specialist, accepted on agreement and RSNA slice labels; 2 = unsegmented positive-slice voxels of
+      # studies with subdural / subarachnoid / epidural blood, left out of the loss)
+      - {source: store_mask, families: [rsna_ich], mask: bleedpl, ids: [1], ignore: [2]}
+      - {source: empty, families: [pedi_cranial_ct], per_positive: 1.0, eval_n: 50}   # healthy children's CT (v12)
+      # true negatives (labels v11): RSNA studies read bleed-free. per_positive is in label rows; the family sampler
+      # dilutes them inside ~20k RSNA scans, so 8 rows per positive come out near 1:1 in training asks (audit
+      # simulation 2026-11-03: 1.0 gave 0.1 negatives per positive ask)
+      - {source: empty, rsna_negative: true, per_positive: 1.0, eval_n: 200}   # RSNA pseudo-masks: positives and
+        # negatives now share the RSNA family, so rows ~ asks (8.0 was for ~560 manual positives alone)
+      # five Seg-CQ500 masks do not lie on blood (audit 2026-11-03: 645 ml brain-like mask on CT-108; 18-58% of the
+      # mask in air on CT-65 / 61 / 173 / 75): out of the evaluation
+      - {source: downstream, task: seg_cq500, use: eval,
+         exclude_cases: [CQ500-CT-108, CQ500-CT-65, CQ500-CT-61, CQ500-CT-173, CQ500-CT-75]}
       - {source: downstream, task: instance, use: eval}
 
   # ---------------------------------------------------------------- derived, every scan (dense labels)
@@ -229,7 +242,8 @@ tasks:
     descriptions:
       - "Estimate the brain volume after normalisation to a standard head size."
       - "How much brain tissue is there relative to head size (atrophy)?"
-    sources: [{source: brain_volume}]
+    # fastMRI+ clinical slabs cover part of the brain (z ~ -5.7 on every scan): no whole-brain volume there
+    sources: [{source: brain_volume, exclude_datasets: ["fastmri*"]}]
 
   - id: brain_mask
     type: segmentation
@@ -254,6 +268,7 @@ tasks:
     sources: [{source: live, name: intensity_asym}]
 
   - id: ct_csf_fraction
+    group: ct_measures     # own group from labels v12 (R15: full weight, not halved with derived)
     type: regression
     descriptions:
       - "Estimate the fraction of the intracranial space occupied by cerebrospinal fluid on CT."
@@ -261,6 +276,7 @@ tasks:
     sources: [{source: live, name: ct_csf_frac, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   - id: ct_brain_density
+    group: ct_measures     # own group from labels v12 (R15: full weight, not halved with derived)
     type: regression
     descriptions:
       - "Estimate the mean attenuation of brain tissue in Hounsfield units."
@@ -268,6 +284,7 @@ tasks:
     sources: [{source: live, name: ct_brain_hu, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   - id: ct_calcification
+    group: ct_measures     # own group from labels v12 (R15: full weight, not halved with derived)
     type: regression
     descriptions:
       - "Estimate the burden of intracranial calcification on this head CT."
@@ -275,12 +292,31 @@ tasks:
     sources: [{source: live, name: ct_calcification, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
 
   - id: ct_skull_density
+    group: ct_measures     # own group from labels v12 (R15: full weight, not halved with derived)
     type: regression
     needs_skull: true      # not asked of skull-stripped scans (stripped at source or by augmentation)
     descriptions:
       - "Estimate the density of the skull bone in Hounsfield units."
       - "How dense is the calvarium (opportunistic bone density)?"
     sources: [{source: live, name: ct_skull_hu, modality: ct, exclude_datasets: ['*_cta']}]   # contrast
+
+  # CT anatomy from Hounsfield ranges (labels v12, 2026-11-06): exact masks computed from the scan at load time, so CT
+  # gets dense anatomy supervision without a segmentation tool (CT SynthSeg ICC 0.2-0.8; TotalSegmentator skipped)
+  - id: seg_ct_skull
+    group: ct_measures
+    type: segmentation
+    needs_skull: true
+    descriptions:
+      - "Segment the skull bone on this head CT."
+      - "Outline the calvarium and skull base (bone density)."
+    sources: [{source: hu, range: [300, 3000], modality: ct, exclude_datasets: ['*_cta']}]   # contrast vessels
+  - id: seg_ct_csf
+    group: ct_measures
+    type: segmentation
+    descriptions:
+      - "Segment the cerebrospinal fluid inside the skull on this head CT."
+      - "Outline the ventricles, cisterns and sulci (water density, inside the brain mask)."
+    sources: [{source: hu, range: [0, 15], in_brain: true, modality: ct, exclude_datasets: ['*_cta']}]
 
   # ---------------------------------------------------------------- clinical measures from SynthSeg (brain.multitask.measures)
   - id: evans_index
@@ -338,26 +374,32 @@ tasks:
     sources:
       - {source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 2, 3]}
       - {source: mask_column, families: [msd_braintumor], column: mask_seg, ids: [1, 2, 3], use: eval}
+      - &tumor_negatives    # true negatives (labels v11): healthy-volunteer MRI, never clinical cohorts
+        {source: empty, families: [ixi, fomo_nki, fomo_corr, fomo_hbn, id1000, piop1, piop2, fomo_slim, fomo_wand, fomo_chbmp, fomo_beijing, oasis1, oasis2, abide1], modality: mri, strippable_only: true,
+         per_positive: 0.45, eval_n: 200}   # 0.45 rows per positive ~ 1:1 asks (the small healthy cohorts are upweighted)
   - id: tumor_core
     token: tumor_regions
     type: segmentation
     descriptions:
       - "Segment the tumor core: enhancing and necrotic tumor, without edema."
       - "Outline the solid and necrotic tumor core."
-    sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 3]}]
+    # labels v12: post-contrast T1 only (the core / enhancement are defined by enhancement); negatives are fastMRI+
+    # post-contrast T1 read normal, so the task is not all-positive on T1c
+    sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [1, 3], contrasts: [t1c]},
+              &t1c_negatives {source: empty, fastmri_normal: true, contrasts: [t1c], per_positive: 1.0, eval_n: 50}]
   - id: enhancing_tumor
     token: tumor_regions
     type: segmentation
     descriptions:
       - "Segment the contrast-enhancing tumor."
       - "Outline the tumor tissue that enhances after gadolinium."
-    sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [3]}]
+    sources: [{source: brats_seg, families: [brats_gli, brats_men, brats_ped], ids: [3], contrasts: [t1c]}, *t1c_negatives]
   - id: resection_cavity
     type: segmentation
     descriptions:
       - "Segment the surgical resection cavity."
       - "Outline the cavity left by tumor resection."
-    sources: [{source: brats_seg, families: [brats_gli], datasets: [brats2024_gli], ids: [4]}]
+    sources: [{source: brats_seg, families: [brats_gli], datasets: [brats2024_gli], ids: [4]}, *tumor_negatives]
   - id: tumor_volume
     type: regression
     descriptions:

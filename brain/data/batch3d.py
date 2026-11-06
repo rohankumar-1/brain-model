@@ -118,6 +118,9 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
         d["meta"] = torch.where(torch.rand(b, device=device) < drop, torch.zeros_like(d["meta"]), d["meta"])
     cid, vid, tq = d["contrast_id"], torch.arange(b, device=device), d["tissue_q"]
     d["plans"] = {}
+    # aug.tie_views: every view of a volume (all groups but the window pair) draws the same contrast, so the SSL
+    # agreement terms ask for invariance to crop / degradation, not to contrast (R15, 2026-11-06)
+    tie = int(torch.randint(0, 2**30, (1,))) if aug.get("tie_views") else None
     if "volume_full" in first:
         d.update(sample_views(chunks, first["groups"], device))
     for g in first["groups"]:
@@ -134,6 +137,9 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
             for k in ("coords", "fg", "patch_mm", "parent", "pos"):
                 d[f"win_{k}"] = d[f"win_{k}"].expand(2, *d[f"win_{k}"].shape[1:])
             counts = counts.expand(2, -1)
+        elif tie is not None:     # aug.tie_views: one contrast per volume across all its views (R15)
+            d[f"{g}_view"] = torch.stack([appearance(view[i], mod, aug, thick, vid, cid, tq, tie_seed=tie)
+                                          for i in range(view.shape[0])])
         else:
             n = view.shape[0]
             flat = view.reshape(n * b, *view.shape[2:])

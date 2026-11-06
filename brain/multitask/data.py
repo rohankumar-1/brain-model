@@ -44,6 +44,10 @@ TYPE_ID = {"binary": 0, "regression": 1, "multiclass": 2, "segmentation": 3, "su
 RECON, NO_DENSE = -2, -1        # ``dense_slot`` codes: reconstruction (target from the image) / not a dense task
 
 
+# lesion masks whose voxels the anatomy targets ignore (tasks.lesion_ignore); core / enhancing lie inside whole tumour
+LESION_MASK_TASKS = ("whole_tumor", "resection_cavity", "hemorrhage_segmentation")
+
+
 class MultitaskDataset(Dataset):
     """One item per volume with at least one label among ``tasks``.
 
@@ -57,11 +61,21 @@ class MultitaskDataset(Dataset):
                  use: str | None = "train", volume_ids: list[str] | None = None,
                  group_weights: dict[str, float] | None = None, meta_drop: float = 0.0, skull_strip: float = 0.0,
                  mask_p: float = 0.0, max_dense: int | None = None, task_aware: bool = False,
-                 slices: dict | None = None, boxes: dict | None = None):
+                 slices: dict | None = None, boxes: dict | None = None, strip_match: list[str] | None = None,
+                 strip_all: bool = False, synth_contrast: dict | None = None, all_seg: bool = False,
+                 lesion_ignore: bool = False, study: dict | None = None, partners: dict | None = None):
         """``meta_drop``: chance (training) that a scan's metadata id is replaced by unknown. ``skull_strip``: chance
         (training) that an MRI scan with a QC-passed SynthStrip mask is skull-stripped, unless a drawn task
         ``needs_skull``: tumour / stroke cohorts arrive stripped, so stripping is otherwise a cohort fingerprint.
-        ``slices``: RSNA slice labels per volume id (``load_slices``), passed through to ``prepare``."""
+        ``slices``: RSNA slice labels per volume id (``load_slices``), passed through to ``prepare``.
+        ``strip_match``: tasks whose positives arrive skull-stripped (BraTS masks); a strippable scan asked one is
+        always stripped (its skull tasks leave the draw), so stripping stops marking the lesion cohort.
+        ``strip_all``: every strippable scan is stripped, in evaluation too (the skull-shortcut test).
+        ``all_seg`` (``tasks.all_seg``, with ``model.seg.shared``): a training scan is asked every segmentation task it
+        has (up to ``max_seg``) besides the usual draw over its other tasks; a shared decoder's cost does not grow
+        with the masks. ``synth_contrast`` (``aug.synth_contrast``): with chance ``p`` a training MRI scan with a SynthSeg mask is
+        re-rendered from it with random tissue contrast (``brain.data.synth_contrast``); only the drawn tasks in
+        ``groups`` / ``tasks`` (minus ``exclude``: contrast-invariant targets) stay, and its metadata reads unknown."""
         self.store_root = Path(store_root)
         self.slices, self.boxes = slices, boxes
         self.meta_drop, self.skull_strip, self.mask_p = float(meta_drop), float(skull_strip), float(mask_p)
@@ -69,6 +83,19 @@ class MultitaskDataset(Dataset):
         # stripping removes the skull and the vessels outside the brain mask: never on a scan asked a skull task, nor
         # (``task_aware``) a fine one
         self.skull_tasks = {i for i, t in enumerate(reg.tasks) if t.needs_skull or (task_aware and t.fine)}
+        self.strip_match = {reg.index[t] for t in strip_match or () if t in reg.index}
+        # labels v12 (tasks.lesion_ignore): on a scan with an expert / pseudo lesion mask, the anatomy targets (SynthSeg,
+        # which labels a tumour or a bleed as some tissue) leave the lesion's voxels out of the loss
+        self.lesion_ignore = bool(lesion_ignore)
+        self.lesion_tasks = {reg.index[t] for t in LESION_MASK_TASKS if t in reg.index}
+        self.anatomy_tasks = {i for i, t in enumerate(reg.tasks) if t.group == "anatomy_seg"}
+        self.strip_all = bool(strip_all)
+        self.all_seg = bool(all_seg)
+        sc = synth_contrast or {}
+        self.synth = sc if float(sc.get("p", 0.0)) > 0 else None
+        self.synth_tasks = {i for i, t in enumerate(reg.tasks)
+                            if (t.group in set(sc.get("groups") or ()) or t.id in set(sc.get("tasks") or ()))
+                            and t.id not in set(sc.get("exclude") or ())}
         self.reg, self.train = reg, bool(train)
         self.k_max, self.p_all, self.max_seg = int(k_max), float(p_all), int(max_seg)
         # dense (self-supervised) tasks' own decoder budget; None: they share ``max_seg`` with segmentation
@@ -112,13 +139,20 @@ class MultitaskDataset(Dataset):
         for col, fill in (("thick_mm", 1.0), ("thick_axis", -1)):
             if col not in meta:
                 meta[col] = fill
-        self.df = meta[["volume_id", "image_path", "modality", "dataset_family", "thick_mm", "thick_axis"]]
+        if "subject_id" not in meta:
+            meta["subject_id"] = meta["volume_id"]
+        self.df = meta[["volume_id", "image_path", "modality", "dataset_family", "thick_mm", "thick_axis", "subject_id"]]
         self.thick = list(zip(self.df["thick_mm"].fillna(1.0).astype(float),
                               self.df["thick_axis"].fillna(-1).astype(int)))
         self.paths = self.df["image_path"].astype(str).tolist()
         self.mods = self.df["modality"].astype(str).str.lower().tolist()
         get = lambda c, fill="": meta[c] if c in meta else pd.Series(fill, index=meta.index)  # noqa: E731
         self.meta_ids = [meta_id(c, m, ds) for c, m, ds in zip(get("contrast", None), self.mods, get("dataset"))]
+        from brain.models.vit3d import seq_type
+        self.seqs = [seq_type(c, m) for c, m in zip(get("contrast_std"), self.mods)]
+        # study-level input (R14-F, ``tasks.study``): each scan's co-registered partners (``study_partners``), asked
+        # with probability ``p_multi`` (training) / ``eval_p`` (evaluation), up to ``max_scans`` scans per study
+        self.study, self.partners = (dict(study), partners or {}) if study else (None, {})
         mask_ok = get("brain_ok").astype(str).str.lower().isin(["true", "1", "1.0"]) \
             & get("brain_method").astype(str).eq("synthstrip")
         stripped = get("stripped_input").astype(str).str.lower().isin(["true", "1", "1.0"])
@@ -184,6 +218,10 @@ class MultitaskDataset(Dataset):
         recon = [a for a in avail if a[2] == "@recon"]
         rest = [a for a in avail if a[2] != "@recon"]
         if not (self.train and recon and self.mask_p > 0 and (not rest or rng.random() < self.mask_p)):
+            if self.train and self.all_seg:
+                seg = [a for a in rest if self.reg[a[0]].type == "segmentation"]
+                seg = [seg[i] for i in rng.permutation(len(seg))[: self.max_seg]]
+                return seg + self._draw([a for a in rest if self.reg[a[0]].type != "segmentation"], rng), False
             return self._draw(rest, rng), False
         return recon[:1] + self._draw([a for a in rest if a[0] in self.ssl_tasks], rng,
                                       taken={self._budget(recon[0][0]): 1}), True
@@ -194,9 +232,24 @@ class MultitaskDataset(Dataset):
         vid, avail = self.items[int(idx)]
         rng = np.random.default_rng(int(torch.randint(0, 2**31 - 1, (1,))) if self.train else idx)
         drawn, masked = self._draw_sample(avail, rng)
+        # synthetic contrast first, so the stripping below sees the tasks the scan will really be asked
+        synth_map, drawn_full = None, drawn
+        if (self.synth and self.train and not masked and not self.mods[idx].startswith("ct")
+                and rng.random() < float(self.synth["p"])):
+            keep = [d for d in drawn if d[0] in self.synth_tasks]
+            label_map = next((r.split("|")[0] for _, _, r in avail if ".synthseg." in r), None)  # anatomy masks' map
+            if keep and label_map:
+                drawn, synth_map = keep, label_map
         strip = (self.train and self.skull_strip > 0 and self.strippable[idx] and rng.random() < self.skull_strip
                  and not any(t in self.skull_tasks for t, _, _ in drawn))
-        need_brain = strip or any(r == "@brain" or r.startswith("@live:") for _, _, r in drawn)
+        # in evaluation too: a tumour task is always answered on the stripped scan, as its positives arrive
+        if self.strippable[idx] and any(t in self.strip_match for t, _, _ in drawn):
+            strip = True
+            drawn = [d for d in drawn if d[0] not in self.skull_tasks]
+        if self.strip_all and self.strippable[idx]:
+            strip = True
+        need_brain = strip or any(r == "@brain" or r.startswith("@live:") or (r.startswith("@hu:") and r.endswith(":brain"))
+                                  for _, _, r in drawn)
         rel = Path(self.paths[idx])
         arrays = store.read_many(rel if rel.is_absolute() else self.store_root / rel,
                                  ("image", "brain") if need_brain else ("image",))
@@ -206,6 +259,28 @@ class MultitaskDataset(Dataset):
         tasks, ys, seg_masks, seg_slot = [], [], [], []
         dense_slot, dense_raw, dense_mod = [], [], []
         mask_cache: dict[str, np.ndarray] = {}
+        if synth_map is not None:
+            from brain.data.synth_contrast import synth_image
+
+            mask_cache[synth_map] = store.read_image(self.store_root / synth_map, "mask")
+            sc = self.synth
+            if mask_cache[synth_map].shape == img.shape:
+                img = synth_image(img, mask_cache[synth_map], rng, mean=tuple(sc.get("mean", (-2.0, 3.0))),
+                                  std=tuple(sc.get("std", (0.05, 0.6))), blur=tuple(sc.get("blur", (0.3, 1.0))))
+            else:                   # no usable map: the real scan, its drawn tasks and real metadata
+                synth_map, drawn = None, drawn_full
+                drawn = [d for d in drawn if d[0] not in (self.skull_tasks if strip else
+                                                           self.strip_match if self.strippable[idx] else ())]
+        lesion = None
+        if self.lesion_ignore and any(t in self.anatomy_tasks for t, _, _ in drawn):
+            for t, _, ref in avail:
+                if t in self.lesion_tasks and not ref.startswith("@"):
+                    path, ids, *ign = ref.split("|")
+                    if path not in mask_cache:
+                        mask_cache[path] = store.read_image(self.store_root / path, "mask")
+                    lm = np.isin(mask_cache[path], [int(i) for i in (ids + ("," + ign[0] if ign else "")).split(",")])
+                    if lm.shape == img.shape:
+                        lesion = lm if lesion is None else lesion | lm
         for t, y, ref in drawn:
             dslot = NO_DENSE
             if ref == "@recon":
@@ -229,6 +304,13 @@ class MultitaskDataset(Dataset):
             if self.reg[t].type == "segmentation":
                 if ref == "@brain":
                     m = np.asarray(arrays["brain"]) > 0
+                elif ref == "@empty":                        # a lesion-free scan: a true negative (labels v11)
+                    m = np.zeros(img.shape, dtype=np.uint8)
+                elif ref.startswith("@hu:"):                 # ``@hu:lo:hi[:brain]``: a CT Hounsfield range (labels v12)
+                    lo, hi, *inside = ref.split(":")[1:]
+                    m = ((img >= float(lo)) & (img <= float(hi))).astype(np.uint8)
+                    if inside:
+                        m &= (np.asarray(arrays["brain"]) > 0).astype(np.uint8)
                 else:
                     path, ids, *ign = ref.split("|")         # ``path|ids[|ignored ids]``
                     if path not in mask_cache:
@@ -238,6 +320,9 @@ class MultitaskDataset(Dataset):
                         m[np.isin(mask_cache[path], [int(i) for i in ign[0].split(",")]) & (m == 0)] = 2
                 if m.shape != img.shape:
                     continue
+                if lesion is not None and t in self.anatomy_tasks:
+                    m = m.copy()
+                    m[lesion] = 2
                 slot = len(seg_masks)
                 seg_masks.append(torch.from_numpy(np.ascontiguousarray(m, dtype=np.uint8)))
                 y = float("nan")
@@ -249,7 +334,30 @@ class MultitaskDataset(Dataset):
             brain = np.asarray(arrays["brain"]) > 0
             img = np.where(brain, img, img.min())
             dense_raw = [np.where(brain, o, o.min()) for o in dense_raw]     # a synthesis target keeps the input's FOV
+        study_imgs, study_mod, study_seq = [], [], []
+        cand = self.partners.get(vid) if self.study and synth_map is None and not masked else None
+        if cand and rng.random() < float(self.study.get("p_multi" if self.train else "eval_p", 0.5 if self.train else 1.0)):
+            k_max = max(1, int(self.study.get("max_scans", 3)) - 1)
+            if self.train:
+                k = int(rng.integers(1, min(k_max, len(cand)) + 1))
+                pick = [cand[i] for i in rng.permutation(len(cand))[:k]]
+            else:
+                pick = cand[:k_max]
+            brain = np.asarray(arrays["brain"]) > 0 if strip else None
+            for _pvid, ppath, pmod, pseq in pick:
+                rel_p = Path(ppath)
+                arr = store.squeeze_channel(store.read_many(
+                    rel_p if rel_p.is_absolute() else self.store_root / rel_p, ("image",))["image"])
+                if arr.shape != img.shape:
+                    continue
+                if brain is not None:              # the anchor's skull strip, on the same grid
+                    arr = np.where(brain, arr, arr.min())
+                study_imgs.append(torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float16)))
+                study_mod.append(0 if pmod.startswith("ct") else 1)
+                study_seq.append(int(pseq))
         meta_ = 0 if self.train and self.meta_drop > 0 and rng.random() < self.meta_drop else self.meta_ids[idx]
+        if synth_map is not None:                  # a synthetic contrast is no real sequence: metadata unknown
+            meta_ = 0
         return {
             "image": torch.from_numpy(np.ascontiguousarray(img)),           # (Z, Y, X) raw, stored dtype
             "modality": 0 if mod.startswith("ct") else 1,
@@ -265,6 +373,9 @@ class MultitaskDataset(Dataset):
             "volume_id": vid,
             "thick": torch.tensor(self.thick[idx], dtype=torch.float32),     # (mm, grid axis or -1)
             "meta": meta_,
+            "seq": self.seqs[idx],
+            "study_img": torch.stack(study_imgs) if study_imgs else None,
+            "study_mod": study_mod, "study_seq": study_seq,
             "slab": self.slices.get(vid) if self.slices else None,
             "boxes": self.boxes.get(vid) if self.boxes else None,
         }
@@ -315,7 +426,47 @@ def collate(batch: list[dict]) -> dict:
         "meta": torch.tensor([int(b.get("meta", 0)) for b in batch], dtype=torch.long),
         **collate_slabs([b.get("slab") for b in batch]),
         **collate_boxes([b.get("boxes") for b in batch]),
+        **collate_study(batch),
     }
+
+
+def collate_study(batch: list[dict]) -> dict:
+    """Partner scans of the batch's studies (R14-F): ``study_img`` (P, Z, Y, X) float16, ``study_row`` (P,) the anchor
+    row, ``study_mod`` / ``study_seq`` (P,), and ``seq`` (B,) the anchors' sequence types. No partners: P = 0."""
+    imgs, rows, mods, seqs = [], [], [], []
+    for i, b in enumerate(batch):
+        if b.get("study_img") is not None:
+            imgs.append(b["study_img"])
+            rows += [i] * len(b["study_img"])
+            mods += list(b["study_mod"])
+            seqs += list(b["study_seq"])
+    shape = batch[0]["image"].shape
+    return {"seq": torch.tensor([int(b.get("seq", 0)) for b in batch], dtype=torch.long),
+            "study_img": torch.cat(imgs) if imgs else torch.zeros(0, *shape, dtype=torch.float16),
+            "study_row": torch.tensor(rows, dtype=torch.long), "study_mod": torch.tensor(mods, dtype=torch.long),
+            "study_seq": torch.tensor(seqs, dtype=torch.long)}
+
+
+def study_partners(labels_dir, volumes: pd.DataFrame, pool: set[str]) -> dict:
+    """volume id -> [(partner id, image path, modality, sequence type)]: the other scans of its study, i.e. same
+    subject (``dedup_key``) and the identical stored registration (``pairs_affine.parquet``, the label build's
+    co-registration cache: BraTS / UPENN sequences, SynthRAD MR + CT), both in ``pool``."""
+    from brain.models.vit3d import seq_type
+
+    p = pd.read_parquet(Path(labels_dir) / "pairs_affine.parquet")
+    v = volumes.drop_duplicates("volume_id").set_index("volume_id")
+    p = p[p["volume_id"].isin(pool) & p["volume_id"].isin(v.index)]
+    p = p.assign(key=v.loc[p["volume_id"], "dedup_key"].astype(str).to_numpy())
+    out: dict[str, list] = {}
+    for _, g in p.groupby(["key", "affine"]):
+        ids = g["volume_id"].astype(str).tolist()
+        if len(ids) < 2:
+            continue
+        info = {i: (i, str(v.at[i, "image_path"]), str(v.at[i, "modality"]).lower(),
+                    seq_type(v.at[i, "contrast_std"] if "contrast_std" in v else "", v.at[i, "modality"])) for i in ids}
+        for a in ids:
+            out[a] = [info[x] for x in ids if x != a]
+    return out
 
 
 # RSNA slice labels (brain.prep.rsna_slices): bit k of a slice's labels is task SLAB_TASKS[k]
@@ -516,10 +667,11 @@ def token_mil_labels(batch: dict, device, shape_zyx, patch_xyz, flip, theta) -> 
 
 def make_loader(ds: MultitaskDataset, *, batch_size: int, shuffle: bool, seed: int, workers: int,
                 balance_alpha: float = 1.0, balance_groups: dict | None = None, distributed: bool = False,
-                drop_last: bool = True) -> DataLoader:
-    if shuffle and balance_alpha != 1.0:
+                drop_last: bool = True, subject_beta: float = 0.0) -> DataLoader:
+    if shuffle and (balance_alpha != 1.0 or subject_beta):
         world, rank = (torch.distributed.get_world_size(), torch.distributed.get_rank()) if distributed else (1, 0)
-        sampler = FamilySampler(ds, balance_alpha, seed=seed, num_replicas=world, rank=rank, groups=balance_groups)
+        sampler = FamilySampler(ds, balance_alpha, seed=seed, num_replicas=world, rank=rank, groups=balance_groups,
+                                subject_beta=subject_beta)
     else:
         sampler = DistributedSampler(ds, shuffle=shuffle, seed=seed) if distributed else None
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle and sampler is None, sampler=sampler,
@@ -542,7 +694,9 @@ def _rotation(deg: torch.Tensor) -> torch.Tensor:
 
 def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | None = None) -> torch.Tensor | None:
     """Per-row affine (B, 3, 4) for ``F.affine_grid`` (normalised x, y, z): a rotation in millimetres about the grid
-    centre and a shift, applied with probability ``aug.p`` (never on ``skip`` rows). None when nothing is drawn."""
+    centre and a shift, applied with probability ``aug.p`` (never on ``skip`` rows). None when nothing is drawn.
+    ``shear_deg``: a y-z shear of up to that angle, the geometry of an uncorrected CT gantry tilt (slices offset along
+    y in proportion to z; RSNA scans whose registration fell back to rigid keep theirs)."""
     p = float(aug.get("p", 0.0))
     if p <= 0:
         return None
@@ -555,6 +709,12 @@ def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | Non
     half = torch.tensor([shape_zyx[2], shape_zyx[1], shape_zyx[0]], device=device, dtype=torch.float32) / 2
     rot = _rotation(deg * on)
     a = rot * half.view(1, 1, 3) / half.view(1, 3, 1)               # diag(1/h) R diag(h)
+    shear = float(aug.get("shear_deg", 0.0))
+    if shear > 0:                                                   # y += tan(angle) z, in mm, then normalised
+        t = torch.tan(torch.deg2rad((torch.rand(b, device=device) * 2 - 1) * shear)) * on.squeeze(-1)
+        sh = torch.eye(3, device=device).repeat(b, 1, 1)
+        sh[:, 1, 2] = t * half[2] / half[1]
+        a = sh @ a
     return torch.cat([a, (shift * on / half).unsqueeze(-1)], dim=-1)
 
 
@@ -694,10 +854,14 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     dense_pair = batch.get("dense_pair", torch.zeros(0, 2, dtype=torch.long)).to(device)
     raw_dense = batch["dense"].to(device, non_blocking=True).float().unsqueeze(1) if len(dense_pair) else None
     drows = batch["dense_row"].to(device) if raw_dense is not None else None
+    prow = batch["study_row"].to(device) if "study_row" in batch else torch.zeros(0, dtype=torch.long, device=device)
+    praw = batch["study_img"].to(device, non_blocking=True).float().unsqueeze(1) if len(prow) else None
     flip = None
     if train and float(aug.get("flip_lr", 0.0)) > 0:
         flip = torch.rand(b, device=device) < float(aug["flip_lr"])
         raw = torch.where(flip.view(-1, 1, 1, 1, 1), raw.flip(-1), raw)
+        if praw is not None:
+            praw = torch.where(flip[prow].view(-1, 1, 1, 1, 1), praw.flip(-1), praw)
         if len(seg):
             seg = torch.where(flip[rows].view(-1, 1, 1, 1, 1), seg.flip(-1), seg)
         if raw_dense is not None and len(raw_dense):
@@ -709,6 +873,10 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
         raw = F.grid_sample(raw - bg, grid, mode="bilinear", padding_mode="zeros", align_corners=False) + bg
         if len(seg):
             seg = F.grid_sample(seg, grid[rows], mode="bilinear", padding_mode="zeros", align_corners=False)
+        if praw is not None:
+            pbg = praw.amin(dim=(1, 2, 3, 4), keepdim=True)
+            praw = F.grid_sample(praw - pbg, grid[prow], mode="bilinear", padding_mode="zeros",
+                                 align_corners=False) + pbg
         if raw_dense is not None and len(raw_dense):
             dbg = raw_dense.amin(dim=(1, 2, 3, 4), keepdim=True)
             raw_dense = F.grid_sample(raw_dense - dbg, grid[drows], mode="bilinear", padding_mode="zeros",
@@ -718,6 +886,8 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
         unsafe = fov_unsafe.to(device)[task.clamp_min(0)] & (task >= 0) if fov_unsafe is not None \
             else torch.ones_like(task, dtype=torch.bool)
         allowed = ~unsafe.any(1) if sharp_rows is None else ~unsafe.any(1) & ~sharp_rows
+        if praw is not None:                  # a study's scans must show the same field of view
+            allowed[prow] = False
         for key in ("slab_has", "box_has"):    # a cut could hide a labelled finding from its bag
             if key in batch:
                 allowed &= ~batch[key].to(device)
@@ -733,6 +903,14 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
                        sharp=sharp_rows)
     else:
         x = encoder_window(raw, mod, in_chans)
+    study = None
+    if praw is not None:
+        pmod = batch["study_mod"].to(device)
+        if train and app:
+            px = appearance(praw, pmod, {**app, "window": window})
+        else:
+            px = encoder_window(praw, pmod, in_chans)
+        study = {"x": px, "row": prow, "seq": batch["seq"].to(device), "pseq": batch["study_seq"].to(device)}
     hide = dense_tgt = dense_w = None
     tk = cfg.get("tasks") or {}
     if train and "masked" in batch and bool(batch["masked"].any()):
@@ -748,7 +926,7 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device),
             "dense_pair": dense_pair, "dense_tgt": dense_tgt, "dense_w": dense_w,
-            "meta": batch["meta"].to(device) if "meta" in batch else None, "slab": slab}
+            "meta": batch["meta"].to(device) if "meta" in batch else None, "slab": slab, "study": study}
 
 
 def pick_val_volumes(labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry, task_ids: list[str],
@@ -773,7 +951,13 @@ def pick_val_volumes(labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry,
             k = min(len(pos), n // 2)
             g = pd.concat([pos.head(k), neg.head(n - k)])
         else:
-            g = g.assign(r=g.groupby("dataset_family").cumcount()).sort_values(["r", "h"]).head(n)
+            # true negatives (labels v11 "@empty", many healthy cohorts) take at most a quarter, so the round-robin
+            # over families cannot crowd the lesion scans Dice is measured on out of the pick
+            empty = g["ref"].astype(str).eq("@empty") if "ref" in g else pd.Series(False, index=g.index)
+            k = min(int(empty.sum()), n // 4)
+            real = g[~empty]
+            real = real.assign(r=real.groupby("dataset_family").cumcount()).sort_values(["r", "h"]).head(n - k)
+            g = pd.concat([real, g[empty].head(k)])
         picks.append(g["volume_id"])
     return pd.concat(picks).unique().tolist() if picks else []
 
@@ -790,8 +974,27 @@ def drop_datasets(labels: pd.DataFrame, volumes: pd.DataFrame, prefixes) -> pd.D
     return labels[~gone]
 
 
+def excluded_volume_ids(path) -> set[str]:
+    """``data.exclude_volumes``: a CSV with a ``volume_id`` column (e.g. configs/multitask/train_exclude_r15.csv, the
+    training copies of benchmark scans and the train-split twins of val / test scans), or nothing."""
+    if not path:
+        return set()
+    from brain.common.paths import resolve
+    return set(pd.read_csv(resolve(path))["volume_id"].astype(str))
+
+
+def drop_volumes(labels: pd.DataFrame, path) -> pd.DataFrame:
+    ids = excluded_volume_ids(path)
+    if not ids:
+        return labels
+    gone = labels["volume_id"].astype(str).isin(ids)
+    print(f"[data] exclude_volumes {path}: {int(gone.sum())} label rows, {labels.loc[gone, 'volume_id'].nunique()} "
+          f"scans dropped", flush=True)
+    return labels[~gone]
+
+
 def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, workers: int, seed: int, main: bool,
-                 distributed: bool, synthetic: bool = False):
+                 distributed: bool, synthetic: bool = False, saved_stats: dict | None = None):
     """Training loader, fixed validation loader (main rank only; ``pick_val_volumes``), label statistics and the number
     of training scans, for the multitask and joint trainers. ``synthetic`` gives phantom volumes (CPU smoke runs)."""
     from torch.utils.data import DataLoader
@@ -807,20 +1010,35 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
         return DataLoader(ds, batch_size=batch, shuffle=True, collate_fn=collate, drop_last=True), val, {}, len(ds)
     store = resolve(d["store_root"])
     labels, stats = load_labels(resolve(d["labels_dir"]))
+    if saved_stats:     # a resumed run keeps the standardisation its heads were trained with; new tasks take the table's
+        stats = {**stats, **saved_stats}
     volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
     labels = drop_datasets(labels, volumes, d.get("exclude_datasets"))
+    labels = drop_volumes(labels, d.get("exclude_volumes"))
+    study_cfg = tk.get("study") or None
+    partners = None
+    if study_cfg and not synthetic:
+        partners = study_partners(resolve(d["labels_dir"]), volumes, set(labels["volume_id"].astype(str)))
+        print(f"[data] study input: {len(partners)} scans with co-registered partners "
+              f"(p_multi {study_cfg.get('p_multi', 0.5)}, max_scans {study_cfg.get('max_scans', 3)})", flush=True)
     ds = MultitaskDataset(store, labels, volumes, reg, stats, split="train", train=True, tasks=train_ids,
                           k_max=int(tk["k_max"]), p_all=float(tk["p_all"]), rare_beta=float(tk["rare_beta"]),
                           max_seg=int(tk["max_seg"]), group_weights=tk.get("group_weights"),
+                          lesion_ignore=bool(tk.get("lesion_ignore", False)),
+                          study=study_cfg, partners=partners,
                           meta_drop=float((cfg["model"].get("meta") or {}).get("drop", 0.0)),
                           skull_strip=float(((cfg.get("aug") or {}).get("skull_strip") or {}).get("p", 0.0)),
                           mask_p=float(tk.get("mask_p", 0.0)),
                           max_dense=None if tk.get("max_dense") is None else int(tk["max_dense"]),
                           task_aware=bool((cfg.get("aug") or {}).get("task_aware", False)),
                           slices=load_slices(resolve(d["rsna_slices"])) if d.get("rsna_slices") else None,
-                          boxes=load_boxes(resolve(d["fastmri_boxes"]), volumes) if d.get("fastmri_boxes") else None)
+                          boxes=load_boxes(resolve(d["fastmri_boxes"]), volumes) if d.get("fastmri_boxes") else None,
+                          strip_match=list(((cfg.get("aug") or {}).get("skull_strip") or {}).get("match") or []),
+                          synth_contrast=(cfg.get("aug") or {}).get("synth_contrast"),
+                          all_seg=bool(tk.get("all_seg", False)))
     loader = make_loader(ds, batch_size=batch, shuffle=True, seed=seed, workers=workers,
                          balance_alpha=float(d.get("balance_alpha", 1.0)), balance_groups=d.get("balance_groups"),
+                         subject_beta=float(d.get("subject_beta", 0.0)),
                          distributed=distributed)
     val = None
     if main:
@@ -828,7 +1046,9 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
         val_ids = [t for t in train_ids if not any(s.get("source") == "ssl_recon" for s in reg[t].sources)]
         pick = pick_val_volumes(labels, volumes, reg, val_ids, int(d.get("val_per_task", 64)))
         vds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", train=False, tasks=val_ids, k_max=64,
-                               max_seg=int(d.get("val_max_seg", 4)), volume_ids=pick)
+                               max_seg=int(d.get("val_max_seg", 4)), volume_ids=pick,
+                               lesion_ignore=bool(tk.get("lesion_ignore", False)),
+                               strip_match=list(((cfg.get("aug") or {}).get("skull_strip") or {}).get("match") or []))
         val = make_loader(vds, batch_size=2, shuffle=False, seed=0, workers=min(4, workers), drop_last=False)
     return loader, val, stats, len(ds)
 

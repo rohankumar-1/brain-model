@@ -182,6 +182,7 @@ def metric_reps(metric: str, y: np.ndarray, p: np.ndarray, w: np.ndarray) -> np.
         p = p.argmax(1) if p.ndim == 2 else p
         return _bacc(y.reshape(-1).astype(int), p.astype(int), w)
     if fam == "dice":                                           # per-scan Dice rows: the weighted mean
+        w = w * (np.asarray(y).reshape(-1) != 0)                # y 0: a lesion-free scan (test_eval "fp" rows), no Dice
         return (w * p).sum(1) / np.maximum(w.sum(1), 1e-12)
     raise ValueError(f"no metric {metric}")
 

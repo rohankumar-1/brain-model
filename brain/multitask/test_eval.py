@@ -45,7 +45,8 @@ def score(kind: str, y: np.ndarray, p: np.ndarray) -> float:
         return float(r2_score(y, p))
     if kind == "multiclass":
         return balanced_accuracy(y.astype(int), p.astype(int))
-    return float(np.mean(p))                                          # segmentation rows hold per-scan Dice
+    # segmentation rows hold per-scan Dice, y = 1 with a target; empty targets (y = 0) are scored as ``fp`` instead
+    return float(np.mean(p[y > 0])) if (y > 0).any() else float("nan")
 
 
 def bootstrap(kind, y, p, p_ref=None, reps: int = 1000, seed: int = 0, y_ref=None) -> tuple[float, float]:
@@ -84,6 +85,11 @@ def main() -> None:
                     help="label table (default: the first checkpoint's); one table for every model, e.g. the newest")
     ap.add_argument("--split", default="test", choices=["test", "val", "train"],
                     help="split the heads are scored on (train: how well they fit their own training scans; heads only)")
+    ap.add_argument("--strip-mri", action="store_true",
+                    help="skull-strip every skull-on MRI with a QC-passed mask (does a tumour head key on the skull?)")
+    ap.add_argument("--study", type=int, default=0,
+                    help="study-level input (R14-F): each scan with up to this many scans of its study (its "
+                         "co-registered partners); 0 = single scans")
     a = ap.parse_args()
     if a.split != "test" and a.probe_ckpts:
         raise SystemExit("[test_eval] --split train/val scores heads only (probes fit on the train split)")
@@ -95,12 +101,22 @@ def main() -> None:
     labels_dir = resolve(a.labels_dir or ref_cfg["data"]["labels_dir"])
     labels, stats = load_labels(labels_dir)
     volumes = pd.read_csv(store / ref_cfg["data"].get("index_name", "volumes.csv"), low_memory=False)
+    study = partners = None
+    if a.study > 1:
+        from brain.multitask.data import study_partners
+        study = {"eval_p": 1.0, "max_scans": int(a.study)}
+        partners = study_partners(labels_dir, volumes, set(labels["volume_id"].astype(str)))
+        print(f"[test_eval] study input: up to {a.study} scans; {len(partners)} scans have partners", flush=True)
     tasks = [t.id for t in ref_reg.trained if (a.tasks is None or t.id in a.tasks) and t.type in METRIC]   # not dense (SSL)
     lab = labels[(labels["use"] == "train") & labels["task"].isin(tasks)]
     test_ids, train_ids = {}, {}
     for t in tasks:
         cap = a.max_seg if ref_reg[t].type == "segmentation" else a.max_test
-        test_ids[t] = pick(lab.loc[(lab.task == t) & (lab.split == a.split), "volume_id"].unique().tolist(), cap)
+        rows_t = lab[(lab.task == t) & (lab.split == a.split)]
+        empty = rows_t["ref"].astype(str).eq("@empty")
+        # true negatives (labels v11) are picked on their own, so they never displace the scans Dice is measured on
+        test_ids[t] = pick(rows_t.loc[~empty, "volume_id"].unique().tolist(), cap) \
+            + pick(rows_t.loc[empty, "volume_id"].unique().tolist(), cap)
         train_ids[t] = pick(lab.loc[(lab.task == t) & (lab.split == "train"), "volume_id"].unique().tolist(), a.max_train)
     n_with = sum(1 for v in test_ids.values() if v)
     print(f"[test_eval] {len(tasks)} tasks, {n_with} with test scans (SynthSeg tasks have no test split); median "
@@ -118,7 +134,9 @@ def main() -> None:
             if t not in reg.index or not test_ids[t]:
                 continue
             loader, _ = _loader(store, labels, volumes, reg, m_stats, t, a.split, ids=test_ids[t], use="train",
-                                workers=a.workers)
+                                workers=a.workers, strip_all=a.strip_mri,
+                                strip_match=list(((cfg.get("aug") or {}).get("skull_strip") or {}).get("match") or []),
+                                study=study, partners=partners)
             _, pr = run_eval(model, loader, cfg, reg, m_stats, dev, patch, amp, return_preds=True)
             r = pr.get(reg.index[t], [])
             if not r:
@@ -142,8 +160,18 @@ def main() -> None:
                 rec["delta_vs_ref"] = score(kind, ym, pr_me) - score(kind, yr, pr_ref)
                 rec["delta_lo"], rec["delta_hi"] = bootstrap(kind, yr, pr_ref, p_ref=pr_me, y_ref=ym)
                 rec["delta_lo"], rec["delta_hi"] = -rec["delta_hi"], -rec["delta_lo"]     # ref - this -> this - ref
+            if kind == "segmentation":
+                rec["n"] = int((y > 0).sum())
             rows.append(rec)
-            print(f"[heads] {name} {t}: {rec['metric']} {rec['score']:.3f} [{lo:.3f}, {hi:.3f}] n={len(y)}", flush=True)
+            print(f"[heads] {name} {t}: {rec['metric']} {rec['score']:.3f} [{lo:.3f}, {hi:.3f}] n={rec['n']}", flush=True)
+            if kind == "segmentation" and (y == 0).any():
+                fp = 1.0 - p[y == 0]                  # 1 where the head predicted anything on a lesion-free scan
+                boot = np.random.default_rng(0).integers(0, len(fp), (1000, len(fp)))
+                lo, hi = np.percentile(fp[boot].mean(1), [2.5, 97.5])
+                rows.append({"model": name, "kind": "heads", "task": t, "group": reg[t].group, "metric": "fp",
+                             "n": len(fp), "score": float(fp.mean()), "ci_lo": float(lo), "ci_hi": float(hi)})
+                print(f"[heads] {name} {t}: fp {fp.mean():.3f} [{lo:.3f}, {hi:.3f}] n={len(fp)} lesion-free scans",
+                      flush=True)
         if i > 0:
             del model
             torch.cuda.empty_cache()

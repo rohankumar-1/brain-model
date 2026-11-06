@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
                    help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid (default: axial only)")
     p.add_argument("--readout", choices=["pooled", "axial", "raw"], default="pooled",
                    help="pooled (benchmark v3): a linear probe and BrainDINO's MLP head on one embedding per volume "
-                        "(CLS, else the mean token), plus a linear probe on the 8 octant means of a 3D token grid "
+                        "(the mean foreground token), plus a linear probe on the 8 octant means of a 3D token grid "
                         "(spatial: side and coarse position); axial (v2): PCA, then per-plane and 4x4x4 probes on a cubic token "
                         "grid, plus linear heads on each global embedding; raw: pool every token")
     p.add_argument("--cv", choices=["auto", "on", "off"], default="auto",
@@ -138,11 +138,14 @@ def _rename(head, name: str, pool: str | None = None):
 
 
 def pooled_embedding(emb: dict, chunk: int = 64) -> tuple[np.ndarray, str]:
-    """One vector per volume: the CLS token when the model has one, else the mean of its foreground tokens (chunked:
-    large caches are memory-mapped)."""
-    if emb.get("cls") is not None:
+    """One vector per volume: the mean of its foreground tokens (chunked: large caches are memory-mapped); the CLS token
+    only for a model that exposes no tokens. Not CLS first (2026-11-05): in task-token BrainQuery models no objective
+    trains the CLS token (answers come from the task tokens), so it drifts between runs and mis-measured them (CQ500
+    fell through CLS while every token readout rose, R13 -> R14)."""
+    mus = emb.get("mus")
+    if mus is None:
         return np.asarray(emb["cls"], dtype=np.float32), "cls"
-    mus, mask = emb["mus"], np.asarray(emb["mask"])
+    mask = np.asarray(emb["mask"])
     out = np.empty((len(mus), mus.shape[-1]), dtype=np.float32)
     for i in range(0, len(mus), chunk):
         x, m = np.asarray(mus[i:i + chunk], dtype=np.float32), mask[i:i + chunk, :, None].astype(np.float32)
