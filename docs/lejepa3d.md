@@ -1,66 +1,72 @@
-# 3D LeJEPA (the project model) — current recipe
+# 3D LeJEPA (BrainQuery's self-supervised objective)
 
-Code: `brain/train/lejepa3d.py` (trainer), `brain/models/{vit3d,viewnet3d}.py`, `brain/objectives/{lejepa3d,dense,sigreg}.py`, `brain/data/{volumes,crops3d,batch3d,augment}.py`. Run: `python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml` (pooled-only baseline: `tiny_pooled.yaml`).
-Older design notes (CLS token, masking, v4 canvas) are in `docs/archive/` and no longer match the code.
+Code:
+- trainer: `brain/train/lejepa3d.py`;
+- models: `brain/models/{vit3d,viewnet3d}.py`;
+- objectives: `brain/objectives/{lejepa3d,dense,sigreg}.py`;
+- data: `brain/data/{volumes,crops3d,batch3d,augment}.py`.
+
+The current recipe is `configs/lejepa3d/v4_scratch.yaml` (BQ-v4, the encoder R7–R14 start from). The same objective is
+the SSL branch of the joint trainer (`configs/joint/r15.yaml`, `brain/train/joint.py`).
 
 ## Input and tokens
-- Volume `(1, 256, 256, 128)` on the shared RAS 1 mm grid, asinh-windowed on the GPU.
-- Patch 16×16×8 mm; the full volume is a 16×16×16 = 4096-token grid. RoPE uses millimetres. No CLS token; pooling is a mean over kept tokens.
-- Air tokens are dropped by a threshold at the patch centre (`views.gate`). Nothing is reconstructed or masked.
+- Volumes live on the shared RAS 1 mm 256 x 256 x 160 grid in native units (CT HU, MRI robust z) and are windowed on
+  the GPU.
+- With `window.mode: roles`, a scan becomes three fixed windows: CT brain / subdural / bone, and MRI tissue / wide /
+  bright tail. `channels: 1` (BQ-v4) keeps one role window per row; 3 makes them the input channels.
+- Patches are 16 x 16 x 8 mm, so the full volume is a 20 x 16 x 16 = 5120-token grid.
+- RoPE works in millimetres.
+- An optional conv stem (`model.conv_stem`) runs two stride-2 convolution stages before the patchify.
+- Air tokens are dropped by the token gate (`views.gate`).
 
 ## Views (`brain/data/crops3d.py`)
-- Crop origins snap to the coarse token grid, so overlapping crops share tokens exactly. Each crop carries `pos` (its coarse-grid indices) and `parent` (token → position).
-- `global` crops are placed freely; later globals are centred inside the first one when `nested`. `local` and `fine` crops lie inside a global crop. `fine` crops use 8×8×4 patches; eight fine tokens average into one coarse position. One extra crop (`win`) is seen under two windows.
-- Appearance augmentation, per crop row on the GPU, is described in the next section.
+- Crop origins snap to the coarse token grid, so overlapping crops share tokens exactly. Each crop carries `pos` (its
+  coarse-grid indices) and `parent` (token → position).
+- `global` crops are placed freely; later globals are centred inside the first one when `nested`.
+- `local` and `fine` crops lie inside a global crop. `fine` crops use 8 x 8 x 4 patches, and eight fine tokens average
+  into one coarse position.
+- `aug.geometric` gives each view its own rotation, scale and left-right mirror. Views are warped from the whole volume
+  on the GPU (`batch3d.sample_views`); token bookkeeping follows each token centre into the scan, so dense agreement
+  and masked prediction compare the same anatomy.
 
 ## Appearance augmentation (`brain/data/augment.py`, config `aug`)
-The aim is that agreeing across views can only be done through anatomy, never through contrast, resolution or "this scan has a skull". In order, per crop row, each drawn independently:
-- `bias`: smooth multiplicative gain on MRI rows (coil shading), applied in native units about the background floor.
-- `through_plane`: Gaussian blur along the volume's acquisition thick axis, in native units, until its effective slice thickness reaches a random target in `fwhm_vox` (mm). Uses `thick_mm` / `thick_axis` recorded by prep, so a 1 mm 3D T1 is made to look like a 5 mm axial stack while a scan already thicker than the target is left alone; without the columns the axis is random (60% z).
-- `window`: the asinh window with random centre/width (`aug.window`).
-- `curve`: a random monotone piecewise-linear contrast curve whose knots sit at quantiles of the crop's own foreground, so each tissue mode can be stretched or squeezed independently; with probability `flip` it is negated about the median (tissue order reversed, as T1 to T2 does). Background stays the darkest value.
-- `blur`, `drift`, `noise`: isotropic blur, slow additive drift and noise in windowed units.
-- `skull` (volume level, in the loader): with probability `p` a whole volume is cut to its stored brain mask before cropping, so skull-on (RSNA, CQ500, OASIS) and skull-stripped (BraTS, MSD) scans share an appearance. It needs a store built with brain masks (`mask_brain` in `volumes.csv`); with none it does nothing, and validation never uses it.
-All are on by default. A config that wants the pre-restructure behaviour sets `aug.curve.p`, `aug.bias.p`, `aug.through_plane.p` and `aug.skull.p` to 0.
+In order, per crop row:
+- `histmatch` (MRI only);
+- `bias` (coil shading);
+- `through_plane` (blur along the acquisition axis, up to a target slice thickness, using the `thick_mm` /
+  `thick_axis` prep recorded);
+- noise (Rician on MRI);
+- `curve`: a monotone contrast curve with knots at the crop's foreground quantiles; with probability `flip` it is
+  negated (tissue order reversed);
+- `blur`;
+- the role windows (jittered by `window.jitter`).
+
+`skull` (with `per_view`) cuts a view to the stored brain mask, so skull-on and skull-stripped scans share an
+appearance.
+
+`aug.tie_views` (R15): every view of a volume draws the same contrast (histogram match, curve, window jitter); noise,
+blur and bias stay per view. The agreement terms then ask for invariance to crop and degradation, not to contrast, so
+sequence-specific information (enhancement, FLAIR hyperintensity) is not trained away. Use it together with
+`loss.win_weight: 0`.
 
 ## Loss (`brain/objectives/`)
 `loss = (1-λ)·inv + λ·sigreg + win_w·win + dense_w·((1-λ)·dense_inv + λ·dense_sig) + predict_w·(pred + pixel_w·pix)`
-- `inv`/`sigreg`: the 2D LeJEPA objective on pooled embeddings of the global crops (locals only with `loss.local_pooled`).
-- `dense_inv`: every coarse position seen by ≥2 views is pulled to the mean over views of its token embeddings (mean not detached). `dense_sig`: SigReg over `tokens_per_view` random tokens per view. Token head is a LayerNorm MLP (`model.dense_dim`).
-- Set `loss.dense.weight: 0` and `local_pooled: true` for the pooled-only baseline (`configs/lejepa3d/tiny_pooled.yaml`).
-- Optional `loss.predict` (needs dense; off by default). Consensus between crops rewards embeddings that ignore context, so this adds a term that needs it: blocks of tokens (`blocks`, `block_tokens`) are hidden in each global crop; the encoder sees only the rest (token dropping, RoPE is in mm); a small predictor (`depth`, learned mask token, shares RoPE) outputs for every hidden token (a) `pred`: its token-head embedding from the *unmasked* crop's own pass (stop-grad target, weight 1), and (b) `pix`: the 2×2×2 cell means of the voxels in every kept patch (`pixel_cells`, weight `pixel_weight`), which keeps local detail from being squeezed out. Weight ramps over `ramp_steps`. The predictor is training-only; downstream loaders drop `predictor.*`.
-- Continue-from: `output.init_from` loads weights only (fresh optimizer/schedule; predictor starts random). `configs/lejepa3d/tiny_predict.yaml` (8k steps from the 30k dense run) vs `configs/lejepa3d/tiny_continue.yaml` (same schedule, predict weight 0) isolates the effect.
+- `inv` / `sigreg`: LeJEPA on the pooled embeddings of the global crops.
+- `win`: one crop seen under two appearances must agree. This is pure contrast invariance; it is off in R15.
+- `dense_inv`: every coarse position seen by two or more views is pulled to the mean of its token embeddings.
+  `dense_sig`: SIGReg over `tokens_per_view` random tokens per view.
+- `pred` / `pix`: blocks of tokens are hidden in each global crop. A small predictor regresses the hidden tokens'
+  embeddings from the unmasked crop's own pass (stop-grad target) and the 2 x 2 x 2 voxel cell means. Its weight ramps
+  over `ramp_steps`. The predictor is training-only.
 
-## Training (`brain/train/lejepa3d.py` on `brain/train/engine.py`)
-One `ViewNet` forward for all views (DDP/SyncBN friendly), length-bucketed rows, per-GPU batch 192 on 2×L40S, no host syncs in the step. Resumes from `<out_dir>/last.pt`; `--no-resume` starts over; `--synthetic` runs on phantoms without a store; `--set a.b=c` overrides any config key. Logs `erank` (pooled) and `tok_erank` (tokens); both collapsing toward 1 is the failure mode to watch.
+## Training
+- One `ViewNet` forward covers all views, with length-bucketed rows and no host syncs in the step.
+- Resumes from `<out_dir>/last.pt`; `--synthetic` runs on phantoms; `--set a.b=c` overrides any key.
+- Watch `erank` (pooled) and `tok_erank` (tokens): both collapsing toward 1 is the failure mode.
 
 ## Evaluation
-`python -m brain.downstream.probe3d --ckpt A --ckpt B --out runs/probes/x.json` (or `sbatch jobs/probe3d.sbatch`): frozen-token lesion probes on held-out sets, scanner/dataset fingerprint probe, token-position probe, with pixel and random-init controls. 2D reference: lesion lift 6.2, participation ratio 58, position R² 0.84. `--reps N` adds 95% bootstrap intervals over test volumes (test-set sampling only, not run-to-run variance) and `--ref NAME` prints paired differences against one encoder. Task suite and segmentation (`brain/downstream/seg3d.py`) for 3D checkpoints: `docs/downstream_3d.md`.
+The frozen benchmark (`docs/benchmark.md`) and `python -m brain.downstream.probe3d` (lesion, fingerprint and position
+token probes with pixel and random-init controls).
 
 ## Tests
-`python -m pytest tests -q` (CPU); the 3D model and objective tests are in `tests/test_lejepa3d.py`, augmentation in `tests/test_augment.py`.
-
-## Geometric augmentation (`aug.geometric`, next-run recipe)
-
-Each view gets its own rotation (`rot_deg`, about the z, y, x axes: yaw, roll, pitch), isotropic scale (`scale`) and
-left-right mirror (`flip_lr`), with probability `p`. The loader ships the whole volume (and the brain mask for
-per-view skull dropout) plus each view's sampling transform; `batch3d.sample_views` warps the views on the GPU
-(trilinear; outside the scan = air). Token bookkeeping is done on the CPU from where each token center lands in the
-scan: `pos` / `tok_pos` are those cells and `fg` the scan's token gate there, so the dense consensus and masked
-prediction still compare the same anatomy across differently posed views. RoPE stays on each view's own regular grid:
-attention sees relative positions only, so a shift of all coordinates would change nothing, and scaling them would
-misstate voxel size (physical size is diagnostic). Validation crops are never warped. Off unless configured, so older
-configs (the prefix ablation) train exactly as before. Tests: `tests/test_geometric.py`.
-
-## Rician noise and histogram matching (next-run recipe)
-
-`aug.noise.kind: rician`: MRI rows get Rician noise in native robust-z units before windowing: `floor + |a + n1 +
-i n2|` with `a = x - floor` and Gaussian `n1, n2` of sigma = 6 / SNR (SNR log-uniform in `snr`). Air becomes Rayleigh
-noise and dark tissue is lifted, as on a real magnitude image. CT keeps Gaussian noise (`sigma`, windowed units).
-
-`aug.histmatch` (MRI only; never CT, whose HU are physical): with probability `p` a row's intensities are remapped
-from its volume's tissue quantiles to those of another volume of the same contrast group in the batch (T1, T1+Gd, T2,
-FLAIR, PD, ...; unlabelled single-sequence cohorts count as T1). Quantiles are whole-volume (`volumes.tissue_quantiles`,
-shipped per volume), not per crop, so scanners are compared rather than whatever anatomy two crops contain; segment
-slopes are capped (`max_slope`, default 3) so sparse intensity ranges do not turn into speckle; `alpha` blends.
-Tests: `tests/test_intensity_aug.py`.
+`tests/test_lejepa3d.py`, `tests/test_augment.py`, `tests/test_geometric.py`.

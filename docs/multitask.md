@@ -9,20 +9,22 @@ nothing reads it), so held-out tasks are evaluated few-shot by fitting that row 
 
 ```
 token_t = task_emb[t] + type_emb[type_t]                one token per trained task (encoder width)
-tokens  = encoder([CLS | task tokens | patches])        v3 LeJEPA ViT-S, 16 x 16 x 8 mm patches
+tokens  = encoder([CLS | task tokens | patches])        v4 LeJEPA ViT-S, 16 x 16 x 8 mm patches
 answer  = head[type_t](proj(token_t))                   binary / regression / multiclass / survival / segmentation
 ```
 
-Segmentation tasks drive a decoder (token grid + earlier-block taps + an image pyramid for detail below 16 mm),
-FiLM-modulated by the task's output, predicting at 2 mm. Warm start: the patch tokens' attention to the (new, random)
-task tokens starts at -10 logits and opens linearly over 2k steps (`task_tokens.write_bias` / `write_ramp_steps`);
-undamped, the tokens shift v3's features by ~40% before any training. `moe.blocks` optionally turns the top blocks'
-MLPs into mixtures of experts (experts copied from the MLP; no clear gain over tokens alone at 12k steps).
+Segmentation tasks drive a decoder (token grid + earlier-block taps + an image pyramid for detail below 16 mm) that
+predicts at 2 mm:
+- **Per-slot decoder** (R7-R14): FiLM-modulated by the task's output.
+- **Shared decoder** (`model.seg.shared`, R15): runs once per scan, with a small per-task MLP head per voxel.
 
-The 2026-10-26 comparison (12k steps, batch 8, test set, 25 tasks with >= 20 test scans): task tokens beat the earlier
-slot readout (task queries cross-attending to the finished encoding through 3 slot layers) on 10 tasks and lost none,
-with 3M fewer parameters; the gains sit on whole-brain scalar targets (CT density, brain volume, calcification,
-tumour type). Slot-readout checkpoints (runs 1-6, A1) still load (`task_tokens.enabled: false`).
+Warm start: the patch tokens' attention to the new, random task tokens starts at -10 logits and opens linearly
+(`task_tokens.write_bias` / `write_ramp_steps`); undamped, the tokens shift a pretrained encoder's features by ~40%
+before any training.
+
+The 2026-10-26 comparison (12k steps): task tokens beat the earlier slot readout (task queries cross-attending to the
+finished encoding) on 10 of 25 tasks and lost none. The slot readout is kept for the ResNet single-task specialists
+(`task_tokens.enabled: false`).
 
 ## Tasks (`configs/multitask/registry.yaml`, `brain/multitask/registry.py`)
 
@@ -78,59 +80,71 @@ artefacts dropped, everything else `-> 1`.
 
 ## Training (`brain/train/multitask.py`)
 
-    sbatch --export=ALL,METHOD=multitask,CONFIG=configs/multitask/tokens.yaml jobs/train_pi4.sbatch
-    sbatch --export=ALL,METHOD=joint,CONFIG=configs/joint/tokens_warm_v3.yaml jobs/train_pi4.sbatch   # with SSL
+    sbatch -p pi_dbertsim -G l40s:4 -c 48 --mem=360G -t 2-00:00:00 -J r14f \
+      --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r14f.yaml jobs/train.sbatch
     python -m brain.train multitask --synthetic --max-steps 4       # CPU smoke run
 
-Each sample asks k of its available tasks (k uniform in 1..min(n, 8), or all of them 20% of the time; group first,
-then task with weight n_task^-0.5; at most 2 segmentation tasks). The encoder starts from `model.init_from` and trains
-at `enc_lr_mult` x the LR (0.25) with layer-wise decay from step 0 (task tokens live in it). Augmentation:
-flips, small rotations / shifts, appearance (bias, through-plane blur, Rician / Gaussian noise, blur, drift) with the
-canonical window pinned, and field-of-view cuts on rows asking no whole-brain target. The loss balancer keeps the
-headline loss near 1, so raw per-group losses are logged (`demo`, `dx`, `ich`, ...) to follow progress. Checkpoints
-keep the encoder under `model`, so the frozen suite loads them like any 3D encoder.
+Sampling:
+- Each sample asks k of its available tasks: k uniform in 1..min(n, 8), or all of them 20% of the time.
+- Tasks are drawn group first, then task with weight n_task^-0.5.
+- `tasks.all_seg` asks every segmentation mask a scan has (with the shared decoder); otherwise at most `max_seg`.
+- `data.subject_beta` 1 counts a subject once, however many sequences or sessions it has.
+
+The encoder:
+- starts from `model.init_from` (or from scratch) and trains at `enc_lr_mult` x the LR with layer-wise decay;
+- holds the task tokens.
+
+Augmentation:
+- flips, small rotations / shifts / shear;
+- appearance in native units;
+- skull-strip matching for tumour tasks;
+- synthetic contrast for anatomy tasks;
+- field-of-view cuts on rows asking no whole-brain target.
+
+The uncertainty balancer keeps the headline loss near 1, so raw per-group losses are logged (`demo`, `dx`, `ich`, ...).
+Checkpoints keep the encoder under `model`, so the frozen suite loads them like any 3D encoder.
 
 | Run | Config | What changed |
 |---|---|---|
-| 1 | `v3_init.yaml` | first run: 33 tasks, encoder 0.25 x LR |
-| 2 | `v3_synthseg.yaml` | SynthSeg anatomy, task groups, registration QC, appearance + FOV augmentation, encoder 0.1 x LR, batch 8 |
-| control | `v3_synthseg_nolabels.yaml` | run 2 restricted to label-free groups (derived, anatomy_seg, anatomy_volume) |
-| 3 | `v4_general.yaml` | general-embedding slot (retired); BHSD / HemSeg / small-FOMO data; WMH, hemorrhage segmentation, clinical-score, glioma, infant / ADHD / Parkinson's tasks |
-| 4 | `v5_enclr.yaml` | encoder 0.5 x LR, layer decay 0.9 |
-| 5 | `v6_nogen_unc.yaml` | no general slot, uncertainty loss balancing |
-| 6 | `v7_nosmall.yaml` | run 5 without the 7 small clinical tasks (now the default exclusion) |
-| A1 | `joint/a1_warm_v3.yaml` | joint SSL + tasks warm from v3, slot readout |
-| arms A / B / C | `omni_*.yaml` | slots vs task tokens vs task tokens + MoE, 12k steps each (B became the default) |
-| next | `multitask/tokens.yaml`, `joint/tokens_warm_v3.yaml` | task tokens at full length; and A1 with task tokens |
+| R7 / R7-SSL | `r7_targets.yaml`, `r7_ssl.yaml` | task tokens on the v4 encoder, 12k steps; R7-SSL adds masked reconstruction and contrast synthesis |
+| R9 | `r9.yaml` | R8 (synthesis on its own budget) + masked reconstruction + aneurysm tasks, 30k steps |
+| R10 | `r10.yaml` | 4 GPUs (batch 32), task-aware augmentation, weight averaging (EMA) |
+| R12 | `r12.yaml` | R10 to 60k on QC-filtered tool labels (v9), HL-Gauss regression, re-warmed WSD |
+| R13 | `r13.yaml` | token maps (mask occupancy, RSNA slice and fastMRI+ box bags), fastMRI+ findings, 25% token gate |
+| R14 | `r14.yaml` | true negatives (empty masks on healthy scans, RSNA bleed pseudo-masks), skull-strip matching, synthetic contrast |
+| R14-F | `r14f.yaml` | R14 + study-level input: a study's co-registered sequences fused inside the encoder (below) |
+| R15 | `configs/joint/r15.yaml` | fresh ViT-B with conv stem, joint SSL + tasks, labels v12 (written, not run) |
 
-All of these configs are in `configs/archive/` (they use options retired on 2026-10-27).
+Earlier runs (1-6, A1, the slot / token / MoE arms) used options retired since. Their configs are in git history, and
+each checkpoint stores its full config.
+
+### Study-level input (`model.fusion`, `tasks.study`)
+
+A scan's co-registered partners are the same subject's scans with the identical stored registration (BraTS / UPENN
+sequences, SynthRAD MR + CT; `data.study_partners`).
+- With probability `p_multi` a scan comes with 1..`max_scans`-1 of them.
+- Each scan runs encoder blocks 0..`after_block`-1 as its own row.
+- `vit3d.SequenceFusion` then fuses the rows per token position: the mean plus a zero-initialised attention residual
+  with a sequence-type embedding.
+- The remaining blocks and every head run on the fused study.
+
+A scan without partners never enters the fusion, so its path is the single-scan model's exactly. Labels and the
+decoder's image pyramid are the anchor scan's. `test_eval --study N` scores the heads with partners.
 
 ## Evaluation
 
-### The run report (`brain/eval/`, `configs/bench/benchmark.yaml`)
+### Scoring a run
 
-One report per run against a reference run: `jobs/submit_report.sh RUN_CKPT REF_CKPT` runs the three evaluations and
-then `python -m brain.eval.report RUN --ref REF`, which writes `runs/eval/<run>/report.md` (three headline numbers,
-then group scores) and `report_tasks.csv` (per task).
-
-| Headline | Question | Source |
-|---|---|---|
-| In-domain | Does it do the trained tasks? | Its heads on the test splits (`test_eval`), paired with the reference |
-| Transfer | Is the encoder a good foundation? | Frozen suite on the benchmark tasks (`benchmark.yaml`: 22 tasks in 5 groups) |
-| Adaptation | Can it learn a new task from few labels? | Few-shot on the held-out tasks at k = 64 |
+- In-domain: `python -m brain.multitask.test_eval --ckpts REF RUN` scores the trained heads on the test splits, paired
+  by scan with the reference (`fp` rows: false-positive rate of lesion heads on lesion-free scans).
+- Transfer: the frozen benchmark, `python -m brain.bench run --model NAME` (`docs/benchmark.md`).
+- Adaptation: few-shot on the held-out tasks (`brain/multitask/fewshot.py`).
 
 Every metric is on one skill scale (`brain/eval/skill.py`): 0 = chance, 1 = perfect (AUROC `(auc - 0.5) / 0.5`,
-balanced accuracy rescaled from chance, R2 clipped at 0, Dice as is). A headline is the mean over groups of the mean
-over tasks, on tasks both models have, so a group with many tasks counts once; its interval combines the per-task
-intervals assuming independence (approximate). The core transfer set keeps tasks that can tell runs apart (rule in
-`benchmark.yaml`); the rest of the suite still runs on request and lands in the per-task CSV. In-domain skips tasks
-with fewer than 20 test scans (the SynthSeg tasks have ~4). Comparisons with published models: `docs/benchmark.md`.
+balanced accuracy rescaled from chance, R2 clipped at 0, Dice as is).
 
-Validation during training uses the same skill scale: `run_eval` logs `val_score` (and `val_group_<g>`), and
-`train.best_metric: score` (the multitask and joint default) keeps the checkpoint with the highest score rather than
-the lowest loss, which is not comparable across steps under the curriculum or uncertainty weighting. Validation and
-test both ask each task on its own (`alone`, as at deployment; the scan is encoded once): before 2026-10-25 validation
-asked all of a scan's tasks in one query, so slots attended to each other and validation and test numbers differed.
+During training, `run_eval` logs `val_score` (and `val_group_<g>`) on that scale, and `train.best_metric: score` keeps
+the checkpoint with the highest score. Validation and test ask each task on its own, as at deployment.
 
 ### Individual evaluations
 
@@ -170,7 +184,9 @@ third ventricle or lateral ventricles found). Not yet a training target.
 
 ## Config switches
 
-`model.task_tokens.enabled` (false: the slot readout), `model.moe.blocks`, `loss.balance: uniform | ema | uncertainty`,
-`tasks.group_weights`, `tasks.groups` / `tasks.ids` (train only some groups or tasks), `tasks.exclude`. Retired on
-2026-10-27 after their ablations: the text task embedding, the slot bottleneck width, the shared (slot-free) readout
-and the general-embedding slot.
+- `model.task_tokens.enabled` (false: the slot readout, used by the ResNet specialists).
+- `model.seg.shared` / `head_hidden` (shared segmentation decoder with per-task MLP heads).
+- `model.fusion`, `tasks.study` (study-level input).
+- `tasks.group_weights`, `tasks.groups` / `tasks.ids` (train only some groups or tasks), `tasks.exclude`.
+- `loss.negative_tasks` (lesion tasks with true negatives).
+- `data.exclude_datasets` / `exclude_volumes` (benchmark cohorts and duplicates out of training).
