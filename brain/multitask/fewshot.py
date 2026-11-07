@@ -11,7 +11,7 @@ Transfer: trained tasks with ``use: eval`` cohorts (e.g. age on OASIS / IXI / MS
 directly, with no fitting, on those cohorts' test rows.
 
 Results go to ``<ckpt dir>/fewshot_<ckpt stem>.json`` and a printed table; ``preds`` there holds every seed's test
-predictions by volume id, so ``brain.eval.report`` can pair two models seed by seed and bootstrap over test subjects.
+predictions by volume id, so ``brain.bench card`` can pair two models seed by seed and bootstrap over test subjects.
 The k scans are a stratified draw (by class, or by value quantile for regression) seeded identically for every model:
 the same seed gives the same scans whenever the label table is the same.
 """
