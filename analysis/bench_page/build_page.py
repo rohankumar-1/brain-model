@@ -8,7 +8,8 @@ HERE, REPO = Path(__file__).parent, "/home/roku/brain-model"
 S = json.load(open(sys.argv[1]))
 # benchmark v3 (2026-11-06): the models re-scored on it (BQ-SSL v3, R6, R7, R7-SSL have v2 results only)
 COLS = [("BQ-random", "Random"), ("PUB", "Best published"), ("BQ-R10", "R10"), ("BQ-R10-EMA", "R10 avg"),
-        ("BQ-R12", "R12"), ("BQ-R13", "R13"), ("BQ-R13-EMA", "R13 avg"), ("BQ-R14", "R14"), ("BQ-R14-EMA", "R14 avg")]
+        ("BQ-R12", "R12"), ("BQ-R13", "R13"), ("BQ-R13-EMA", "R13 avg"), ("BQ-R14", "R14"), ("BQ-R14-EMA", "R14 avg"),
+        ("BQ-R14F", "R14-F")]
 SPLITCOL = "BQ-R10"
 PUB = {"ct_fm": "CT-FM", "ct_fm_triage": "CT-FM head", "brainiac": "BrainIAC"}
 PAPER = {"adni_cn_ad": (0.850, 0.754, 0.947), "adni_cn_mci": (0.701, 0.608, 0.794), "ppmi_pd": (0.610, 0.571, 0.648)}
@@ -31,6 +32,11 @@ tes = pd.read_csv(_tes) if _tes.exists() else te10.iloc[:0]
 _te14 = Path(f"{REPO}/runs/diagnostics/test_eval_r14/test_eval_heads.csv")
 te14 = pd.read_csv(_te14) if _te14.exists() else te10.iloc[:0]
 P14 = {"r13/last": "BQ-R13", "r13/last_ema": "BQ-R13-EMA", "r14/last": "BQ-R14", "r14/last_ema": "BQ-R14-EMA"}
+# R14-F (study-level input) on the same split: single scans, and each scan with its co-registered sequences (--study 3)
+_te14f, _te14fs = (Path(f"{REPO}/runs/diagnostics/{d}/test_eval_heads.csv") for d in ("test_eval_r14f", "test_eval_r14f_study"))
+te14f = pd.read_csv(_te14f) if _te14f.exists() else te10.iloc[:0]
+te14fs = pd.read_csv(_te14fs) if _te14fs.exists() else te10.iloc[:0]
+P14F, P14FS = {"r14f/last": "BQ-R14F"}, {"r14f/last": "BQ-R14F-seq"}
 TE = {}
 for df, pairs in ((te7, {"r7_targets/last": "BQ-R7", "r7_ssl/last": "BQ-R7-SSL"}), (te9, {"r9/last": "BQ-R9"}),
                   (te10, {"r10/last": "BQ-R10", "r10/last_ema": "BQ-R10-EMA"}),
@@ -38,15 +44,17 @@ for df, pairs in ((te7, {"r7_targets/last": "BQ-R7", "r7_ssl/last": "BQ-R7-SSL"}
                   (te13o, {"r13/last": "BQ-R13", "r13/last_ema": "BQ-R13-EMA"}),
                   (te13, {"r10/last": "BQ-R10", "r12/last": "BQ-R12", "r13/last": "BQ-R13", "r13/last_ema": "BQ-R13-EMA"}),
                   (tes, {"r10/last": "BQ-R10", "r12/last": "BQ-R12", "r13/last": "BQ-R13", "r13/last_ema": "BQ-R13-EMA"}),
-                  (te14, P14)):
+                  (te14, P14), (te14f, P14F), (te14fs, P14FS)):
     for r in df[df.metric != "fp"].itertuples():           # fp: false-positive rows (labels v11), not scores
         if r.model in pairs:
             TE.setdefault(r.task, {})[pairs[r.model]] = {"v": r.score, "lo": r.ci_lo, "hi": r.ci_hi, "n": int(r.n), "own": True}
 # share of lesion-free test scans where a lesion head predicted anything (labels v11 negatives; lower is better)
 TEFP = {}
-for r in te14[te14.metric == "fp"].itertuples():
-    if r.model in P14:
-        TEFP.setdefault(r.task, {})[P14[r.model]] = {"v": r.score, "lo": r.ci_lo, "hi": r.ci_hi, "n": int(r.n), "own": True}
+for df, pairs in ((te14, P14), (te14f, P14F), (te14fs, P14FS)):
+    for r in df[df.metric == "fp"].itertuples():
+        if r.model in pairs:
+            TEFP.setdefault(r.task, {})[pairs[r.model]] = {"v": r.score, "lo": r.ci_lo, "hi": r.ci_hi, "n": int(r.n),
+                                                           "own": True}
 FP_TASKS = ("whole_tumor", "tumor_core", "enhancing_tumor", "resection_cavity", "hemorrhage_segmentation")
 RSNA_HEAD = {"rsna_ich:any": "hemorrhage_any", "rsna_ich:intraparenchymal": "hemorrhage_intraparenchymal",
              "rsna_ich:intraventricular": "hemorrhage_intraventricular", "rsna_ich:subdural": "hemorrhage_subdural",
@@ -84,7 +92,7 @@ G = [
 # mean skill over the tasks every BQ model in COLS has (the 16 common transfer tasks); a model missing one gets none
 sys.path.insert(0, REPO)
 from brain.eval.skill import skill  # noqa: E402
-_BQ = ["BQ-R10", "BQ-R10-EMA", "BQ-R12", "BQ-R13", "BQ-R13-EMA", "BQ-R14", "BQ-R14-EMA"]
+_BQ = ["BQ-R10", "BQ-R10-EMA", "BQ-R12", "BQ-R13", "BQ-R13-EMA", "BQ-R14", "BQ-R14-EMA", "BQ-R14F"]
 COMMON = [k for k in S if ":" not in k and all(m in S[k] and not S[k][m]["seen"] for m in _BQ)]
 SKILL = {m: sum(skill(S[k][m]["metric"], S[k][m]["v"]) for k in COMMON) / len(COMMON)
          for m in _BQ + ["BQ-random"] if all(m in S[k] for k in COMMON)}
@@ -172,7 +180,8 @@ IND = [("Tumour (BraTS, UPENN)", [("whole_tumor", "Whole tumour", "Dice"), ("tum
         ("mri_enlarged_ventricles", "Enlarged ventricles", "AUC"), ("mri_infarct", "Lacune / encephalomalacia", "AUC"),
         ("mri_artifact", "Artifact", "AUC")])]
 ICOLS = [("BQ-R7", "R7"), ("BQ-R7-SSL", "R7-SSL"), ("BQ-R10", "R10"), ("BQ-R12", "R12"), ("BQ-R13", "R13"),
-         ("BQ-R13-EMA", "R13 avg"), ("BQ-R14", "R14"), ("BQ-R14-EMA", "R14 avg")]
+         ("BQ-R13-EMA", "R13 avg"), ("BQ-R14", "R14"), ("BQ-R14-EMA", "R14 avg"), ("BQ-R14F", "R14-F"),
+         ("BQ-R14F-seq", "R14-F, all sequences")]
 d9 = te9[te9.model == "r9/last"].set_index("task")
 d10 = te10[te10.model == "r10/last"].set_index("task")
 irows = []
@@ -320,6 +329,7 @@ page = f'''<title>Brain Model Task Scores</title>
     <li>Best published: CT-FM, CT-FM head (Pai et al., 2025), BrainIAC (Tak et al., 2026), run here on the same scans; for ADNI / PPMI also BrainDINO’s published number (different cohort: longitudinal ADNI1).</li>
     <li>BQ-SSL v3: self-supervised encoder only. R7: multitask on the v4 encoder, 12k steps. R7-SSL: + masked reconstruction and contrast synthesis. R10: R7 at 30k steps on 4 GPUs (batch 32), with synthesis, 10% masked reconstruction, task-aware augmentation and aneurysm location + vessel tasks; R10 avg: its weight average (decay 0.999). R12: R10 continued to 60k steps on QC-filtered tool labels (v9) with HL-Gauss regression; R12 avg: its weight average. R13: R12 at 50k continued to 75k with token-map targets (mask occupancy, RSNA slice labels, fastMRI+ boxes), fastMRI+ radiology findings and a 25% token gate, without aneurysm tasks or RSNA-ICA scans; R13 avg: its weight average. Trained-task table: R10, R12 and R13 on the same test split, R7 on its own run's.</li>
     <li>R14: R13 continued to 100k steps with true negatives (empty tumour masks on healthy-volunteer MRI, empty bleed masks on bleed-free RSNA CT, 3,006 two-tool RSNA bleed pseudo-masks), skull-strip matching, synthetic contrast and the audit fixes; R14 avg: its weight average. Lesion Dice is over scans with a lesion; the row below it is the share of lesion-free test scans where the head predicted any lesion (lower is better; R13 and R14 on labels v11).</li>
+    <li>R14-F: R14 continued 15k steps with study-level input: a study’s co-registered sequences (BraTS / UPENN mpMRI, SynthRAD MR + CT) pass the first 8 encoder blocks separately and are fused per token position before the last 4; a scan without partners takes the unfused path. Frozen benchmark: single scans. “All sequences”: its heads given each test scan’s co-registered sequences (scans without any stay single).</li>
     <li>Single training seed per model: differences of ~0.02 in mean skill are within run-to-run noise.</li>
   </ol>
 </div>

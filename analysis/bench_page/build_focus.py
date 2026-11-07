@@ -11,7 +11,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 from build_page import COMMON, FP_TASKS, G, HERE, IND, REPO, RSNA_HEAD, S, SKILL, TE, TEFP, cell, marks  # noqa: E402
 
-NEWEST = [("BQ-R14", "R14"), ("BQ-R14-EMA", "R14 avg")]          # the newest run; two columns while it has two
+NEWEST = [("BQ-R14F", "R14-F"), ("BQ-R14F-seq", "R14-F, all sequences")]   # frozen: single scans; heads: + sequences          # the newest run; two columns while it has two
 EARLIER = max((m for m in SKILL if m not in dict(NEWEST) and m != "BQ-random"), key=SKILL.get)
 # from-scratch single-task runs (configs/single/*_scratch_*), scored by brain.multitask.test_eval on the test split
 FAMILIES = {fam: {f"{fam}_scratch_vit": "ViT", f"{fam}_scratch_resnet": "ResNet", f"{fam}_scratch_hybrid": "CS-ViT"}
@@ -146,6 +146,7 @@ page = f'''<title>BrainQuery Headline Scores</title>
       pseudo-masks; skull-strip matching, synthetic contrast and the audit fixes. R14 avg: its weight average (decay
       0.999). Lesion Dice is over scans with a lesion; the row below it is the share of lesion-free test scans where
       the head predicted any lesion (lower is better, so green marks the lowest).</li>
+    <li>R14-F: R14 continued 15k steps with study-level input: a study’s co-registered sequences (BraTS / UPENN mpMRI, SynthRAD MR + CT) pass the first 8 encoder blocks separately and are fused per token position before the last 4; a scan without partners takes the unfused path. Frozen benchmark: single scans. “All sequences”: its heads given each test scan’s co-registered sequences (scans without any stay single).</li>
     <li>Single training seed per model: differences of ~0.02 in mean skill are within run-to-run noise.</li>
   </ol>
 </div>
