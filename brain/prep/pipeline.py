@@ -17,12 +17,11 @@ from brain.prep import brainmask, centering, dicom, geometry, intensity, native,
 from brain.prep.sources import Case
 
 SIZE = geometry.GRID_XYZ  # (x, y, z)
-# raw structural scans; OASIS-1 is distributed gain-field corrected; DWI / ADC (and perfusion maps) are not bias-field
-# images. Before 2026-10-25 BraTS, MSD, BrainMetShare, VALDO and MS3SEG were not corrected either (BraTS is
-# "preprocessed", but not bias-corrected), so only some tumour cohorts were: they are now (``brain.prep.n4_store``
-# corrects the volumes already stored).
-LEGACY_N4_DATASETS = {"oasis2", "abide1", "ixi_t1", "ixi_t2", "atlas", "isles22_flair",
-                      "pixar", "piop1", "piop2", "id1000", "wmh_flair", "wmh_t1"}
+# N4 bias correction: raw structural MRI, named exactly or by prefix. OASIS-1 is distributed gain-field corrected; DWI /
+# ADC (and perfusion maps) are not bias-field images. BraTS is "preprocessed" but not bias-corrected. (Until 2026-10-25
+# BraTS, MSD, BrainMetShare, VALDO and MS3SEG were stored uncorrected and were N4-corrected in the store afterwards.)
+N4_DATASETS = {"oasis2", "abide1", "ixi_t1", "ixi_t2", "atlas", "isles22_flair",
+               "pixar", "piop1", "piop2", "id1000", "wmh_flair", "wmh_t1"}
 N4_PREFIXES = ("fomo_", "brats", "msd_braintumor", "brainmetshare", "valdo", "ms3seg", "ucsf_pdgm",
                "upenn_gbm", "rsna_ica_mra", "rsna_ica_t2w", "rsna_ica_t1c")
 NO_N4_SUFFIXES = ("_dwi", "_adc")
@@ -72,7 +71,7 @@ def needs_n4(dataset: str) -> bool:
     ds = str(dataset)
     if ds.endswith(NO_N4_SUFFIXES):
         return False
-    return ds in LEGACY_N4_DATASETS or ds.startswith(N4_PREFIXES)
+    return ds in N4_DATASETS or ds.startswith(N4_PREFIXES)
 TMP = os.environ.get("SLURM_TMPDIR") or "/tmp"
 
 
@@ -89,7 +88,7 @@ class Options:
 
 
 def add_cli_options(ap) -> None:
-    """Flags shared by ``brain.prep.run`` and ``brain.prep.pilot``. Defaults are the current recipe."""
+    """Prep flags of ``brain.prep.run``. Defaults are the current recipe."""
     ap.add_argument("--registration", choices=list(registration.MODES), default="affine",
                     help="register each scan to the template (affine), keep its size (rigid), or only center it (none)")
     ap.add_argument("--template", default=None, help="skull-on T1 template, e.g. MNI152_T1_1mm.nii.gz (or $BRAIN_TEMPLATE)")

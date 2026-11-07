@@ -1,4 +1,4 @@
-"""2026-10-25 preprocessing fixes: N4 rules and the store-level pass, infant templates, prep-time dedup, RSNA
+"""2026-10-25 preprocessing fixes: N4 rules, infant templates, prep-time dedup, RSNA
 re-keying. python tests/run.py tests/test_prep_fixes.py"""
 
 from __future__ import annotations
@@ -8,8 +8,6 @@ import pandas as pd
 import SimpleITK as sitk
 
 from brain.prep import registration
-from brain.prep.intensity import MRI_FLOOR
-from brain.prep.n4_store import correct
 from brain.prep.pipeline import needs_n4
 
 
@@ -19,23 +17,6 @@ def test_n4_rule_covers_structural_mri_but_not_diffusion_or_ct():
         assert needs_n4(ds), ds
     for ds in ("isles22_dwi", "isles22_adc", "oasis1", "rsna_ich", "cq500", "rsna_ica_cta"):
         assert not needs_n4(ds), ds
-
-
-def test_store_n4_removes_a_multiplicative_field_and_restandardises():
-    rng = np.random.default_rng(0)
-    zz, yy, xx = np.meshgrid(*[np.linspace(-1, 1, s) for s in (80, 96, 96)], indexing="ij")   # N4 needs room after 4x shrink
-    head = zz ** 2 + yy ** 2 + xx ** 2 < 0.8
-    brain = zz ** 2 + yy ** 2 + xx ** 2 < 0.5
-    v = np.where(head, 300.0, 0.0) * np.exp(0.3 * xx) + rng.normal(0, 3, head.shape)   # raw with a smooth gain
-    med, mad = float(np.median(v[brain])), float(1.4826 * np.median(np.abs(v[brain] - np.median(v[brain]))))
-    z = np.where(head, (v - med) / mad, MRI_FLOOR).astype(np.float16)
-    out, st = correct(z, brain, med, mad)
-    x = out[brain].astype(np.float32)
-    assert abs(np.median(x)) < 1e-2 and abs(1.4826 * np.median(np.abs(x - np.median(x))) - 1) < 1e-2
-    left, right = out[brain & (xx < -0.3)].astype(np.float32), out[brain & (xx > 0.3)].astype(np.float32)
-    zl, zr = z[brain & (xx < -0.3)].astype(np.float32), z[brain & (xx > 0.3)].astype(np.float32)
-    assert abs(np.median(right) - np.median(left)) < 0.3 * abs(np.median(zr) - np.median(zl))   # the gain is gone
-    assert (out[~head] == MRI_FLOOR).all() and st["n4"] == "store"
 
 
 def test_nihpd_bins_and_affine_composition():

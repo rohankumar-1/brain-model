@@ -32,13 +32,8 @@ def paths(root: Path, case) -> tuple[Path, dict[str, Path]]:
             {name: path_for(root, case.folder, case.mask_id, name) for name, _ in case.masks})
 
 
-def brain_path(root: Path, case) -> Path:
-    """Format-5 brain mask zip (``<case_id>.brain.zip``); format 6 keeps the mask inside the image zip."""
-    return path_for(root, case.folder, case.case_id, "brain")
-
-
 def write_case(root: Path, case, res) -> None:
-    """One image zip (``image`` + ``brain``) and the dataset label-mask zips. A stale format-5 brain zip is removed."""
+    """One image zip (``image`` + ``brain``) and the dataset label-mask zips."""
     image, masks = paths(root, case)
     arrays = {"image": (res.vol[:, None], {**res.info, "kind": "ct_hu" if case.modality == "ct" else "mri_z"})}
     if res.brain is not None:
@@ -47,7 +42,6 @@ def write_case(root: Path, case, res) -> None:
     for name, m in res.masks.items():
         if name != "brain":                            # a shipped brain mask is the ``brain`` array above
             write(masks[name], "mask", m)
-    brain_path(root, case).unlink(missing_ok=True)
 
 
 BRAIN_ATTRS = ("brain_method", "brain_frac", "brain_ok", "brain_dice_tpl", "brain_rev", "stripped_input")
@@ -55,7 +49,7 @@ BRAIN_ATTRS = ("brain_method", "brain_frac", "brain_ok", "brain_dice_tpl", "brai
 
 def remove_case(root: Path, case) -> None:
     image, masks = paths(root, case)
-    for p in (image, *masks.values(), brain_path(root, case)):
+    for p in (image, *masks.values()):
         p.unlink(missing_ok=True)
 
 
