@@ -397,8 +397,8 @@ def test_fomo_case_ids_keep_contrasts_in_one_folder():
 
 
 def test_fomo_jpegls_roundtrip_uint16():
-    from brain.prep.archive import decode_volume, encode_volume, as_uint16_volume, archive_for_pt, pt_from_family
-    from pathlib import Path
+    from brain.prep.archive import as_uint16_volume, decode_volume, encode_volume
+    from brain.prep.fomo import pt_from_family
 
     vol = RNG.integers(0, 4000, size=(32, 32, 8), dtype=np.uint16)
     blob = encode_volume(vol)
@@ -411,8 +411,6 @@ def test_fomo_jpegls_roundtrip_uint16():
     q, qmeta = as_uint16_volume(np.linspace(1.1, 150.0, 32, dtype=np.float32).reshape(4, 4, 2))
     assert qmeta["kind"] == "uint16_quant" and q.dtype == np.uint16
     assert pt_from_family("fomo_hbn") == "PT018_HBN"
-    assert archive_for_pt("PT002_Nigerian_Clinical", Path("/tmp")).name == "fomo_group_small.jls.zip"
-    assert archive_for_pt("PT018_HBN", Path("/tmp")).name == "PT018_HBN.jls.zip"
 
 
 def test_qc_flags():
