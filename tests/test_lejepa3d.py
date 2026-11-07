@@ -1,14 +1,17 @@
-"""Unit tests for the 3D LeJEPA encoder. Run: python -m tests.test_brainmodel"""
+"""Unit tests for 3D LeJEPA: crops, windows, the encoder's bucketed runs, the dense and predictive terms, SIGReg."""
 
 from __future__ import annotations
 
 import torch
 
+from brain.common.optim import param_groups
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.data.volumes import make_synthetic_volume
-from brain.objectives.sigreg import SIGReg
 from brain.models.rope3d import RoPE3D
 from brain.models.vit3d import BrainEncoder
+from brain.objectives.dense import consensus
+from brain.objectives.sigreg import SIGReg, gather_batch, scale_grad
+from brain.train.defaults import default_config, smoke_config
 
 
 def test_crop_bbox_token_centers_roundtrip_anisotropic():
@@ -469,3 +472,28 @@ def test_cls_model_trains_end_to_end_on_the_synthetic_recipe():
     vol = torch.randn(32, 32, 16) + 1.0
     seqs, _, _ = enc.embed_windows(vol, [(0.0, 1.0), (0.5, 2.0)], modality="mri")
     assert enc.last_cls is not None and enc.last_cls.shape == (2, enc.dim) and seqs.shape[0] == 2
+
+
+def test_scale_grad_keeps_the_value_and_scales_the_gradient():
+    z = torch.randn(3, requires_grad=True)
+    y = scale_grad(z, 4.0)
+    assert torch.equal(y, z)
+    y.sum().backward()
+    assert torch.allclose(z.grad, torch.full((3,), 4.0))
+    z2 = torch.randn(2, 3, 4, requires_grad=True)          # single process: the gathered batch is the local one
+    gather_batch(z2, True).sum().backward()
+    assert torch.allclose(z2.grad, torch.ones_like(z2))
+
+
+def test_dense_consensus_counts_views_not_tokens():
+    d = 4
+    one = torch.randn(1, 2, d)                               # view A puts both its tokens on position 0
+    a_pos, a_ok = torch.tensor([[0, 0]]), torch.ones(1, 2, dtype=torch.bool)
+    b_emb, b_pos, b_ok = torch.randn(1, 1, d), torch.tensor([[1]]), torch.ones(1, 1, dtype=torch.bool)
+    loss, cov = consensus([one, b_emb], [a_ok, b_ok], [a_pos, b_pos], n_pos=2)
+    assert float(cov) == 0.0 and float(loss) == 0.0          # no position has two views
+    b_pos2 = torch.tensor([[0]])                             # now view B covers position 0 too: mean over views
+    loss2, _ = consensus([one, b_emb], [a_ok, b_ok], [a_pos, b_pos2], n_pos=2)
+    mean = (one[0].mean(0) + b_emb[0, 0]) / 2
+    want = ((one[0] - mean).square().sum() + (b_emb[0, 0] - mean).square().sum()) / (3 * d)
+    assert torch.allclose(loss2, want)

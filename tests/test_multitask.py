@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 import torch
 
-from brain.multitask.data import MultitaskDataset, SyntheticMultitask, collate, prepare
+from brain.common.optim import param_groups
+from brain.multitask.data import MultitaskDataset, SyntheticMultitask, collate, prepare, protected_tasks
 from brain.multitask.labels import live_targets
 from brain.multitask.losses import Balancer, seg_loss, slot_losses
 from brain.multitask.model import BrainQuery
@@ -430,3 +431,73 @@ def test_synthrad_ct_mirrors_its_mr_rows():
     out = _mirror_synthrad_ct(f, v)
     ct = out[out.volume_id == "ct1"]
     assert len(out) == 4 and len(ct) == 1 and ct.value.iloc[0] == 1.0 and ct.ref.iloc[0] == "a"   # mr2 has no CT
+
+
+def test_live_target_rows_get_no_rotation_bias_or_drift():
+    fov, live = protected_tasks(REG)
+    live_ids = {REG.tasks[i].id for i in torch.nonzero(live).flatten().tolist()}
+    assert {"brain_asymmetry", "intensity_asymmetry", "ct_brain_density"} <= live_ids and bool((fov | ~live).all())
+    raw = collate([SyntheticMultitask(REG, (16, 32, 32), n=4)[i] for i in range(4)])
+    li = REG.index["brain_asymmetry"]
+    raw["task"][0] = -1
+    raw["task"][0, 0] = li                                   # row 0 asks a live target; the others do not
+    raw["task"][1:] = torch.where(live[raw["task"][1:].clamp_min(0)], torch.full_like(raw["task"][1:], -1), raw["task"][1:])
+    cfg = smoke_config(default_config("multitask"))
+    cfg["aug"] = {"flip_lr": 0.0, "affine": {"p": 1.0, "rot_deg": [10, 10, 10], "shift_mm": 4.0},
+                  "appearance": {"bias": {"p": 1.0, "amp": 0.3}, "drift": {"p": 1.0, "amp": 0.3}}}
+    plain = prepare(raw, cfg, CPU, (8, 8, 4), train=False)
+    aug = prepare(raw, cfg, CPU, (8, 8, 4), train=True, aug_unsafe=live)
+    assert torch.allclose(aug["x"][0], plain["x"][0], atol=1e-5)            # protected row untouched
+    assert not torch.allclose(aug["x"][1:], plain["x"][1:])
+
+
+def test_final_norm_gets_the_deepest_lr_and_task_tables_no_decay():
+    from brain.multitask.model import BrainQuery
+    from brain.train.multitask import build_encoder
+
+    cfg = smoke_config(default_config("multitask"))
+    model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"])
+    groups = param_groups(model, 0.05, layer_decay=0.8)
+    where = {id(p): g for g in groups for p in g["params"]}
+    named = dict(model.named_parameters())
+    assert where[id(named["backbone.norm.weight"])]["lr_scale"] == 1.0
+    assert where[id(named["backbone.patch_embed.proj.weight"])]["lr_scale"] < 1.0
+    assert where[id(named["task_emb.weight"])]["weight_decay"] == 0.0
+
+
+def test_metadata_ids_harmonise_contrast_names():
+    from brain.data.volumes import META, meta_id
+
+    assert META[meta_id("t1w", "mri")] == META[meta_id("t1n", 1)] == META[meta_id(None, "mri", "oasis1")] == "t1"
+    assert META[meta_id("t2f", "mri")] == "flair" and META[meta_id(float("nan"), "mri", "brainmetshare_bravo")] == "t1c"
+    assert META[meta_id(None, "ct", "rsna_ich")] == "ct" and META[meta_id("cta", "ct")] == "cta"
+    assert meta_id("weird", "mri") == 0                       # unknown label -> unknown
+
+
+def test_skull_strip_never_touches_scans_asked_a_skull_task(tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from brain.data.volumes import META
+    from brain.multitask.data import MultitaskDataset
+
+    shape = (8, 12, 12)
+    brain = np.zeros(shape, bool)
+    brain[2:6, 3:9, 3:9] = True
+    img = np.where(brain, 1.0, 5.0).astype(np.float32)      # "skull" brighter than brain
+    img[0] = -6.0                                             # background floor
+    monkeypatch.setattr("brain.prep.store.read_many", lambda path, keys: {"image": img, "brain": brain.astype(np.uint8)})
+    rows = [("v_age", "age", 40.0, ""), ("v_mask", "brain_mask", np.nan, "@brain")]
+    labels = pd.DataFrame([(v, t, y, r) for v, t, y, r in rows], columns=["volume_id", "task", "value", "ref"]) \
+        .assign(split="train", use="train")
+    vols = pd.DataFrame({"volume_id": ["v_age", "v_mask"], "image_path": "a.zip", "modality": "mri",
+                         "dataset_family": ["f0", "f1"], "dataset": "d", "contrast": "t1w", "brain_ok": True,
+                         "brain_method": "synthstrip", "stripped_input": False})
+    ds = MultitaskDataset(tmp_path, labels, vols, REG, {"age": {"mean": 0.0, "std": 1.0}}, split="train",
+                          k_max=1, p_all=0.0, max_seg=1, skull_strip=1.0)
+    i_age = [v for v, _ in ds.items].index("v_age")
+    a = ds[i_age]["image"].numpy()
+    assert (a[~brain] == -6.0).all() and (a[brain] == 1.0).all()          # stripped to the background floor
+    b = ds[1 - i_age]["image"].numpy()
+    assert (b[~brain & (img == 5.0)] == 5.0).all()                        # brain_mask asked: skull kept
+    assert ds[i_age]["meta"] == META.index("t1")

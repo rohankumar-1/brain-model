@@ -1,4 +1,4 @@
-"""Joint SSL + multitask training: curriculum, loss normalisation, encoder options. python tests/run.py tests/test_joint.py"""
+"""Joint SSL + multitask training: curriculum, loss normalisation, encoder options."""
 
 from __future__ import annotations
 
