@@ -162,15 +162,16 @@ def _model_info(path: str, size: int, mtime: float) -> dict:
     return jsonable(info)
 
 
-def model_info(ckpt: Path | str | None, name: str | None = None, variant: str | None = None) -> dict:
-    """``model_id`` = ``<run>/<file>@<fingerprint[:10]>[+variant]``; controls without a checkpoint use ``name``."""
+def model_info(ckpt: Path | str | None, name: str | None = None) -> dict:
+    """``model_id`` = ``<run>/<file>@<fingerprint[:10]>``; controls without a checkpoint use ``name``. (Records from
+    before 2026-11-07 may carry ``+<variant>``, an encoding variant of probe3d: ``brain.eval.report.suite_heads`` drops
+    them.)"""
     if ckpt is None:
-        return {"model_id": name or "unknown", "ckpt": None, "control": True, "variant": variant}
+        return {"model_id": name or "unknown", "ckpt": None, "control": True, "variant": None}
     p = Path(ckpt).resolve()
     st = p.stat()
     info = dict(_model_info(str(p), st.st_size, st.st_mtime))
-    mid = f"{info['run_name']}/{p.stem}@{info['fingerprint'][:10]}"
-    info.update(model_id=mid + (f"+{variant}" if variant else ""), control=False, variant=variant)
+    info.update(model_id=f"{info['run_name']}/{p.stem}@{info['fingerprint'][:10]}", control=False, variant=None)
     return info
 
 
