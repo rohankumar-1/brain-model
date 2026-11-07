@@ -8,7 +8,7 @@
 #   * benchmark cohorts out of training AND the SSL pool: ABIDE, IXI, OASIS-1/2, Pixar (frozen-transfer tasks) and
 #     NKI-Rockland / HBN (BrainFMBench; FOMO carries them as fomo_nki_* / fomo_hbn_*, so no RBC matching is needed);
 #     pixel-verified training copies of benchmark scans and train-split twins of val / test scans out too
-#     (runs/diagnostics/build_train_exclude.py -> configs/multitask/train_exclude_r15.csv, 421 volumes);
+#     (python -m brain.prep.decontam train-exclude -> configs/multitask/train_exclude_r15.csv);
 #   * shared segmentation decoder v2 (pilot 2026-11-05: anatomy Dice 0.773 vs 0.688 at 6k steps; tumour still to fix);
 #   * enhancing tumour / tumour core trained on T1c scans only (labels v12, pending); TotalSegmentator CT anatomy skipped.
 # SSL as prediction (user 2026-11-06): views share their volume's contrast (aug.tie_views), no window-pair term, less

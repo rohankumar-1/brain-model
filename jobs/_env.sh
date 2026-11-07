@@ -13,7 +13,7 @@ mkdir -p logs
 # Standalone SynthStrip (weights + wrapper under scratch; not a full FreeSurfer install).
 export FREESURFER_HOME="${FREESURFER_HOME:-/home/roku/orcd/scratch/brain-model/tools/synthstrip}"
 export BRAIN_SYNTHSTRIP="${BRAIN_SYNTHSTRIP:-$FREESURFER_HOME/bin/mri_synthstrip}"
-# Registration template and its brain mask (also the brain-mask QC prior used by remask).
+# Registration template and its brain mask (also the prior of the brain-mask QC in prep).
 export BRAIN_TEMPLATE="${BRAIN_TEMPLATE:-/home/roku/orcd/scratch/brain-model/templates/MNI152_T1_1mm.nii.gz}"
 export BRAIN_TEMPLATE_BRAIN="${BRAIN_TEMPLATE_BRAIN:-/home/roku/orcd/scratch/brain-model/templates/MNI152_T1_1mm_brain_mask.nii.gz}"
 export PATH="$FREESURFER_HOME/bin:$PATH"
