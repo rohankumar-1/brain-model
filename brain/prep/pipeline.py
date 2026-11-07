@@ -121,9 +121,9 @@ class Result:
 
 def _read(case: Case) -> tuple[sitk.Image, dict]:
     if case.members:
-        return dicom.read_study(case.zip_path, case.members, TMP)
+        return dicom.read_study(case.zip_path, case.members, TMP, case.dicom_reader)
     if case.path is not None and Path(case.path).is_dir():
-        return dicom.read_series_dir(case.path)
+        return dicom.read_series_dir(case.path, case.dicom_reader)
     if case.dataset == "msd_braintumor" and case.path is not None:
         from brain.prep.sources import ensure_msd_t1w
 

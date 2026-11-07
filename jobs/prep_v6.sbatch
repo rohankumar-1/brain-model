@@ -10,6 +10,11 @@
 #   PHASE=A MANIFEST_TAG=A_rerun REG_BACKEND=torch MASK_BATCH=4 EXTRA_ARGS="--require-attr reg_backend=torch" \
 #     sbatch --export=ALL --array=0-7%4 jobs/prep_v6.sbatch
 #   (HBN and BraTS incl. GoAT: jobs/prep_v6_local.sbatch, which unpacks them on node-local disk)
+#   Datasets that live on pool only as <name>.raw.zip packs (brain.prep.rawpack; seg_cq500 and most of phase B since
+#   the packing) are staged onto node-local disk by jobs/prep_v6_staged.sbatch, e.g.
+#   STAGE=seg_cq500 DATASETS=seg_cq500 sbatch --export=ALL jobs/prep_v6_staged.sbatch
+#   cq500 is the original DICOM release (pool cq500_dicom, read through dcm2niix); seg_cq500 is the NIfTI subset with
+#   ICH / brain masks.
 #
 # pi_dbertsim only accepts GPU jobs; mit_preemptable is the overflow (preempted tasks requeue and resume).
 # 12 CPUs + 1 L40S + 96 GB per task: pi_dbertsim allows at most 12 CPUs per GPU (48 CPUs, 4 GPUs per node).
@@ -34,8 +39,8 @@ STORE="${STORE:-/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr}"
 PHASE="${PHASE:?set PHASE=A, B or SMOKE}"
 case "$PHASE" in
   A) DATASETS="abide,fomo" ;;
-  B) DATASETS="cq500,oasis,rsna,ixi,isles,atlas,pixar,piop1,piop2,id1000,wmh,isles24,instance,aisd,brainmetshare,msd" ;;
-  SMOKE) DATASETS="abide,fomo,cq500,oasis,rsna,ixi,isles,atlas,pixar,piop1,piop2,id1000,wmh,isles24,instance,aisd,brainmetshare,msd,brats" ;;
+  B) DATASETS="cq500,seg_cq500,oasis,rsna,ixi,isles,atlas,pixar,piop1,piop2,id1000,wmh,isles24,instance,aisd,brainmetshare,msd" ;;
+  SMOKE) DATASETS="abide,fomo,cq500,seg_cq500,oasis,rsna,ixi,isles,atlas,pixar,piop1,piop2,id1000,wmh,isles24,instance,aisd,brainmetshare,msd,brats" ;;
   *) echo "unknown PHASE=$PHASE" >&2; exit 2 ;;
 esac
 DATASETS="${DATASETS_OVERRIDE:-$DATASETS}"           # e.g. split a phase by registration backend

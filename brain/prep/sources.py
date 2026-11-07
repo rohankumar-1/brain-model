@@ -37,6 +37,7 @@ class Case:
     members: tuple = ()
     ref: Path | None = None                         # co-registered sequence that decides this subject's grid
     ref_image: Path | None = None                   # the ref's stored volume (set by brain.prep.run): reuse its fit
+    dicom_reader: str = ""                          # "dcm2niix" | "sitk" | "" (BRAIN_DICOM_READER, else sitk)
 
     @property
     def stripped(self) -> bool:
@@ -63,28 +64,26 @@ def _first(d: Path, *names: str) -> Path | None:
     return next((d / n for n in names if (d / n).exists()), None)
 
 
-def cq500(*dirs: Path) -> list[Case]:
-    """Seg-CQ500 (with ICH and brain masks) first, then extra CQ500 volumes not already seen."""
-    cases, seen = [], set()
-    for root in dirs:
-        tag = "seg_cq500" if "seg_cq500" in str(root) else "cq500"
-        for d in sorted(p for p in Path(root).iterdir() if p.is_dir() and p.name not in seen):
-            ct = _first(d, "CT.nii", "CT.nii.gz")
-            if ct is None:
-                continue
-            seen.add(d.name)
-            masks = tuple((n, m) for n, names in (("ICH", ("ICH_mask.nii.gz", "ICH_mask.nii")),
-                                                  ("brain", ("brain.nii.gz", "brain.nii")))
-                          if tag == "seg_cq500" and (m := _first(d, *names)))
-            cases.append(Case(tag, d.name, "ct", ct, masks))
+def seg_cq500(root: Path = DATASETS / "seg_cq500" / "volumes") -> list[Case]:
+    """Seg-CQ500: the NIfTI CQ500 subset with ICH and brain masks (dataset ``seg_cq500``). Plain ``cq500`` is read from
+    the original DICOMs (``cq500_dicom``); this NIfTI release is used only for its masks' cases."""
+    cases = []
+    for d in sorted(p for p in Path(root).iterdir() if p.is_dir()):
+        ct = _first(d, "CT.nii", "CT.nii.gz")
+        if ct is None:
+            continue
+        masks = tuple((n, m) for n, names in (("ICH", ("ICH_mask.nii.gz", "ICH_mask.nii")),
+                                              ("brain", ("brain.nii.gz", "brain.nii")))
+                      if (m := _first(d, *names)))
+        cases.append(Case("seg_cq500", d.name, "ct", ct, masks))
     return cases
 
 
 def cq500_dicom(root: Path = DATASETS / "cq500_dicom") -> list[Case]:
-    """CQ500 from the original DICOMs (``brain.datasets.download_cq500``: one plain soft-tissue series per study zip),
-    read by member offsets like RSNA. Replaces the third-party pre-converted NIfTIs as dataset ``cq500`` (same case
-    ids, so the same volume ids); those were mirrored for some studies and mixed kernels / contrast series. Prep these
-    with ``BRAIN_DICOM_READER=dcm2niix`` (CQ500 has gantry tilt)."""
+    """CQ500 (dataset ``cq500``) from the original DICOMs (``brain.datasets.download_cq500``: one plain soft-tissue
+    series per study zip), read by member offsets like RSNA, through dcm2niix (CQ500 has gantry tilt). It replaced the
+    third-party pre-converted NIfTIs (same case ids, so the same volume ids); those were mirrored for some studies and
+    mixed kernels / contrast series."""
     import zipfile
 
     cases = []
@@ -93,7 +92,7 @@ def cq500_dicom(root: Path = DATASETS / "cq500_dicom") -> list[Case]:
             members = tuple((i.filename, i.header_offset, i.compress_size, i.compress_type) for i in zf.infolist()
                             if not i.filename.endswith("/"))
         if members:
-            cases.append(Case("cq500", z.stem, "ct", zip_path=str(z), members=members))
+            cases.append(Case("cq500", z.stem, "ct", zip_path=str(z), members=members, dicom_reader="dcm2niix"))
     return cases
 
 
@@ -663,7 +662,7 @@ def rsna_ica(rsna_zip: Path = DATASETS / "rsna_ica" / "rsna-intracranial-aneurys
         if uid in index and mod in RSNA_ICA_DATASET:
             ds, modality = RSNA_ICA_DATASET[mod]
             cases.append(Case(ds, uid, modality, zip_path=str(rsna_zip),
-                              members=tuple(tuple(m) for m in sorted(index[uid]))))
+                              members=tuple(tuple(m) for m in sorted(index[uid])), dicom_reader="dcm2niix"))
     return cases
 
 
@@ -709,7 +708,7 @@ def ida(project: str) -> list[Case]:
         if iid in index and kind in IDA_KIND:
             zip_path, members = index[iid]
             cases.append(Case(f"{project}_{IDA_KIND[kind]}", iid, "mri", zip_path=zip_path,
-                              members=tuple(tuple(m) for m in sorted(members))))
+                              members=tuple(tuple(m) for m in sorted(members)), dicom_reader="dcm2niix"))
     return cases
 
 

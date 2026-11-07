@@ -54,7 +54,7 @@ def _read_member(fd: int, offset: int, csize: int, ctype: int) -> bytes:
     return data if ctype == zipfile.ZIP_STORED else zlib.decompress(data, -15)
 
 
-def read_study(zip_path: str, members, tmp_root: str | None = None) -> tuple[sitk.Image, dict]:
+def read_study(zip_path: str, members, tmp_root: str | None = None, reader: str = "") -> tuple[sitk.Image, dict]:
     """Extract a study's DICOMs to a temp dir, read its largest series -> (RAS float32 image, QC info)."""
     fd = os.open(zip_path, os.O_RDONLY)
     try:
@@ -65,14 +65,15 @@ def read_study(zip_path: str, members, tmp_root: str | None = None) -> tuple[sit
     with tempfile.TemporaryDirectory(dir=tmp_root) as d:
         for k, b in enumerate(blobs):
             (Path(d) / f"{k:04d}.dcm").write_bytes(b)
-        return read_series_dir(d)
+        return read_series_dir(d, reader)
 
 
-def read_series_dir(folder: str | Path) -> tuple[sitk.Image, dict]:
-    """Largest series in a folder of DICOM files -> (RAS float32 image, QC info). ``BRAIN_DICOM_READER=dcm2niix``
-    assembles slices by position (dcm2niix: duplicate / mixed slices, gantry-tilt de-shear, even spacing); the
-    default SimpleITK series reader assumes even, untilted slices (docs/prep.md, "RSNA DICOM assembly")."""
-    if os.environ.get("BRAIN_DICOM_READER", "sitk") == "dcm2niix":
+def read_series_dir(folder: str | Path, reader: str = "") -> tuple[sitk.Image, dict]:
+    """Largest series in a folder of DICOM files -> (RAS float32 image, QC info). ``reader`` (the source's
+    ``Case.dicom_reader``, else ``BRAIN_DICOM_READER``, else ``sitk``): ``dcm2niix`` assembles slices by position
+    (duplicate / mixed slices, gantry-tilt de-shear, even spacing); the SimpleITK series reader assumes even, untilted
+    slices (docs/prep.md, "RSNA DICOM assembly")."""
+    if (reader or os.environ.get("BRAIN_DICOM_READER", "sitk")) == "dcm2niix":
         # dcm2niix refuses some series (ImageType DERIVED / SECONDARY CTAs, malformed overlay tags): read those with
         # the SimpleITK series reader instead
         try:
