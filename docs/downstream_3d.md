@@ -12,7 +12,7 @@ an adapter; `brain/downstream/models.py`). Frozen classification and regression 
 ## Running the suite
 
 ```bash
-jobs/submit_eval.sh runs/<run>/last.pt                     # all 25 entries as a Slurm array (pi_dbertsim), then ingest
+jobs/submit_eval.sh runs/<run>/last.pt                     # every entry, one Slurm job in sequence, then ingest
 jobs/submit_eval.sh runs/<run>/last.pt cq500 wmh probe3d   # a subset
 python -m brain.downstream.suite list                      # the entries
 python -m brain.downstream.suite run --task wmh --model runs/<run>/last.pt -- --steps 3000  # one entry, extra args
@@ -21,9 +21,9 @@ python -m brain.downstream.suite run --task ixi_age --model regional_stats    # 
 
 | Entries | Evaluator | Heads / probes |
 |---|---|---|
-| Classification: `cq500`, `rsna_ich`, `oasis1_cdr`, `oasis2_cdr`, `oasis2_conversion`, `abide_asd`, `msd` | `run_suite` | PCA readouts (`plane_*`, `grid_*`, `pca_global_*`), 3D conv probe `tok_conv`; `--readout raw` gives pooled `logreg_pool` |
-| Regression: `oasis1_age`, `ixi_age`, `pixar_age`, `piop1_age`, `piop2_age`, `id1000_age` | `run_suite` | same, with ridge |
-| Segmentation: `seg_cq500`, `brats2023_{gli,men,ped}`, `brats2024_gli`, `atlas`, `isles22`, `wmh`, `isles24`, `aisd`, `instance` | `seg3d` (3D checkpoints) | `tok_unet3d` (`--patch-fcn`: `tok_pfcn`) |
+| Classification (`tasks.CLASSIFICATION_TASKS`: `cq500`, `rsna_ich`, `oasis1_cdr`, `abide_asd`, `msd`, ...) | `run_suite` | `linear` (logistic regression) and `mlp` on the mean foreground token, `spatial` (linear on the 8 octant means), `tok_conv` (3D conv probe on the token grid; `--no-token-heads` skips it) |
+| Regression (`tasks.REGRESSION_TASKS`: `ixi_age`, `atlas_lesion_volume`, `adni_mmse`, ...) | `run_suite` | same, with ridge |
+| Segmentation: `seg_cq500`, `brats2023_{gli,men,ped}`, `brats2024_gli`, `atlas`, `isles22`, `wmh`, `isles24`, `aisd`, `instance`, ... | `seg3d` (3D checkpoints) | `tok_unet3d`: a 3D U-Net decoder on the frozen token grid, trained on token-grid crops of each training volume and 3 shifted / flipped encoded copies |
 | `probe3d` | `probe3d` | dense lesion probe (linear, MLP) per held-out family; fingerprint (modality, dataset); location; pixel and random-init controls |
 
 A random-init baseline (`python -m brain.downstream.random_init --config configs/lejepa3d/small.yaml --out
@@ -32,12 +32,12 @@ runs/baselines/random_small/last.pt`) is the floor every trained model should be
 ## Geometry
 
 The volume is 256 × 256 × 160 at 1 mm (`brain/common/grid.py`). The 16 × 16 × 8 patch gives a 20 × 16 × 16 token grid
-(5120 tokens). The tiled 8 × 8 × 4 patch (`--fine`, `BRAIN_FINE_GRID`) gives 40 × 32 × 32. Every module takes these
-from `TOKEN_GRID` / `FINE_TOKEN_GRID`. Segmentation `dice_*` is scored on the 64 bin-centre axial slices that the 2D
-reference decoder sees; `dice_full_*` uses the whole volume.
+(5120 tokens, `TOKEN_GRID`); every evaluator reads our encoders on it, one pass over the whole volume
+(`brain.downstream.embed3d`). Segmentation `dice_*` is scored on the 64 bin-centre axial slices the retired 2D
+reference decoder saw; `dice_full_*` uses the whole volume.
 
-Caches live under `runs/downstream/_cache/v<store format>/`: embeddings, seg3d token and mask memmaps, and 2D pixel
-caches. A re-prepped store therefore never reuses tensors of the old shape.
+Caches live under `runs/downstream/_cache/v<store format>/`: embeddings, and seg3d token and mask memmaps. A
+re-prepped store therefore never reuses tensors of the old shape.
 
 ## Experiment records (`brain/downstream/records.py`)
 
