@@ -131,7 +131,7 @@ UCSF_PDGM_CONTENT_TWINS = DATASETS / "ucsf_pdgm" / "meta" / "brats_twins_content
 @functools.cache
 def ucsf_pdgm_content_twins() -> dict[str, str]:
     """UCSF-PDGM patient -> BraTS dedup_key for the patients TCIA maps to no BraTS 2021 case but whose BraTS copy
-    was found by image content (runs/diagnostics/glioma_twins.py, 2026-10-29; mostly newer BraTS-GLI ids)."""
+    was found by image content (``brain.prep.subjects glioma-twins``, 2026-10-29; mostly newer BraTS-GLI ids)."""
     if not UCSF_PDGM_CONTENT_TWINS.exists():
         return {}
     m = pd.read_csv(UCSF_PDGM_CONTENT_TWINS, usecols=["ucsf_id", "brats_id"]).dropna()
@@ -168,7 +168,7 @@ def ida_subjects(project: str) -> dict[str, str]:
 def upenn_gbm_brats() -> dict[str, str]:
     """UPENN-GBM patient -> its BraTS copy's dedup_key (``brats:gli:BraTS-GLI-NNNNN`` or ``brats:goat:...``). TCIA
     gives no mapping (UPenn is BraTS site 1, without local IDs), so ``brats_twins.csv`` comes from image content
-    (runs/diagnostics/glioma_twins.py, 2026-10-29: 451 of 611 baseline patients, every GLI match a site-1 case)."""
+    (``brain.prep.subjects glioma-twins``, 2026-10-29: 451 of 611 baseline patients, every GLI match a site-1 case)."""
     if not UPENN_GBM_TWINS.exists():
         return {}
     m = pd.read_csv(UPENN_GBM_TWINS, usecols=["upenn_id", "brats_id"]).dropna()
@@ -239,7 +239,7 @@ _RSNA_PATIENTS: dict[str, str] = {}
 
 def load_rsna_patients(root: Path) -> None:
     """RSNA case_id -> DICOM PatientID from ``<root>/labels/rsna_patients.csv`` (read once from one header per study
-    by ``runs/diagnostics/rsna_patients.py``); ``build`` calls this before computing dedup keys."""
+    by ``brain.prep.subjects rsna-patients``); ``build`` calls this before computing dedup keys."""
     global _RSNA_PATIENTS
     f = root / "labels" / "rsna_patients.csv"
     _RSNA_PATIENTS = dict(zip(*[pd.read_csv(f)[c].astype(str) for c in ("case_id", "patient_id")])) if f.exists() else {}
