@@ -32,7 +32,7 @@ index_compatible:
   - 39ddb6552ec627247bfe48e17bb00dbebc54e046   # 2026-11-02: + fastMRI+ (999 annotated NYU MRIs), append-only (index-check)
   - ccbe8490278019319580d524ac3142cac65ede90   # 2026-11-06: + Pedi-Cranial-CT-Healthy (99 children's CT), append-only (index-check)
 # the model every other one is paired against (a checkpoint or a models.yaml name)
-reference: BQ-R6
+reference: BQ-R10
 # the label table in-domain and few-shot scoring read (BrainQuery models with task heads), whatever a checkpoint
 # trained on: one table, one set of splits for every model
 labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2

@@ -51,6 +51,7 @@ def test_registry_entries_are_valid_and_resolve():
     assert m.training_class == "baseline" and m.model_id.startswith("regional_stats@") and not m.is_checkpoint
     with pytest.raises(SystemExit):
         resolve_model("no_such_model")
+    assert load().reference in reg                                   # the leaderboard's reference is a named model
 
 
 def test_every_benchmark_task_has_a_pinned_readout():
