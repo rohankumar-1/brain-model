@@ -178,7 +178,7 @@ class Trainer(engine.Trainer):
         self.raw, self.module = raw, raw
         self.core = ViewNet(raw, local_pooled=bool(lc.get("local_pooled", False)), dense=self.dense_on,
                             predict=predict_on, predict_fine=fine_pred_on,
-                            cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))), refine=m.get("refine"))
+                            cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
         self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"])), lr=float(o["lr"]),
                                      betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")

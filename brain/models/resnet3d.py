@@ -87,7 +87,7 @@ class ResNetEncoder(nn.Module):
 
     def forward(self, view: torch.Tensor, coords_mm: torch.Tensor | None = None,
                 patch_size_mm: torch.Tensor | None = None, patch_xyz=None, keep: torch.Tensor | None = None,
-                taps: Sequence[int] = (), meta=None, task_tokens=None, task_write=None, refine=None) -> dict:
+                taps: Sequence[int] = (), meta=None, task_tokens=None, task_write=None) -> dict:
         x = view.permute(0, 1, 4, 3, 2)                                   # (B, C, Z, Y, X)
         # the full-resolution stem holds the largest activations: recomputed in backward too (GroupNorm: exact)
         x = (checkpoint(self._stem, x, use_reentrant=False) if self.checkpoint_blocks and self.training

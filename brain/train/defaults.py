@@ -37,8 +37,6 @@ LEJEPA3D: dict[str, Any] = {
         "rope_base_mm": 100.0, "checkpoint": True, "proj_norm": "batch", "length_buckets": 4,
         # Token head for the dense loss: 0 builds none (a plain pooled-only model).
         "dense_dim": 128, "dense_hidden": 512,
-        # budgeted token refinement (brain.models.refine): a share of each crop's cells as 8 half-size tokens; 0 = off
-        "refine": {"groups": ["global"], "frac_max": 0.0, "random_frac": 0.5},
         # Prefix tokens: n_cls=1 adds a CLS that becomes the pooled (global) embedding; registers are extra
         # position-free tokens attention can use as scratch space. 0/0 = mean-pooled patch tokens.
         "n_cls": 0, "n_registers": 0,
