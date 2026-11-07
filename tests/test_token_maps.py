@@ -116,9 +116,7 @@ def test_frac_gate_keeps_edge_tokens_but_not_noise():
     mod = torch.tensor([0])
     centre = token_keep(vol, mod, (16, 16, 8), mode="center")  # centre voxel (x=8) is tissue; x=24 is air
     frac = token_keep(vol, mod, (16, 16, 8), mode="frac", min_frac=0.25)
-    mx = token_keep(vol, mod, (16, 16, 8), mode="max")
     assert frac[0, :, :, 0].all() and not frac[0, :, :, 1].any()   # 75% tissue kept, one voxel is not enough
-    assert mx[0, :, :, 1].any()                                     # max mode keeps the stray voxel's token
     vol[:, :, :12, :, :] = -1000.0
     vol[:, :, :6, :, :] = 40.0                                      # 37.5% tissue, centre (x=8) in air
     assert not token_keep(vol, mod, (16, 16, 8), mode="center")[0, :, :, 0].any()

@@ -1,7 +1,7 @@
 """Foreground gate on the native grid.
 
-A token is kept when the voxel at its center passes a threshold, the same kind of test the 2D loader
-uses. CT keeps everything above the air floor, including bone. MRI keeps everything above the background
+A token is kept when the voxel at its center passes a threshold (``center``), or when at least ``min_frac`` of its
+voxels do (``frac``). CT keeps everything above the air floor, including bone. MRI keeps everything above the background
 sentinel. There is no connected-component step and no blur.
 """
 
@@ -26,7 +26,6 @@ def token_keep(
 
     ``mode="center"`` (original) tests each patch's centre voxel, so edge tokens holding cortex around an air centre are
     dropped (1.2% of brain voxels on average, 5% on WMH-challenge FLAIRs; 2026-11-01, 85 scans of 7 datasets);
-    ``mode="max"`` keeps a token when any of its voxels passes the threshold (one noisy background voxel is enough);
     ``mode="frac"`` keeps it when at least ``min_frac`` of its voxels do: at 0.25, 0.14% of brain voxels lost for 14%
     more tokens than ``center``."""
     if volume.ndim != 5:
@@ -39,14 +38,9 @@ def token_keep(
         fg = torch.where(is_ct, v > float(ct_hu[0]), v > float(mri_lo)).float()
         keep = torch.nn.functional.avg_pool3d(fg, (px, py, pz))[:, 0] >= float(min_frac)
         return keep.permute(0, 3, 2, 1).contiguous()
-    if mode == "max":
-        b, _, x, y, z = volume.shape
-        v = volume[:, :, : x // px * px, : y // py * py, : z // pz * pz]
-        centers = torch.nn.functional.max_pool3d(v.float(), (px, py, pz))[:, 0]
-    elif mode == "center":
-        centers = volume[:, 0, px // 2 :: px, py // 2 :: py, pz // 2 :: pz]
-    else:
-        raise ValueError(f"gate mode {mode!r}: center | max")
+    if mode != "center":
+        raise ValueError(f"gate mode {mode!r}: center | frac")
+    centers = volume[:, 0, px // 2 :: px, py // 2 :: py, pz // 2 :: pz]
     is_ct = (modality.reshape(-1) == 0).view(-1, 1, 1, 1)
     keep = torch.where(is_ct, centers > float(ct_hu[0]), centers > float(mri_lo))
     return keep.permute(0, 3, 2, 1).contiguous()

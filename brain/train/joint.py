@@ -123,7 +123,7 @@ class Trainer(multitask.Trainer):
         enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
         if hasattr(enc.patch_embed, "checkpoint"):
             enc.patch_embed.checkpoint = enc.checkpoint_blocks
-        # the multitask branch gates and windows with the encoder's gate (e.g. mode: max)
+        # the multitask branch gates and windows with the encoder's gate (e.g. mode: frac)
         m["gate"] = dict(cfg["views"].get("gate") or {})
         return enc.train().requires_grad_(True)
 

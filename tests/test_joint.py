@@ -43,12 +43,11 @@ def test_rope_min_period_removes_aliasing_and_default_is_unchanged():
     assert torch.equal(a, b)
 
 
-def test_gate_max_mode_keeps_rims_center_mode_is_unchanged():
+def test_gate_default_is_the_centre_voxel():
     v = torch.full((1, 1, 32, 32, 16), -6.0)
     v[0, 0, 0:2, :, :] = 1.0                                  # tissue only at the patch edge, not at its centre
     m = torch.tensor([1])
     assert int(token_keep(v, m, (16, 16, 8)).sum()) == 0
-    assert int(token_keep(v, m, (16, 16, 8), mode="max").sum()) == 4
     r = torch.randn(1, 1, 32, 32, 16)
     assert torch.equal(token_keep(r, m, (16, 16, 8)), token_keep(r, m, (16, 16, 8), mode="center"))
 

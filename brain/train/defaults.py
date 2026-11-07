@@ -149,7 +149,7 @@ def _multitask_defaults() -> dict[str, Any]:
                   # every mask), instead of once per segmentation slot
                   # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout
                   "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0}},
-        # gate mode: "center" (a token's centre voxel), "max" or "frac" (>= min_frac of its voxels; data.gate.token_keep)
+        # gate mode: "center" (a token's centre voxel) or "frac" (>= min_frac of its voxels; data.gate.token_keep)
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
                                                      "min_frac": 0.25}},
         # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
@@ -209,7 +209,7 @@ def _joint_defaults() -> dict[str, Any]:
     c["model"].update(init_from=None, n_cls=1, drop_path=0.0,
                       # RoPE frequencies from a 32 mm shortest period (None: the original 6.3 mm, ~38% aliased pairs)
                       rope_min_period_mm=None)
-    c["views"].setdefault("gate", {}).update(mode="center")        # "max": any voxel of the patch counts
+    c["views"].setdefault("gate", {}).update(mode="center")
     # the curriculum in fractions of max_steps, or in steps (warmup_steps / task_ramp_steps / taper_end_steps win when
     # set: a run that may be extended keeps its curriculum fixed instead of stretching it)
     # ssl_start: the SSL weight while it tapers from the start (1.0 = equal to the tasks' full weight); R15 4 -> floor 1
