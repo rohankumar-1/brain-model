@@ -1096,7 +1096,7 @@ def load_msd_task(
 
 # Benchmark v3 decontamination (2026-11-05): evaluation scans that are the same scan as a training / pre-training scan,
 # or a second copy of one inside their own cohort (it would sit in two cross-validation folds), verified at the pixel
-# level (runs/diagnostics/dup_verify.py -> runs/diagnostics/build_bench_exclude.py). BRAIN_BENCH_EXCLUDE=none disables.
+# level (python -m brain.prep.data_qc verify -> python -m brain.prep.decontam bench-exclude). BRAIN_BENCH_EXCLUDE=none disables.
 BENCH_EXCLUDE = Path(__file__).resolve().parents[2] / "configs" / "bench" / "exclude_v3.csv"
 
 

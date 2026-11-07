@@ -11,7 +11,7 @@ COLS = [("BQ-random", "Random"), ("PUB", "Best published"), ("BQ-R10", "R10"), (
         ("BQ-R12", "R12"), ("BQ-R13", "R13"), ("BQ-R13-EMA", "R13 avg"), ("BQ-R14", "R14"), ("BQ-R14-EMA", "R14 avg"),
         ("BQ-R14F", "R14-F")]
 SPLITCOL = "BQ-R10"
-PUB = {"ct_fm": "CT-FM", "ct_fm_triage": "CT-FM head", "brainiac": "BrainIAC"}
+PUB = {"ct_fm": "CT-FM", "ct_fm_triage": "CT-FM head", "brainiac": "BrainIAC", "brainfm": "BrainFM", "hlip": "HLIP"}
 PAPER = {"adni_cn_ad": (0.850, 0.754, 0.947), "adni_cn_mci": (0.701, 0.608, 0.794), "ppmi_pd": (0.610, 0.571, 0.648)}
 # own trained heads on the held-out test split (brain.multitask.test_eval), for tasks the benchmark leaves out
 te7 = pd.read_csv(f"{REPO}/runs/diagnostics/test_eval_r7/test_eval_heads.csv")
@@ -326,7 +326,7 @@ page = f'''<title>Brain Model Task Scores</title>
 
   <ol class="notes">
     <li>AUC: AUROC, 0.5 = chance. R²: variance explained. Skill rescales each metric so 0 = chance, 1 = perfect. n (pos): test scans (positives).</li>
-    <li>Best published: CT-FM, CT-FM head (Pai et al., 2025), BrainIAC (Tak et al., 2026), run here on the same scans; for ADNI / PPMI also BrainDINO’s published number (different cohort: longitudinal ADNI1).</li>
+    <li>Best published: CT-FM, CT-FM head (Pai et al., 2025), BrainIAC (Tak et al., 2026), BrainFM (Liu et al., 2025; multitask on real + synthetic scans; its training data include ADNI, OASIS and ATLAS) and HLIP (Zhao et al., 2026; CLIP on clinical brain-MRI reports), run here on the same scans; for ADNI / PPMI also BrainDINO’s published number (different cohort: longitudinal ADNI1).</li>
     <li>BQ-SSL v3: self-supervised encoder only. R7: multitask on the v4 encoder, 12k steps. R7-SSL: + masked reconstruction and contrast synthesis. R10: R7 at 30k steps on 4 GPUs (batch 32), with synthesis, 10% masked reconstruction, task-aware augmentation and aneurysm location + vessel tasks; R10 avg: its weight average (decay 0.999). R12: R10 continued to 60k steps on QC-filtered tool labels (v9) with HL-Gauss regression; R12 avg: its weight average. R13: R12 at 50k continued to 75k with token-map targets (mask occupancy, RSNA slice labels, fastMRI+ boxes), fastMRI+ radiology findings and a 25% token gate, without aneurysm tasks or RSNA-ICA scans; R13 avg: its weight average. Trained-task table: R10, R12 and R13 on the same test split, R7 on its own run's.</li>
     <li>R14: R13 continued to 100k steps with true negatives (empty tumour masks on healthy-volunteer MRI, empty bleed masks on bleed-free RSNA CT, 3,006 two-tool RSNA bleed pseudo-masks), skull-strip matching, synthetic contrast and the audit fixes; R14 avg: its weight average. Lesion Dice is over scans with a lesion; the row below it is the share of lesion-free test scans where the head predicted any lesion (lower is better; R13 and R14 on labels v11).</li>
     <li>R14-F: R14 continued 15k steps with study-level input: a study’s co-registered sequences (BraTS / UPENN mpMRI, SynthRAD MR + CT) pass the first 8 encoder blocks separately and are fused per token position before the last 4; a scan without partners takes the unfused path. Frozen benchmark: single scans. “All sequences”: its heads given each test scan’s co-registered sequences (scans without any stay single).</li>

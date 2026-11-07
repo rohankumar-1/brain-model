@@ -1,5 +1,5 @@
 """2026-10-25 preprocessing fixes: N4 rules, infant templates, prep-time dedup, RSNA
-re-keying. python tests/run.py tests/test_prep_fixes.py"""
+re-keying. python -m pytest -q tests/test_prep_fixes.py"""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """Benchmark scoring: the skill scale, the paired bootstrap, and the evaluation protocol fixes.
-python tests/run.py tests/test_eval_report.py"""
+python -m pytest -q tests/test_eval_report.py"""
 
 from __future__ import annotations
 

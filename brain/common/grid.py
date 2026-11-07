@@ -9,7 +9,6 @@ a multiple of both token depths (8 -> 20 tokens, 4 -> 40).
 GRID_XYZ = (256, 256, 160)  # (x, y, z) voxels = mm
 DEPTH = GRID_XYZ[2]
 PATCH_XYZ = (16, 16, 8)       # the 3D encoder's native patch
-FINE_PATCH_XYZ = (8, 8, 4)    # tiled half-size patch
 
 
 def token_grid(patch_xyz=PATCH_XYZ, size_xyz=GRID_XYZ) -> tuple[int, int, int]:
@@ -20,4 +19,3 @@ def token_grid(patch_xyz=PATCH_XYZ, size_xyz=GRID_XYZ) -> tuple[int, int, int]:
 
 
 TOKEN_GRID = token_grid()                   # (20, 16, 16) = 5120 tokens
-FINE_TOKEN_GRID = token_grid(FINE_PATCH_XYZ)  # (40, 32, 32) = 40960 tokens

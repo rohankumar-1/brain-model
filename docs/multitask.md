@@ -58,8 +58,8 @@ regqc_summary.csv}` in the store: one row per (volume, task) with a value, a ref
 
 Leakage rules: training sources read only pretraining-pool volumes (plus BHSD, kept out of SSL only), and training
 uses only their `split == train` rows. Suite tasks that share training labels (`rsna_ich`, BraTS segmentation, MMSE,
-ADOS, the glioma tasks) or targets (age, hemorrhage, tumour) are marked `seen` in the results views
-(`brain/downstream/results_view.py`).
+ADOS, the glioma tasks) or targets (age, hemorrhage, tumour) are marked `seen` in the benchmark
+(`configs/bench/benchmark.yaml` `seen`, `models.yaml` `seen_tasks`).
 
 A volume failing registration QC loses only its alignment-dependent targets (template-space volumes, left-right
 asymmetries, every `vol_*`); its study-level labels and image-space masks still train. The QC fails a volume on

@@ -6,7 +6,8 @@ from brain.downstream.tasks import load_task, DEFAULT_VOLUMES
 from brain.downstream.embed3d import windows_for
 dev = torch.device("cuda")
 t = load_task("aisd", pd.read_csv(DEFAULT_VOLUMES))
-enc = S.load_frozen_encoder(Path("runs/multitask/r14/last.pt"), dev)
+from brain.downstream.models import resolve_model
+enc = resolve_model("runs/multitask/r14/last.pt").load(dev)
 c, w = windows_for("canonical", "ct")[0]
 tr = [str(v) for v in t.volume_ids if t.splits[str(v)] == "train"][:16]
 va = [str(v) for v in t.volume_ids if t.splits[str(v)] == "val"][:8]
