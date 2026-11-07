@@ -16,7 +16,8 @@ from typing import Sequence
 
 import torch
 
-from brain.data.gate import token_keep
+from brain.common.windowing import floors
+from brain.data.gate import gate_kwargs, token_keep
 
 GROUPS = ("global", "local", "fine", "win")
 
@@ -270,9 +271,7 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
     spacing = batch["spacing_mm"].detach().float().cpu()
     origin_mm = batch["origin_mm"].detach().float().cpu()
     v = cfg["views"]
-    gate = v.get("gate") or {}
-    gate = dict(ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))), mri_lo=float(gate.get("mri_lo", -5.5)),
-                mode=str(gate.get("mode", "center")))
+    gate = gate_kwargs(v.get("gate"))
     patch = tuple(int(p) for p in v["patch_xyz"])
     b, _, nz, ny, nx = volume.shape
     xyz = volume.permute(0, 1, 4, 3, 2)
@@ -314,7 +313,7 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
     brain = batch.get("brain")
     stripped, skull_p = None, float(((cfg.get("aug") or {}).get("skull") or {}).get("p", 0.0))
     if brain is not None and skull_p > 0:
-        floor = torch.where(modality.view(-1, 1, 1, 1, 1) == 0, -1024.0, -6.0).to(volume.dtype)
+        floor = floors(modality).view(-1, 1, 1, 1, 1).to(volume.dtype)
         stripped = torch.where(brain.bool(), volume, floor)
 
     def drops(n: int) -> list[bool]:

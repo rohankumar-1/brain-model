@@ -11,14 +11,16 @@ from typing import Sequence
 
 import torch
 
+from brain.common.windowing import FG_THRESH
+
 
 def token_keep(
     volume: torch.Tensor,
     modality: torch.Tensor,
     patch_xyz: Sequence[int],
     *,
-    ct_hu: tuple[float, float] = (-500.0, 200.0),
-    mri_lo: float = -5.5,
+    ct_hu: tuple[float, float] = (FG_THRESH["ct"], 200.0),
+    mri_lo: float = FG_THRESH["mri"],
     mode: str = "center",
     min_frac: float = 0.25,
 ) -> torch.Tensor:
@@ -44,3 +46,10 @@ def token_keep(
     is_ct = (modality.reshape(-1) == 0).view(-1, 1, 1, 1)
     keep = torch.where(is_ct, centers > float(ct_hu[0]), centers > float(mri_lo))
     return keep.permute(0, 3, 2, 1).contiguous()
+
+
+def gate_kwargs(gate: dict | None) -> dict:
+    """``token_keep`` keyword arguments from a config's gate (``views.gate``); missing keys take its defaults."""
+    gate = gate or {}
+    return dict(ct_hu=tuple(gate.get("ct_hu", (FG_THRESH["ct"], 200.0))), mri_lo=float(gate.get("mri_lo", FG_THRESH["mri"])),
+                mode=str(gate.get("mode", "center")), min_frac=float(gate.get("min_frac", 0.25)))

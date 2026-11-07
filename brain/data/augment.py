@@ -36,7 +36,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from brain.common.windowing import MOD_CT, MOD_MRI, asinh_window, canonical_windows, fg_thresh, floors, role_windows
+from brain.common.windowing import FLOOR, MOD_CT, MOD_MRI, asinh_window, canonical_windows, fg_thresh, floors, role_windows
 
 FWHM_TO_SIGMA = 1.0 / 2.3548
 QUANTILE_SAMPLES = 16384  # foreground voxels sampled per row to place the curve knots
@@ -372,5 +372,5 @@ def skull_dropout(volume: torch.Tensor, brain: torch.Tensor, modality: int, p: f
     """With probability ``p``, set everything outside ``brain`` to the background floor. ``volume`` is (Z, Y, X)."""
     if p <= 0 or float(torch.rand(1, generator=gen)) >= p:
         return volume
-    floor = -1024.0 if modality == MOD_CT else -6.0
+    floor = FLOOR["ct"] if modality == MOD_CT else FLOOR["mri"]
     return torch.where(brain.bool(), volume, volume.new_tensor(floor))

@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from brain.common.windowing import asinh_window, canonical_c_w, floors, role_windows
 from brain.data.augment import appearance
-from brain.data.gate import token_keep
+from brain.data.gate import gate_kwargs, token_keep
 from brain.data.volumes import FamilySampler, _worker_threads, meta_id
 from brain.multitask.labels import live_targets
 from brain.multitask.registry import SPATIAL_TYPES, Registry
@@ -720,10 +720,8 @@ def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | Non
 
 def foreground_tokens(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None) -> torch.Tensor:
     """Foreground token mask (B, N) of native-unit volumes ``raw`` (B, 1, Z, Y, X)."""
-    gate = gate or {}
-    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, mode=str(gate.get("mode", "center")),
-                      ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))), mri_lo=float(gate.get("mri_lo", -5.5)),
-                      min_frac=float(gate.get("min_frac", 0.25))).reshape(raw.shape[0], -1)   # gate on (B,1,X,Y,Z)
+    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz,                   # gate on (B, 1, X, Y, Z)
+                      **gate_kwargs(gate)).reshape(raw.shape[0], -1)
 
 
 def gate_cfg(cfg: dict) -> dict:

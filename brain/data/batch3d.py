@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from brain.common.windowing import floors
 from brain.data.augment import appearance
 from brain.data.crops3d import raw_views
 
@@ -63,7 +64,7 @@ def sample_views(chunks: list[dict], groups, device: torch.device) -> dict[str, 
     if device.type != "cuda":
         vol = vol.float()                                       # CPU grid_sample has no float16 kernel
     mod = torch.cat([c["modality"].to(device, non_blocking=True) for c in chunks])
-    floor = torch.where(mod == 0, -1024.0, -6.0).to(vol.dtype).view(-1, 1, 1, 1, 1)
+    floor = floors(mod).to(vol.dtype).view(-1, 1, 1, 1, 1)
     shifted = vol - floor                                       # zero padding outside the volume == air
     del vol                                                     # only the shifted copy is needed from here
     brain = torch.cat([c["brain_full"].to(device, non_blocking=True) for c in chunks]).to(shifted.dtype) \
