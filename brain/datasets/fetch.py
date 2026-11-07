@@ -111,7 +111,7 @@ def pget(url: str, out: Path, chunk_mb: int = 512, workers: int = 16) -> None:
 
 
 def instance() -> None:
-    """INSTANCE 2022 training zip (OneDrive) into the pool. Preprocess with ``python -m brain.datasets.download_instance --prep``."""
+    """INSTANCE 2022 training zip (OneDrive) into the pool. Prep with ``brain.prep.run --datasets instance``."""
     from brain.datasets.download_instance import fetch
     fetch()
 
@@ -131,7 +131,7 @@ def fomo() -> None:
 
 
 def aisd() -> None:
-    """AISD image+mask zips (Google Drive) into the pool. Preprocess with ``python -m brain.datasets.download_aisd --prep``."""
+    """AISD image+mask zips (Google Drive) into the pool. Prep with ``brain.prep.run --datasets aisd``."""
     from brain.datasets.download_aisd import fetch
     fetch()
 

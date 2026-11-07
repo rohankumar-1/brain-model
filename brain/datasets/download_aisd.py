@@ -1,28 +1,25 @@
-"""Download AISD (acute ischemic stroke NCCT) into the pool and preprocess it there.
+"""Download AISD (acute ischemic stroke NCCT) into the pool.
 
 Images and masks are the public Google Drive zips from
 https://github.com/GriffinLiang/AISD. The release is one folder of 8-bit PNG
 slices per case (not NIfTI); ``fetch`` stacks those into ``extracted/nifti``.
-Raw files and the processed Zarr store both live under ``$BRAIN_DATASETS/aisd``.
-The official 52-case test split is pinned; the rest is 90/10 train/val.
+Prep into the main store with ``brain.prep.run --datasets aisd``; the index pins the official 52-case test split
+(``splits_for``), the rest is 90/10 train/val.
 
-    python -m brain.datasets.download_aisd --prep
+    python -m brain.datasets.download_aisd
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 import random
 import subprocess
-import sys
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import SimpleITK as sitk
 from scipy import ndimage as ndi
 
@@ -31,7 +28,6 @@ from brain.prep.sources import AISD_TEST_IDS, DATASETS, aisd_id
 IMAGE_ID = "157f9aE3ZhRSdIuIbP2PRG8ub9JJWvMGk"
 MASK_ID = "1d08fFpEvK4D6YTKfRlNuv_OlIxigZxl6"
 OUT = DATASETS / "aisd"
-STORE = OUT / "processed"
 # AISD ships display PNGs, no geometry. Typical head NCCT: ~0.5 mm in-plane, 5 mm slices.
 PNG_SPACING_XYZ = (0.5, 0.5, 5.0)
 # 8-bit is a brain window, not native HU. Map 0..255 onto 0..80 HU (WW=80, WL=40).
@@ -168,58 +164,8 @@ def splits_for(case_ids: list[str], seed: int = 42) -> dict[str, str]:
     return out
 
 
-def write_volumes(store_root: Path = STORE) -> Path:
-    """Absolute-path ``volumes.csv`` so brain.downstream can overlay this store on the main table."""
-    from brain.prep import store as st
-    from brain.prep.run import read_manifests
-    from brain.prep.sources import aisd as discover
-
-    man = read_manifests(store_root)
-    # jsonl round-trips numeric stems as ints ("72762"); store folders use 7-digit ids.
-    ok = {aisd_id(c) for c in man.loc[man.status == "ok", "case_id"]}
-    cases = [c for c in discover() if c.case_id in ok]
-    split = splits_for([c.case_id for c in cases])
-    rows = []
-    for c in cases:
-        img = st.path_for(store_root, c.folder, c.case_id)
-        mask = st.path_for(store_root, c.folder, c.mask_id, "lesion")
-        if not img.exists():
-            continue
-        rows.append({
-            "volume_id": f"aisd:{c.case_id}",
-            "dedup_key": f"aisd:{c.case_id}",
-            "case_id": c.case_id,
-            "modality": "ct",
-            "dataset": "aisd",
-            "dataset_family": "aisd",
-            "folder": c.folder,
-            "split": split[c.case_id],
-            "image_path": str(img.resolve()),
-            "mask_lesion": str(mask.resolve()) if mask.exists() else "",
-            "has_mask": bool(mask.exists()),
-            "held_out": True,
-            "status": "ok",
-        })
-    df = pd.DataFrame(rows)
-    store_root.mkdir(parents=True, exist_ok=True)
-    path = store_root / "volumes.csv"
-    df.to_csv(path, index=False, quoting=csv.QUOTE_NONNUMERIC)
-    print(df.groupby("split").size().to_string() if len(df) else "[aisd] no volumes", flush=True)
-    print(f"[aisd] volumes -> {path} ({len(df)})", flush=True)
-    return path
-
-
-def prep(store: Path = STORE, workers: int = 16) -> None:
-    cmd = [sys.executable, "-m", "brain.prep.run", "--root", str(store), "--datasets", "aisd",
-           "--workers", str(workers), "--z-anchor", "auto"]
-    print(f"[aisd] {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, check=True)
-    write_volumes(store)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--prep", action="store_true")
     ap.add_argument("--workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
     a = ap.parse_args()
     root = fetch(workers=a.workers)
@@ -229,8 +175,6 @@ def main() -> None:
     print(f"[aisd] {len(cases)} volumes, {n_mask} with infarct masks", flush=True)
     if not cases:
         raise SystemExit(f"no NCCT volumes found under {root}")
-    if a.prep:
-        prep(STORE, a.workers)
 
 
 if __name__ == "__main__":

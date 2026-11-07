@@ -1,18 +1,16 @@
-"""Download INSTANCE 2022 (MICCAI ICH NCCT) into the pool and preprocess it there.
+"""Download INSTANCE 2022 (MICCAI ICH NCCT) into the pool (``$BRAIN_DATASETS/instance2022``).
 
-The official share is a OneDrive zip (``train_2.zip``). Raw files and the processed
-Zarr store both live under ``$BRAIN_DATASETS/instance2022`` — nothing is written to scratch.
+The official share is a OneDrive zip (``train_2.zip``). Prep into the main store with
+``brain.prep.run --datasets instance``.
 
-    python -m brain.datasets.download_instance --prep
+    python -m brain.datasets.download_instance
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -21,7 +19,6 @@ from brain.prep.sources import DATASETS
 SHARE = "https://1drv.ms/u/s!ApYSTFRpDKWAgUrdBzCCipLwl0jF?e=Njt3RP"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 OUT = DATASETS / "instance2022"
-STORE = OUT / "processed"
 
 
 def _headers(url: str, extra: list[str] | None = None) -> str:
@@ -94,18 +91,9 @@ def fetch(share: str = SHARE) -> Path:
     return extract(download(share))
 
 
-def prep(store: Path = STORE, workers: int = 16) -> None:
-    cmd = [sys.executable, "-m", "brain.prep.run", "--root", str(store), "--datasets", "instance",
-           "--workers", str(workers), "--z-anchor", "auto"]
-    print(f"[instance] {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, check=True)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--share", default=SHARE)
-    ap.add_argument("--prep", action="store_true", help="run v4 preprocess into pool after extract")
-    ap.add_argument("--workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
     a = ap.parse_args()
     root = fetch(a.share)
     from brain.prep import sources
@@ -114,8 +102,6 @@ def main() -> None:
     print(f"[instance] {len(cases)} volumes, {n_mask} with ICH masks", flush=True)
     if not cases:
         raise SystemExit(f"no NCCT volumes found under {root}")
-    if a.prep:
-        prep(STORE, a.workers)
 
 
 if __name__ == "__main__":
