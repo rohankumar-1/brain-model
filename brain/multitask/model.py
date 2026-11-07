@@ -13,7 +13,6 @@ segmentation decoder via FiLM, whose ``dense_head`` answers the dense (self-supe
 scores the token against learned per-(task, class) vectors). Every trained
 task's token is always in the sequence, so an answer never depends on which other tasks were asked; a held-out task
 gets a read-only token (it reads the scan, nothing reads it), so few-shot fits only its embedding row.
-``moe.blocks`` turns the encoder's top blocks' MLPs into mixtures of experts.
 
 ``task_tokens.enabled: false`` is the earlier readout (runs up to 2026-10-26, e.g. run 6 and A1), kept so those
 checkpoints load: slot queries cross-attend to the finished encoding through ``slot.layers`` slot layers.
@@ -227,10 +226,6 @@ class BrainQuery(nn.Module):
         nn.init.normal_(self.task_emb.weight, std=0.02)
         self.type_emb = nn.Embedding(len(TYPE_ID), qdim)
         nn.init.normal_(self.type_emb.weight, std=0.02)
-        # ``moe``: mixture-of-experts MLPs in the encoder's last ``blocks`` blocks, experts copied from the trained MLP
-        moe = cfg.get("moe") or {}
-        if int(moe.get("blocks", 0)) and not backbone.moe_blocks:
-            backbone.enable_moe(int(moe["blocks"]), int(moe.get("experts", 5)), int(moe.get("top_k", 2)))
         self.register_buffer("task_type", torch.tensor([TYPE_ID[t.type] for t in reg.tasks]), persistent=False)
         self.register_buffer("n_classes", torch.tensor([len(t.classes) for t in reg.tasks]), persistent=False)
         # shared task tokens (registry ``token``, on with ``task_tokens.share``; earlier checkpoints keep one token per
@@ -489,41 +484,21 @@ class BrainQuery(nn.Module):
 
 
 class TokenTraining:
-    """What a trainer does for task tokens and MoE blocks, shared by the multitask and joint trainers.
+    """What a trainer does for task tokens, shared by the multitask and joint trainers.
 
     * registers the trained tasks as the always-present (written) tokens;
     * ``at_step``: the patch tokens' attention to the task tokens starts damped by ``write_bias`` logits and opens
       linearly over ``write_ramp_steps`` from ``start`` (a warm-started encoder: undamped, random task tokens shift its
-      features ~40% before any training);
-    * ``moe_loss``: the MoE load-balancing term of the last forward, weighted by ``moe.aux_weight`` (0 without MoE),
-      averaged for the log as ``moe`` (1 = even routing; it rises towards the expert count as routing collapses).
-    A model without task tokens or MoE makes every call a no-op."""
+      features ~40% before any training).
+    A model without task tokens makes every call a no-op."""
 
-    def __init__(self, model: BrainQuery, cfg_model: dict, trained: list[int], device: torch.device):
+    def __init__(self, model: BrainQuery, cfg_model: dict, trained: list[int]):
         self.model = model
         tt = cfg_model.get("task_tokens") or {}
         self.bias0, self.ramp = float(tt.get("write_bias", 10.0)), int(tt.get("write_ramp_steps", 2000))
         if model.tokens:
             model.set_token_tasks(trained)
-        self.moe_w = float((cfg_model.get("moe") or {}).get("aux_weight", 0.05)) if model.backbone.moe_blocks else 0.0
-        self.moe_sum, self.moe_cnt = torch.zeros((), device=device), 0
 
     def at_step(self, step: int, start: int = 0) -> None:
         if self.model.tokens:
             self.model.backbone.task_write_bias = self.bias0 * max(0.0, 1.0 - (step - start) / max(self.ramp, 1))
-
-    def moe_loss(self) -> torch.Tensor | float:
-        if not self.moe_w:
-            return 0.0
-        aux = self.model.backbone.moe_aux()
-        self.moe_sum += aux.detach()
-        self.moe_cnt += 1
-        return self.moe_w * aux
-
-    def log_extras(self) -> dict[str, str]:
-        if not self.moe_w:
-            return {}
-        out = {"moe": f"{(self.moe_sum / max(self.moe_cnt, 1)).item():.3f}"}
-        self.moe_sum.zero_()
-        self.moe_cnt = 0
-        return out

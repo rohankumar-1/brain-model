@@ -156,8 +156,6 @@ def _multitask_defaults() -> dict[str, Any]:
                   "task_tokens": {"enabled": True, "write_bias": 10.0, "write_ramp_steps": 2000, "share": False},
                   # study-level input (R14-F): {after_block, heads}: a study's co-registered scans fused inside the encoder
                   "fusion": None,
-                  # MoE MLPs in the top ``blocks`` encoder blocks (0 = off; tried 2026-10-26, no clear gain over tokens)
-                  "moe": {"blocks": 0, "experts": 5, "top_k": 2, "aux_weight": 0.05},
                   # regression head: ``scalar`` (smooth L1) or ``hlgauss`` (bins over the standardised range, Gaussian
                   # targets of sigma_ratio bin widths; switching a resumed run adds the head and resets the optimizer)
                   "regression": {"kind": "scalar", "bins": 80, "range": [-5.0, 5.0], "sigma_ratio": 0.75},

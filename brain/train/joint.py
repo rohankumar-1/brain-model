@@ -192,7 +192,6 @@ class Trainer(multitask.Trainer):
             self.log_tasks(per_task, has, b)
             self.d_sum += self.balancer.data_term.detach()
             self.d_cnt += 1
-        total = total + self.tokens.moe_loss()
         self.apply(total, step)
         res = {k: parts[k].detach() for k in self.ssl_keys}
         res["loss"] = total.detach()

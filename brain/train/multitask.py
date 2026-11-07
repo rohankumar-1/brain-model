@@ -86,7 +86,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
 
 def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
     """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``, the final
-    norm and heads at ``enc_mult``), the rest at 1 (also MoE routers, new in the encoder). Biases, norms, learned tokens
+    norm and heads at ``enc_mult``), the rest at 1. Biases, norms, learned tokens
     and the task tables get no weight decay."""
     depth = model.backbone.depth
     buckets: dict[tuple[float, float], list] = {}
@@ -96,9 +96,7 @@ def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, lay
             continue
         scale = 1.0
         if name.startswith("backbone."):
-            if ".mlp.router." in name:
-                pass                                                # new MoE router: no pretrained weights to keep
-            elif name.startswith("backbone.blocks."):
+            if name.startswith("backbone.blocks."):
                 scale = enc_mult * layer_decay ** (depth - 1 - int(name.split(".")[2]))
             elif name.startswith(tuple("backbone." + m for m in POST_BLOCKS)):
                 scale = enc_mult                                    # final norm / heads: the deepest block's LR
@@ -153,7 +151,7 @@ class Trainer(engine.Trainer):
         if self.raw.tokens and self.freeze_steps:
             # task tokens live inside the encoder: a no-grad encoder (freeze) would leave them untrained
             raise SystemExit("model.task_tokens needs optim.freeze_steps=0")
-        self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids], dev)
+        self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids])
         groups = self.reg.groups
         gw = tk.get("group_weights") or {}
         self.balancer = Balancer(len(self.reg), cfg["loss"].get("balance", "ema"),
@@ -278,7 +276,6 @@ class Trainer(engine.Trainer):
         with torch.autocast(**self.amp):
             out = self.net(*args, **kw)
         total, per_task, has = self.task_loss(out, b, pairs)
-        total = total + self.tokens.moe_loss()
         self.apply(total, step)
         self.log_tasks(per_task, has, b)
         return {"loss": total.detach(), "k": (b["task"] >= 0).float().sum(1).mean()}
@@ -385,7 +382,7 @@ class Trainer(engine.Trainer):
             self.aux_sum.zero_()
             self.aux_cnt.zero_()
             out.update({c: (f"{mean[i]:.4f}" if n[i] else "-") for i, c in enumerate(("tokmap", "slabmil"))})
-        return {**out, **self.tokens.log_extras()}
+        return out
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:

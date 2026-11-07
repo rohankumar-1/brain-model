@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 from typing import Sequence
 
@@ -70,44 +69,6 @@ class SwiGLU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         a, b = self.w12(x).chunk(2, dim=-1)
         return self.w3(F.silu(a) * b)
-
-
-class MoEMLP(nn.Module):
-    """Mixture-of-experts MLP (top-k routing, Switch load balancing) for the top blocks (OMNI, arXiv 2610.12574).
-
-    Built from a block's MLP: every expert starts as a copy of it and the top-k gates sum to 1, so a trained block
-    computes exactly what it did; the experts then diverge on the tokens they are sent. ``aux`` is the last forward's
-    load-balancing loss, ``n * sum_e f_e P_e`` (1 when tokens and router mass are spread evenly)."""
-
-    def __init__(self, mlp: nn.Module, dim: int, n_experts: int = 5, top_k: int = 2):
-        super().__init__()
-        self.experts = nn.ModuleList(copy.deepcopy(mlp) for _ in range(int(n_experts)))
-        self.router = nn.Linear(dim, int(n_experts), bias=False)
-        nn.init.normal_(self.router.weight, std=0.02)
-        self.top_k = int(top_k)
-        self.aux: torch.Tensor | None = None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = x.reshape(-1, x.shape[-1])
-        probs = torch.softmax(self.router(h).float(), dim=-1)                # (M, E)
-        w, idx = probs.topk(self.top_k, dim=-1)
-        w = w / w.sum(-1, keepdim=True)
-        out = None
-        for e, expert in enumerate(self.experts):
-            rows, slot = (idx == e).nonzero(as_tuple=True)
-            if rows.numel() == 0:
-                continue
-            y = expert(h[rows])
-            y = y * w[rows, slot].unsqueeze(-1).to(y.dtype)
-            if out is None:
-                out = torch.zeros(h.shape[0], y.shape[-1], dtype=y.dtype, device=h.device)
-            out = out.index_add(0, rows, y.to(out.dtype))
-        if out is None:
-            out = torch.zeros_like(h)
-        n = len(self.experts)
-        frac = torch.zeros(n, device=h.device).index_add(0, idx.flatten(), torch.ones(idx.numel(), device=h.device))
-        self.aux = n * (frac / idx.numel() * probs.mean(0)).sum()
-        return out.reshape(*x.shape[:-1], out.shape[-1])
 
 
 def drop_path(x: torch.Tensor, p: float, training: bool) -> torch.Tensor:
@@ -430,25 +391,6 @@ class BrainEncoder(nn.Module):
             dev = next(self.parameters()).device
             self.fusion = SequenceFusion(self.embed_dim, int(heads or self.blocks[0].attn.heads)).to(dev)
         self.fuse_after = int(after_block)
-
-    def enable_moe(self, blocks: int, n_experts: int = 5, top_k: int = 2) -> None:
-        """Mixture-of-experts MLPs in the last ``blocks`` blocks (``MoEMLP``), each expert a copy of the block's MLP:
-        on a trained encoder the outputs are unchanged until the experts diverge. Blocks already converted stay."""
-        for blk in self.blocks[len(self.blocks) - int(blocks):]:
-            if not isinstance(blk.mlp, MoEMLP):
-                p = next(blk.mlp.parameters())
-                blk.mlp = MoEMLP(blk.mlp, self.embed_dim, n_experts, top_k).to(device=p.device, dtype=p.dtype)
-
-    @property
-    def moe_blocks(self) -> list[MoEMLP]:
-        return [blk.mlp for blk in self.blocks if isinstance(blk.mlp, MoEMLP)]
-
-    def moe_aux(self) -> torch.Tensor:
-        """Mean load-balancing loss of the MoE blocks over the last forward (0 without MoE)."""
-        aux = [m.aux for m in self.moe_blocks if m.aux is not None]
-        if not aux:
-            return torch.zeros((), device=next(self.parameters()).device)
-        return torch.stack(aux).mean()
 
     @property
     def n_prefix(self) -> int:
