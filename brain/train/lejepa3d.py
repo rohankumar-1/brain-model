@@ -141,7 +141,6 @@ def synthetic_loader(cfg: dict, batch_size: int, seed: int):
 
 class Trainer(engine.Trainer):
     unit = "vol"
-    synthetic_ok = True
 
     def __init__(self, rt, cfg, args, ckpt, step):
         super().__init__(rt, cfg, args, ckpt, step)

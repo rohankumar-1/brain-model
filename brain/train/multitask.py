@@ -123,7 +123,6 @@ def remap_tasks(state: dict, old_ids: list[str], new_ids: list[str], template: d
 
 class Trainer(engine.Trainer):
     unit = "vol"
-    synthetic_ok = True
 
     def __init__(self, rt, cfg, args, ckpt, step):
         super().__init__(rt, cfg, args, ckpt, step)

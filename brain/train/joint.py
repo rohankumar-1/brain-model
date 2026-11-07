@@ -84,7 +84,6 @@ class JointNet(nn.Module):
 
 class Trainer(multitask.Trainer):
     unit = "vol"
-    synthetic_ok = True
 
     def __init__(self, rt, cfg, args, ckpt, step):
         self.j = cfg.get("joint") or {}
