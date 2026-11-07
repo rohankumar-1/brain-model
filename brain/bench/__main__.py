@@ -22,7 +22,8 @@ def main() -> None:
     r.add_argument("--tasks", nargs="*", default=None, help="a subset of the benchmark tasks")
     r.add_argument("--full", action="store_true",
                    help="BrainQuery checkpoints: also segmentation transfer, token probes, own heads, few-shot")
-    r.add_argument("--submit", action="store_true", help="Slurm jobs (jobs/eval_run.sbatch, --jobs of them) instead of here")
+    r.add_argument("--submit", action="store_true",
+                   help="Slurm jobs (jobs/eval_run.sbatch, --jobs of them) instead of here")
     r.add_argument("--dependency", default=None, help="Slurm dependency for --submit, e.g. afterok:123")
     r.add_argument("--jobs", type=int, default=4, help="parallel GPU jobs for --submit (1: the tasks run in turn, "
                    "for big token caches such as ADNI's)")

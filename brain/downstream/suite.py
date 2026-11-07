@@ -6,8 +6,8 @@
     jobs/submit_eval.sh runs/x/last.pt                            # one Slurm job over the entries, then db ingest
 
 Entries: every frozen classification/regression task (``brain.downstream.run_suite``: linear and MLP heads on the
-mean token, a linear probe on octant means, the 3D conv probe), every segmentation task (``brain.downstream.seg3d``) and ``probe3d``
-(lesion / fingerprint / location token probes with pixel and random-init controls). Segmentation and probe3d read our
+mean token, a linear probe on octant means, the 3D conv probe), every segmentation task (``brain.downstream.seg3d``)
+and ``probe3d`` (lesion / fingerprint / location token probes with pixel and random-init controls). Segmentation and probe3d read our
 3D encoders' token grids, so they take checkpoints only. Every evaluator writes experiment records
 (``brain.downstream.records``).
 """

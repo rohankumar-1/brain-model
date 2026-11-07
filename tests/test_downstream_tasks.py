@@ -1,4 +1,4 @@
-"""Every frozen and seg task name loads; the benchmark readouts are linear / mlp / spatial. python -m tests.test_downstream_tasks"""
+"""Every frozen and seg task name loads; the pooled readouts. python -m tests.test_downstream_tasks"""
 
 from __future__ import annotations
 

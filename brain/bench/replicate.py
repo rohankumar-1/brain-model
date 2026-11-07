@@ -11,8 +11,8 @@ seed where the paper's are not published). Deviations: features without the pape
     python -m brain.bench.replicate --model brainiac [--targets mci_oasis1 ...] [--seeds 5]
     python -m brain.bench.replicate --paper brainiac --model BQ-R10    # another model under that paper's protocol
 
-Any model can run a paper's targets, which compares it with the paper's numbers on the same test scans. Encoders trained with scan metadata get it as unknown here (it names the contrast: the answer of
-sequence classification).
+Any model can run a paper's targets, which compares it with the paper's numbers on the same test scans. Encoders
+trained with scan metadata get it as unknown here (it names the contrast: the answer of sequence classification).
 """
 
 from __future__ import annotations
@@ -60,7 +60,8 @@ def pool(target: dict, vols: pd.DataFrame) -> pd.DataFrame:
 
 def global_feature(e, external: bool) -> np.ndarray:
     """One vector for a ``VolumeEmbedding``: a published model's global feature (``cls``, its adapter's ``pooled``),
-    else the mean of the foreground tokens (our task-token encoders have no trained CLS; ``run_suite.pooled_embedding``)."""
+    else the mean of the foreground tokens (our task-token encoders have no trained CLS; as
+    ``run_suite.pooled_embedding``)."""
     if external and e.cls is not None:
         return e.cls.float().cpu().numpy()
     tok, keep = e.tokens.float(), e.keep.bool()

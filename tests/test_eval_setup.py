@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import torch
 
 from brain.common.windowing import windows_for
 from brain.downstream.heads import make_logreg, make_ridge

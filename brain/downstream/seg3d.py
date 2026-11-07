@@ -218,7 +218,7 @@ def _wait_meta(path: Path, meta: Path, label: str, tries: int = 720) -> None:
 
 
 class Cache:
-    """``feats[i]`` are the tokens of volume ``i``; ``aug[row[i], k - 1]`` those of its training copy ``k`` (``AUG``)."""
+    """``feats[i]`` are the tokens of volume ``i``; ``aug[row[i], k - 1]`` those of its training copy ``k``."""
 
     def __init__(self, ids, feats, masks, aug=None, row=None):
         self.volume_ids, self.feats, self.masks, self.aug, self.row = ids, feats, masks, aug, row or {}
@@ -275,7 +275,7 @@ def build_cache(task: TaskBundle, enc: FrozenEncoder3D, ckpt: Path, slices_root:
 
     def encode_tok(vols, k):
         vs = [aug_volume(v, k) for v in vols]
-        toks = [enc.embed_tokens(vs[0], c, w, modality=mod)[0]] if len(vs) == 1 else list(enc.embed_volumes(vs, c, w, mod))
+        toks = [enc.embed_tokens(vs[0], c, w, mod)[0]] if len(vs) == 1 else list(enc.embed_volumes(vs, c, w, mod))
         return torch.cat(toks, -1).half().cpu().numpy()
 
     with ThreadPoolExecutor(threads) as pool:

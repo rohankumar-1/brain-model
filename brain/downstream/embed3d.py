@@ -1,4 +1,4 @@
-"""Our frozen 3D encoders: load a checkpoint (``load_brain3d``) and embed full native volumes. Dropped tokens stay zero."""
+"""Our frozen 3D encoders: load a checkpoint (``load_brain3d``), embed full native volumes. Dropped tokens stay zero."""
 
 from __future__ import annotations
 
