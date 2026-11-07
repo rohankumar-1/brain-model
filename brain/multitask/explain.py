@@ -35,7 +35,7 @@ import torch
 import torch.nn.functional as F
 
 from brain.downstream.tasks import DEFAULT_VOLUMES
-from brain.multitask.data import gate_and_window
+from brain.multitask.data import gate_and_window, gate_cfg
 from brain.prep import store
 
 ROOT = DEFAULT_VOLUMES.parent
@@ -45,8 +45,7 @@ ROOT = DEFAULT_VOLUMES.parent
 def encode(model, cfg, image_zyx: np.ndarray, modality: str, device) -> tuple[dict, torch.Tensor, torch.Tensor]:
     raw = torch.from_numpy(np.ascontiguousarray(image_zyx, np.float32))[None, None].to(device)
     mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=device)
-    gate = (cfg.get("views") or {}).get("gate") or {}
-    x, keep = gate_and_window(raw, mod, tuple(model.backbone.patch_xyz), gate,
+    x, keep = gate_and_window(raw, mod, tuple(model.backbone.patch_xyz), gate_cfg(cfg),
                               in_chans=model.backbone.in_chans)
     with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
         enc = model.encode(x, keep)
@@ -147,7 +146,7 @@ def load_backbone(path: Path, device):
 
     ck = torch.load(path, map_location="cpu", weights_only=False)
     enc = load_brain3d(ck, device).model.to(device).eval().requires_grad_(False)
-    return enc, ((ck.get("config") or {}).get("views") or {}).get("gate") or {}
+    return enc, gate_cfg(ck.get("config") or {})
 
 
 # ------------------------------------------------------------------------------------------------ token colours

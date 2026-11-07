@@ -725,8 +725,8 @@ def foreground_tokens(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dic
 
 
 def gate_cfg(cfg: dict) -> dict:
-    """The run's token gate: ``views.gate`` (what the frozen benchmark reads too), else the legacy ``model.gate``."""
-    return (cfg.get("views") or {}).get("gate") or (cfg.get("model") or {}).get("gate") or {}
+    """The run's token gate: ``views.gate`` (what the frozen benchmark reads too)."""
+    return (cfg.get("views") or {}).get("gate") or {}
 
 
 def canonical_window(raw: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
