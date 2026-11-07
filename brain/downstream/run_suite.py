@@ -55,8 +55,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--volumes-csv", type=Path, default=None, help="volume table (default slices_zarr/volumes.csv)")
     p.add_argument("--window", choices=["canonical", "multi", "shifted"], default="multi",
                    help="asinh window(s) of our encoders (registry models normalise intensities themselves)")
-    p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=None,
-                   help="3D tokens: also fit the 3D-conv probe (tok_conv) on the full-width grid (default: axial only)")
+    p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=True,
+                   help="also fit the 3D-conv probe (tok_conv) on the token grid (brain.bench run turns it off for "
+                        "tasks whose pinned readout is another head)")
     p.add_argument("--readout", choices=["pooled", "axial", "raw"], default="pooled",
                    help="pooled (benchmark v3): a linear probe and BrainDINO's MLP head on one embedding per volume "
                         "(the mean foreground token), plus a linear probe on the 8 octant means of a 3D token grid "
@@ -242,7 +243,7 @@ def main() -> None:
     multilabel = task.task_type == "multilabel"
     grid = token_grid_zyx(emb["mus"].shape[1])
     use_readout = args.readout == "axial" and grid is not None
-    token_heads = args.token_heads if args.token_heads is not None else args.readout == "axial"
+    token_heads = args.token_heads
     if args.readout == "pooled":
         vec, pooled_kind = pooled_embedding(emb)
         p_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((len(vec), 1), dtype=bool)}

@@ -73,8 +73,7 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
     from brain.downstream.suite import command
 
     b = load()
-    # the suite readout is part of the protocol (v2: axial PCA views + tok_conv; v3: pooled linear + mlp)
-    extra = ["--readout", str(b.raw.get("readout", "axial")), *(extra or [])]
+    extra = list(extra or [])
     ref_model = resolve_model(model)
     ref = resolve_model(b.reference)
     todo, other = plan(ref_model, ref, b, tasks=tasks, full=full)
