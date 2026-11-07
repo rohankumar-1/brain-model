@@ -1,8 +1,8 @@
 """3D LeJEPA pretraining on native-grid crops: pooled crop agreement, dense token agreement, SIGReg.
 
-  python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml
+  python -m brain.train lejepa3d --config configs/lejepa3d/v4_scratch.yaml
   python -m brain.train lejepa3d --synthetic --max-steps 8        # CPU smoke run, no store needed
-  torchrun --standalone --nproc_per_node=4 -m brain.train lejepa3d --config configs/lejepa3d/small.yaml
+  torchrun --standalone --nproc_per_node=4 -m brain.train lejepa3d --config configs/lejepa3d/v4_scratch.yaml
 """
 
 from __future__ import annotations

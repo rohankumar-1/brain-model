@@ -1,6 +1,6 @@
 """Task-conditioned multitask post-training of an SSL encoder (brain.multitask) on whole volumes.
 
-    python -m brain.train multitask --config configs/multitask/tokens.yaml
+    python -m brain.train multitask --config configs/multitask/r14.yaml
     python -m brain.train multitask --synthetic --max-steps 4          # CPU smoke run on phantoms
 
 The encoder starts from ``model.init_from`` (its architecture and token grid are copied into this run's config, so

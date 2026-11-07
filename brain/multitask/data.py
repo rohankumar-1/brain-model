@@ -1066,17 +1066,11 @@ def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:
     return pd.read_parquet(d / "labels.parquet"), json.loads((d / "stats.json").read_text())
 
 
-LEGACY_STATS = "stats_legacy.json"     # the label table's regression stats before the 2026-10-25 rebuild
-
-
 def checkpoint_stats(saved: dict | None, labels_dir: str | Path, current: dict) -> dict:
-    """The regression-target normalisation a checkpoint was trained with: ``saved`` in it (``label_stats``, runs from
-    2026-10-25 on), else the frozen pre-rebuild copy (``stats_legacy.json``), else the label table's current stats.
-    The loader standardises targets with these: other stats than the training ones bias the comparison."""
-    if saved:
-        return dict(saved)
-    legacy = Path(labels_dir) / LEGACY_STATS
-    return json.loads(legacy.read_text()) if legacy.exists() else current
+    """The regression-target normalisation a checkpoint was trained with: ``saved`` in it (``label_stats``; every kept
+    checkpoint has them), else the label table's current stats. The loader standardises targets with these: other
+    stats than the training ones bias the comparison."""
+    return dict(saved) if saved else current
 
 
 class SyntheticMultitask(Dataset):
