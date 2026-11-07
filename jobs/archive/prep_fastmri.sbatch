@@ -2,9 +2,9 @@
 # Format-6 prep of the fastMRI+ annotated brain scans (brain.prep.sources.fastmri): stage the kept coil-combined
 # images from pool/datasets/fastmri_brain/fastmri_plus_*.zip onto this node's local disk as images (brain.prep.fastmri,
 # geometry by convention; writes labels/fastmri_patients.csv for patient-level splits), prep, delete the copy.
-# Data use agreement (NYU fastMRI): owner-only files (umask 077). Run after jobs/fetch_fastmri.sbatch.
-#   sbatch jobs/prep_fastmri.sbatch
-#   sbatch --export=ALL,LIMIT=4,TAG=pilot jobs/prep_fastmri.sbatch
+# Data use agreement (NYU fastMRI): owner-only files (umask 077). Run after jobs/archive/fetch_fastmri.sbatch.
+#   sbatch jobs/archive/prep_fastmri.sbatch
+#   sbatch --export=ALL,LIMIT=4,TAG=pilot jobs/archive/prep_fastmri.sbatch
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-fastmri
 #SBATCH -N 1

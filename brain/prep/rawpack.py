@@ -166,7 +166,7 @@ def encode_nifti(path: str) -> tuple[bytes, dict] | None:
     from brain.prep import archive
 
     try:
-        _, blob, meta = archive._encode_one(path)
+        _, blob, meta = archive.encode_file(path)
         img = nib.load(path)
         raw = img.dataobj
         src = np.asanyarray(raw.get_unscaled() if hasattr(raw, "get_unscaled") else raw)

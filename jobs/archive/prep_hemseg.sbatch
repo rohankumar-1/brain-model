@@ -1,6 +1,6 @@
 #!/bin/bash
 # Format-6 prep of HemSeg-500 (brain.prep.sources.hemseg): 519 RSNA ICH studies with IPH / IVH masks; masks staged from
-# the pool archive onto node-local disk (never scratch). Then jobs/index_v6.sbatch and jobs/multitask_labels.sbatch.
+# the pool archive onto node-local disk (never scratch). Then jobs/index_append.sbatch and jobs/multitask_labels.sbatch.
 #   sbatch jobs/prep_hemseg.sbatch      (images: the listed DICOM slices, read from the RSNA archive on pool)
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu

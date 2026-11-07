@@ -4,8 +4,8 @@
 # annotated scans are kept, as coil-combined images, in pool/datasets/fastmri_brain/fastmri_plus_<batch>.zip.
 # Three chain jobs (the per-user submit limit rules out a 13-task array), chain K taking archives K, K+3, ...; a
 # finished batch (its "done" marker in work/fastmri) is skipped on resubmission. Data use agreement: owner-only files.
-#   for k in 0 1 2; do sbatch --export=ALL,CHAIN=$k,CHAINS=3 jobs/fetch_fastmri.sbatch; done
-#   sbatch --export=ALL,ONLY="13 14 15" jobs/fetch_fastmri.sbatch    # test_full 0-2, only if scans are still missing
+#   for k in 0 1 2; do sbatch --export=ALL,CHAIN=$k,CHAINS=3 jobs/archive/fetch_fastmri.sbatch; done
+#   sbatch --export=ALL,ONLY="13 14 15" jobs/archive/fetch_fastmri.sbatch    # test_full 0-2, only if scans are still missing
 #SBATCH -p mit_data_transfer,mit_normal
 #SBATCH --job-name=fetch-fastmri
 #SBATCH -N 1

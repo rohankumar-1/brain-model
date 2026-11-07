@@ -2,12 +2,12 @@
 # Format-6 prep of UCSF-PDGM (brain.prep.sources.ucsf_pdgm): 501 scans x T1 / T1c / T2 / FLAIR with the shipped brain
 # masks and tumour segmentations, staged from pool onto node-local disk (never scratch). Held out of pretraining
 # (index.HELD_OUT); patients also in BraTS 2021 share their BraTS twin's dedup_key (index.ucsf_pdgm_key).
-# Then the index rebuild (jobs/index_v6.sbatch) and the downstream labels.
-#   sbatch --export=ALL,LIMIT=3 jobs/prep_ucsf_pdgm.sbatch     # pilot: 3 scans per sequence (kept; the full run skips them)
-#   sbatch jobs/prep_ucsf_pdgm.sbatch
+# Then the index rebuild (jobs/index_append.sbatch) and the downstream labels.
+#   sbatch --export=ALL,LIMIT=3 jobs/archive/prep_ucsf_pdgm.sbatch     # pilot: 3 scans per sequence (kept; the full run skips them)
+#   sbatch jobs/archive/prep_ucsf_pdgm.sbatch
 # EXTRA adds brain.prep.run arguments (no commas). 2026-10-29 re-prep of the T1c / T2 / FLAIR volumes onto their T1's
 # registration (pipeline.shared_registration; zips without reg_shared are stale):
-#   sbatch --export=ALL,EXTRA="--cases logs/ucsf_pdgm_siblings.txt --force" jobs/prep_ucsf_pdgm.sbatch
+#   sbatch --export=ALL,EXTRA="--cases logs/ucsf_pdgm_siblings.txt --force" jobs/archive/prep_ucsf_pdgm.sbatch
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-ucsf-pdgm

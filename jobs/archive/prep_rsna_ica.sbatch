@@ -4,8 +4,8 @@
 # DICOM extracted to node-local temp. dcm2niix reader (enhanced multi-frame MR) with the SimpleITK fallback; CTAs
 # whose stored pixels are already HU under a stale rescale header are undone (dicom.fix_ct_rescale, docs/prep.md).
 # Pilot: jobs/archive/rsna_ica_pilot.sbatch. Four shards; re-submit to resume (done cases are skipped).
-#   sbatch jobs/prep_rsna_ica.sbatch
-#   sbatch --array=0 --export=ALL,N=1,EXTRA="--cases logs/rsna_ica_redo.txt --force" jobs/prep_rsna_ica.sbatch
+#   sbatch jobs/archive/prep_rsna_ica.sbatch
+#   sbatch --array=0 --export=ALL,N=1,EXTRA="--cases logs/rsna_ica_redo.txt --force" jobs/archive/prep_rsna_ica.sbatch
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-rsna-ica
 #SBATCH --array=0-3

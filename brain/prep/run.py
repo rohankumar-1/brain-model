@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import multiprocessing as mp
 import os
 import queue
@@ -37,20 +36,13 @@ from brain.prep import pipeline, sources, store
 STAGES = ("read", "n4", "center", "register", "resample", "brainmask", "intensity")
 
 
-def _plain(v):
-    v = v.item() if hasattr(v, "item") else v
-    return None if isinstance(v, float) and not math.isfinite(v) else v
-
-
 def read_manifests(root: Path) -> pd.DataFrame:
     df = pd.concat([pd.read_json(f, lines=True) for f in sorted(root.glob("manifest_*.jsonl"))], ignore_index=True)
     return df.drop_duplicates(["dataset", "case_id"], keep="last", ignore_index=True)  # a reprocessed case counts once
 
 
 def discover(names: list[str]) -> list[sources.Case]:
-    d = sources.DATASETS
-    found = {"cq500": lambda: sources.cq500(d / "seg_cq500" / "volumes", d / "cq500"),
-             "cq500_dicom": sources.cq500_dicom,
+    found = {"cq500": sources.cq500_dicom, "seg_cq500": sources.seg_cq500,
              "oasis": sources.oasis, "brats": sources.brats, "rsna": sources.rsna,
              "abide": sources.abide1, "ixi": sources.ixi, "isles": sources.isles22, "atlas": sources.atlas,
              "pixar": sources.pixar, "piop1": sources.piop1, "piop2": sources.piop2, "id1000": sources.id1000,
@@ -274,7 +266,7 @@ def run_gpu(pool, todo: list, root: Path, z_anchor: str, opts, out, batch: int, 
             if n_ok == 0 and n_err >= ERROR_BREAKER:
                 print(f"[run] {n_err} errors and no success: stopping (last: {r.get('error', '')[-200:]!r})", flush=True)
                 stopped = True
-            out.write(json.dumps({**{key: _plain(v) for key, v in r.items()}, "written_at": time.time()}) + "\n")
+            out.write(json.dumps({**{key: store.plain(v) for key, v in r.items()}, "written_at": time.time()}) + "\n")
             out.flush()
             if k % 50 == 0 or r["status"] == "error":
                 print(f"[run] {k}/{len(todo)} {r['dataset']}/{r['case_id']} {r['status']} "
@@ -433,7 +425,7 @@ def main() -> None:
                 complete = run_gpu(pool, todo, a.root, a.z_anchor, opts, out, a.mask_batch, guard)
                 continue
             for k, row in enumerate(pool.imap_unordered(work, [(c, a.root, a.z_anchor, opts) for c in todo]), 1):
-                out.write(json.dumps({**{k: _plain(v) for k, v in row.items()}, "written_at": time.time()}) + "\n")
+                out.write(json.dumps({**{k: store.plain(v) for k, v in row.items()}, "written_at": time.time()}) + "\n")
                 out.flush()
                 if k % 50 == 0 or row["status"] == "error":
                     print(f"[run] {k}/{len(todo)} {row['dataset']}/{row['case_id']} {row['status']} "

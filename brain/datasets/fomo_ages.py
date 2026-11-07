@@ -20,10 +20,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
+from brain.common.paths import DATASETS
 from brain.downstream.tasks import label_file
 
 FCP = "https://fcp-indi.s3.amazonaws.com"
-MAPPING = "/home/roku/orcd/pool/datasets/fomo260k/mapping.tsv"
+MAPPING = DATASETS / "fomo260k" / "mapping.tsv"
 
 
 def _get(url: str) -> str | None:

@@ -1,6 +1,6 @@
 # Preprocessing (store format 6)
 
-`python -m brain.prep.run --root STORE --datasets cq500,oasis,brats,rsna --template $BRAIN_TEMPLATE --shard 0/8 --workers 16`, usually through `jobs/prep_v6.sbatch` (and `jobs/prep_v6_local.sbatch` for archives unpacked on node-local disk). Then `python -m brain.prep.index --root STORE --manifests "manifest_v6_*.jsonl"` builds `volumes.csv`, `subjects.csv` and `slices.parquet`.
+`python -m brain.prep.run --root STORE --datasets cq500,oasis,brats,rsna --template $BRAIN_TEMPLATE --shard 0/8 --workers 16`, usually through `jobs/prep_v6.sbatch` (`jobs/prep_v6_local.sbatch` for the FOMO / BraTS archives unpacked on node-local disk, `jobs/prep_v6_staged.sbatch` for datasets packed as `<name>.raw.zip` on pool). Then `python -m brain.prep.index --root STORE --manifests "manifest_v6_*.jsonl"` builds `volumes.csv` and `subjects.csv` (subject splits inherited from the existing index; see "Rebuild order" below).
 
 ## Per volume (`brain/prep/pipeline.py`)
 
@@ -9,7 +9,7 @@
 3. **Center** (`centering`): intracranial blob (CT) or head distance-transform core (MRI) on a 4 mm copy. This is the start pose for registration, or the grid center when registration is off.
 4. **Register** (`registration`, default `affine`): Mattes-MI rigid then affine fit of the scan to a skull-on T1 template (MNI152 1 mm; pass `--template` or set `BRAIN_TEMPLATE`, optionally `--template-brain`). Modality-agnostic, so CT and every MRI sequence land in one space. The fit is accepted only if singular values stay in [0.65, 1.5], rotation is at most 35 degrees and the metric improves; otherwise the rigid fit, then the centering translation, is used and `reg_ok` is false. Nothing is dropped. `--registration rigid` keeps head size; `none` reproduces format 4 placement.
 5. **Resample once** onto a 256 x 256 x 128 mm, 1 mm grid (anti-aliased where the source is finer), through the fitted transform. Dataset masks use nearest neighbour through the same transform.
-6. **Native units**: CT in HU; MRI as a robust z-score with background -6 (`intensity`). With a brain mask, the median/MAD come from parenchyma rather than from the whole head.
+6. **Native units**: CT in HU; MRI as a robust z-score with background -6 (`intensity`). The median/MAD come from the brain mask when it passed QC, or failed only the template-Dice check (fraction within `brainmask.PLAUSIBLE_FRAC`: partial slabs, infants); otherwise from the whole head (`pipeline.mri_stats_on_brain`). The 2026-11-03 store got this rule by a post-prep pass (`stats_from = brain_restat`); prep now applies it directly.
 7. **Brain mask** (`brainmask`, default `auto`): SynthStrip when `mri_synthstrip` is installed (or `BRAIN_SYNTHSTRIP` names it), else a classical mask (CT: soft-tissue opening and fill; skull-on MRI: head eroded 14 mm; known skull-stripped releases, `Case.stripped`: the foreground). A mask shipped with the dataset wins. The classical masks are approximate, good for statistics and skull dropout, not for anatomy.
 8. **QC**: foreground fraction, centering agreement, registration pose, brain mask fraction; `qc_flag` volumes are excluded and listed in `excluded.csv`.
 
@@ -20,10 +20,6 @@
 ## Resume and failures
 
 Manifests are per shard. Cases with status `ok` or `flagged` are not redone; `error` cases are retried. A failed case never leaves a partial zip.
-
-## Check on your own data first
-
-`python -m brain.prep.pilot --dataset cq500 --n 20 --template $BRAIN_TEMPLATE` writes a QC figure per case (source slice with the crop box, histograms, windows, mask and lesion contours, registration and mask summaries).
 
 ## Registration backends
 
@@ -72,12 +68,38 @@ PART=brats SHARD_N=4 REG_BACKEND=torch MASK_BATCH=4 EXTRA_ARGS="--require-attr r
 ```
 
 Manifest rows carry `written_at`; when a case appears in several manifests the index keeps the newest row (rows from
-before timestamps prefer the one with a stored transform). After all prep: `jobs/index_v6.sbatch` (CPU, minutes:
-`--no-slices` skips the 2D slice table; the 2D trainers that read it were removed on 2026-10-24), `jobs/archive/store_cleanup_v6.sbatch` (drops
-non-format-6 zips, old manifests, index backups and retired folders) and `jobs/archive/verify_v6.sbatch`, which checks every
-indexed volume (format 6, stored transform, brain array, label masks) and writes `excluded.csv` (cases whose latest
-manifest row is flagged or errored). Raw archives are packed last (`jobs/archive/rawpack_pool.sbatch`), because phase B reads
-raw data from pool.
+before timestamps prefer the one with a stored transform). See "Rebuild order" below for what follows prep.
+
+### Rebuild order
+
+1. **Prep**: `jobs/prep_v6.sbatch` (phases A / B), `jobs/prep_v6_local.sbatch` (BraTS incl. GoAT, HBN, infants) and
+   `jobs/prep_v6_staged.sbatch` (raw-packed datasets, e.g. `seg_cq500`); the one-off cohorts (ADNI / PPMI, fastMRI+,
+   SynthRAD, UCSF-PDGM, UPENN-GBM, RSNA-ICA, Pedi-Cranial-CT) through their jobs in `jobs/archive/`. Each prep job
+   ends with the content dedup (`jobs/dedup_content.sbatch`, `brain.prep.dedup --content`), which lists copies in
+   `labels/pool_drop/duplicates.csv`.
+2. **Subject tables** the index reads for its `dedup_key`: `python -m brain.prep.subjects rsna-patients`
+   (`labels/rsna_patients.csv`) and `python -m brain.prep.subjects glioma-twins` (the UCSF-PDGM / UPENN-GBM BraTS twin
+   keys in their pool `meta/` folders); `brain.prep.fastmri` writes `labels/fastmri_patients.csv` while staging.
+3. **Index**: `sbatch --export=ALL,FULL=1 jobs/index_append.sbatch` (CPU, minutes): backs up `volumes.csv` /
+   `subjects.csv`, rebuilds in a node-local work dir inheriting every existing split, and installs by atomic rename.
+   Without `FULL=1` it appends only volumes the index lacks.
+4. **Check**: `python -m brain.prep.verify_store --root STORE` (`jobs/archive/verify_v6.sbatch`) checks every indexed
+   volume (format 6, stored transform, brain array, label masks) and writes `excluded.csv`.
+5. **Post-prep labels** (each reads the index and the stored volumes):
+   - `brain.prep.synthseg_run` (`jobs/synthseg.sbatch`) and `brain.prep.wmh_run` (`jobs/wmh.sbatch`): anatomy and WMH maps;
+   - `brain.prep.synthseg_qc`: SynthSeg QC-net scores (`labels/synthseg/qc_*.csv`);
+   - `brain.prep.rsna_slices`: RSNA per-slice labels and positions (`labels/rsna_slices/rsna_slices.parquet`);
+   - `brain.prep.rsna_ica_vessels`: RSNA-ICA vessel and aneurysm masks;
+   - `brain.prep.rsna_bleed_masks` (`ts`, `model`, `validate`, `fuse`): fused RSNA bleed pseudo-labels (needs `rsna_slices`);
+   - `brain.prep.fastmri_labels`: fastMRI+ box annotations as masks;
+   - `brain.prep.live_targets`: per-volume live targets (`labels/live/`);
+   then `jobs/multitask_labels.sbatch` (`brain.multitask.labels`).
+6. **Data QC and decontamination**: `brain.prep.data_qc scans` / `masks` (shards in `labels/data_qc/`), `report`
+   and `verify` (CSVs in `runs/diagnostics/data_qc/`), then `python -m brain.prep.decontam bench-exclude`
+   (`configs/bench/exclude_v3.csv` plus the git-ignored `exclude_v3.private.csv` for ADNI / PPMI rows) and
+   `python -m brain.prep.decontam train-exclude` (`configs/multitask/train_exclude_r15.csv`).
+
+Raw archives are packed last (`jobs/archive/rawpack_pool.sbatch`), because prep reads raw data from pool.
 
 ### Known issue: RSNA DICOM assembly
 
@@ -170,7 +192,7 @@ and PIXAR evaluation cohorts and would need per-study filtering.
 redistribution): 4,348 labelled series, CTA 1,808 / MRA 1,252 / T2 983 / T1 post-contrast 305; per-series aneurysm
 presence and 13 locations, 2,254 aneurysm points (`train_localizers.csv`, pixel x / y on one SOP), 178 vessel
 segmentations. `sources.rsna_ica` reads series straight from the zip by byte offsets (index cached in
-`work/rsna_ica`); prep needs `BRAIN_DICOM_READER=dcm2niix` (some MR series are one enhanced multi-frame file), with
+`work/rsna_ica`); its cases read through dcm2niix (`Case.dicom_reader`; some MR series are one enhanced multi-frame file), with
 the SimpleITK reader as fallback when dcm2niix refuses a series (derived / secondary CTAs, malformed overlay tags).
 Pilot (`jobs/archive/rsna_ica_pilot.sbatch`, 30 series per modality): MRA 30/30 (median template brain Dice 0.93 despite the
 slab), T2 30/30, T1 post 27/30 + 3 reader fallbacks, CTA 12 ok + 4 reader fallbacks + 14 flagged.
@@ -185,7 +207,10 @@ rescaling, if air sits near -2000 rather than -1000, ignore the rescale tags. Un
 - AISD (CT) is distributed pre-windowed: stored values are clipped at 80 HU, so bone is flat (other CT cohorts reach
   1500-2900 HU).
 - INSTANCE (CT) volumes are cropped short of the whole head (SynthSeg full field of view on 12% of a sample).
-- CQ500 arrives as NIfTI converted upstream; its affines already encode gantry tilt as a rotated orthogonal frame.
+- CQ500 (`cq500`) is read from the original DICOMs (`pool/datasets/cq500_dicom`, `sources.cq500_dicom`) through
+  dcm2niix, which de-shears its gantry tilt; Seg-CQ500 (`seg_cq500`) is the third-party NIfTI subset with ICH and brain
+  masks (`sources.seg_cq500`). The DICOM reader is chosen per source (`Case.dicom_reader`: dcm2niix for CQ500,
+  RSNA-ICA and ADNI / PPMI; SimpleITK for RSNA ICH), with `BRAIN_DICOM_READER` as the fallback.
 
 ## Anatomy labels: SynthSeg-robust 2.0 (`brain/prep/synthseg.py`)
 

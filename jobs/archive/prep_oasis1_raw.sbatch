@@ -1,7 +1,7 @@
 #!/bin/bash
 # Re-prep OASIS-1 from its raw MPRAGE (brain.prep.sources.oasis), staged from the pool archive onto local disk.
 #   PILOT=6 sbatch jobs/prep_oasis1_raw.sbatch      # first 6 sessions into runs/diagnostics/oasis1_pilot (not the store)
-#   sbatch jobs/prep_oasis1_raw.sbatch              # all sessions into the store (--force), then jobs/index_v6.sbatch
+#   sbatch jobs/prep_oasis1_raw.sbatch              # all sessions into the store (--force), then jobs/index_append.sbatch
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-oasis1

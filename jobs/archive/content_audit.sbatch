@@ -3,7 +3,7 @@
 # BraTS twins and evaluation-CT (CQ500, INSTANCE, AISD, ISLES24) copies anywhere in the store, incl. RSNA-ICA. Lists
 # nothing for dropping and deletes nothing.
 #
-#   sbatch jobs/content_audit.sbatch
+#   sbatch jobs/archive/content_audit.sbatch
 #SBATCH -p pi_dbertsim,mit_preemptable
 #SBATCH --job-name=content-audit
 #SBATCH -N 1

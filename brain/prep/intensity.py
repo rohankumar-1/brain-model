@@ -7,16 +7,20 @@ import SimpleITK as sitk
 from scipy import ndimage as ndi
 from skimage.filters import threshold_otsu
 
-CT_MIN, CT_MAX = -1024.0, 3071.0
-MRI_FLOOR, MRI_LO, MRI_HI = -6.0, -5.0, 20.0  # background sentinel, tissue clip range
-FLOOR = {"ct": CT_MIN, "mri": MRI_FLOOR}
+from brain.common.windowing import FLOOR  # background value of stored volumes: CT air floor (HU), MRI sentinel (z)
+from brain.prep.morph import largest_cc
+
+CT_MIN, CT_MAX = FLOOR["ct"], 3071.0
+MRI_FLOOR, MRI_LO, MRI_HI = FLOOR["mri"], -5.0, 20.0  # background sentinel, tissue clip range
 
 
-def largest_cc(mask: np.ndarray) -> np.ndarray:
-    lab, n = ndi.label(mask)
-    if n <= 1:
-        return mask
-    return lab == (1 + np.bincount(lab.ravel())[1:].argmax())
+def robust_stats(x: np.ndarray) -> tuple[float, float]:
+    """(median, 1.4826 MAD) of ``x``: the robust z-score's center and scale; (0, 0) when ``x`` is empty."""
+    x = np.asarray(x)
+    if not x.size:
+        return 0.0, 0.0
+    med = float(np.median(x))
+    return med, float(1.4826 * np.median(np.abs(x - med)))
 
 
 def mri_mask(vol: np.ndarray) -> np.ndarray:
@@ -74,23 +78,6 @@ def ct_native(vol: np.ndarray) -> tuple[np.ndarray, dict]:
     return vol.astype(np.float16), stats
 
 
-def mri_restat(z: np.ndarray, brain: np.ndarray) -> tuple[np.ndarray, float, float] | None:
-    """Re-standardise a *stored* robust-z MRI on a new brain mask: ``(z - m) / s`` with ``m``, ``s`` the median and
-    1.4826 MAD of ``z`` inside the brain, re-clipped, background kept at the floor. Returns (z', m, s), or None when
-    the mask has no foreground. Values already at the old clip limits stay saturated (the raw volume is gone)."""
-    fg = z > MRI_LO - 0.5
-    x = z[brain.astype(bool) & fg].astype(np.float32)
-    if not x.size:
-        return None
-    m = float(np.median(x))
-    s = float(1.4826 * np.median(np.abs(x - m)))
-    if s <= 0:
-        return None
-    out = np.clip((z.astype(np.float32) - m) / s, MRI_LO, MRI_HI)
-    out[~fg] = MRI_FLOOR
-    return out.astype(np.float16), m, s
-
-
 def mri_native(vol: np.ndarray, brain: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
     """Robust z (median / 1.4826 MAD), tissue in [-5, 20], background -6.
 
@@ -100,8 +87,7 @@ def mri_native(vol: np.ndarray, brain: np.ndarray | None = None) -> tuple[np.nda
     m = mri_mask(vol)
     ref = brain.astype(bool) & m if brain is not None else m
     x = vol[ref] if ref.any() else vol[m]
-    med = float(np.median(x)) if x.size else 0.0
-    mad = float(1.4826 * np.median(np.abs(x - med))) if x.size else 0.0
+    med, mad = robust_stats(x)
     z = np.clip((vol - med) / max(mad, 1e-6), MRI_LO, MRI_HI)
     z[~m] = MRI_FLOOR
     fg = float(m.mean())

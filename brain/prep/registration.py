@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
+from brain.common.paths import SCRATCH
 from brain.prep import geometry
 
 MODES = ("affine", "rigid", "none")
@@ -201,7 +202,7 @@ TEMPLATE_SCALE_RANGE = (0.4, 1.6)        # a newborn template is ~0.6x the adult
 
 
 def nihpd_dir() -> Path:
-    return Path(os.environ.get("BRAIN_INFANT_TEMPLATES", "/home/roku/orcd/scratch/brain-model/templates/nihpd"))
+    return Path(os.environ.get("BRAIN_INFANT_TEMPLATES", SCRATCH / "templates" / "nihpd"))
 
 
 def nihpd_bin(age_months: float) -> str:

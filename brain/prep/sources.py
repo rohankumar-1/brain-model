@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from brain.common.paths import DATASETS, SCRATCH  # noqa: F401  (re-exported for prep.index)
-from brain.prep.fomo import CONTRAST_SUFFIXES
+from brain.prep.fomo import strip_contrast
 
 BRATS_CONTRASTS = ("t1n", "t1c", "t2w", "t2f")
 BRATS_COHORTS = {"2023_GLI": "brats2023_gli", "2023_MEN": "brats2023_men",
@@ -37,6 +37,7 @@ class Case:
     members: tuple = ()
     ref: Path | None = None                         # co-registered sequence that decides this subject's grid
     ref_image: Path | None = None                   # the ref's stored volume (set by brain.prep.run): reuse its fit
+    dicom_reader: str = ""                          # "dcm2niix" | "sitk" | "" (BRAIN_DICOM_READER, else sitk)
 
     @property
     def stripped(self) -> bool:
@@ -47,11 +48,8 @@ class Case:
 
     @property
     def folder(self) -> str:
-        """Store folder: BraTS contrasts share their cohort folder."""
-        for c in CONTRAST_SUFFIXES:
-            if self.dataset.endswith(f"_{c}"):
-                return self.dataset[: -len(c) - 1]
-        return self.dataset
+        """Store folder: the dataset without its contrast token (BraTS contrasts share their cohort folder)."""
+        return strip_contrast(self.dataset)
 
     @property
     def mask_id(self) -> str:
@@ -63,28 +61,26 @@ def _first(d: Path, *names: str) -> Path | None:
     return next((d / n for n in names if (d / n).exists()), None)
 
 
-def cq500(*dirs: Path) -> list[Case]:
-    """Seg-CQ500 (with ICH and brain masks) first, then extra CQ500 volumes not already seen."""
-    cases, seen = [], set()
-    for root in dirs:
-        tag = "seg_cq500" if "seg_cq500" in str(root) else "cq500"
-        for d in sorted(p for p in Path(root).iterdir() if p.is_dir() and p.name not in seen):
-            ct = _first(d, "CT.nii", "CT.nii.gz")
-            if ct is None:
-                continue
-            seen.add(d.name)
-            masks = tuple((n, m) for n, names in (("ICH", ("ICH_mask.nii.gz", "ICH_mask.nii")),
-                                                  ("brain", ("brain.nii.gz", "brain.nii")))
-                          if tag == "seg_cq500" and (m := _first(d, *names)))
-            cases.append(Case(tag, d.name, "ct", ct, masks))
+def seg_cq500(root: Path = DATASETS / "seg_cq500" / "volumes") -> list[Case]:
+    """Seg-CQ500: the NIfTI CQ500 subset with ICH and brain masks (dataset ``seg_cq500``). Plain ``cq500`` is read from
+    the original DICOMs (``cq500_dicom``); this NIfTI release is used only for its masks' cases."""
+    cases = []
+    for d in sorted(p for p in Path(root).iterdir() if p.is_dir()):
+        ct = _first(d, "CT.nii", "CT.nii.gz")
+        if ct is None:
+            continue
+        masks = tuple((n, m) for n, names in (("ICH", ("ICH_mask.nii.gz", "ICH_mask.nii")),
+                                              ("brain", ("brain.nii.gz", "brain.nii")))
+                      if (m := _first(d, *names)))
+        cases.append(Case("seg_cq500", d.name, "ct", ct, masks))
     return cases
 
 
 def cq500_dicom(root: Path = DATASETS / "cq500_dicom") -> list[Case]:
-    """CQ500 from the original DICOMs (``brain.datasets.download_cq500``: one plain soft-tissue series per study zip),
-    read by member offsets like RSNA. Replaces the third-party pre-converted NIfTIs as dataset ``cq500`` (same case
-    ids, so the same volume ids); those were mirrored for some studies and mixed kernels / contrast series. Prep these
-    with ``BRAIN_DICOM_READER=dcm2niix`` (CQ500 has gantry tilt)."""
+    """CQ500 (dataset ``cq500``) from the original DICOMs (``brain.datasets.download_cq500``: one plain soft-tissue
+    series per study zip), read by member offsets like RSNA, through dcm2niix (CQ500 has gantry tilt). It replaced the
+    third-party pre-converted NIfTIs (same case ids, so the same volume ids); those were mirrored for some studies and
+    mixed kernels / contrast series."""
     import zipfile
 
     cases = []
@@ -93,7 +89,7 @@ def cq500_dicom(root: Path = DATASETS / "cq500_dicom") -> list[Case]:
             members = tuple((i.filename, i.header_offset, i.compress_size, i.compress_type) for i in zf.infolist()
                             if not i.filename.endswith("/"))
         if members:
-            cases.append(Case("cq500", z.stem, "ct", zip_path=str(z), members=members))
+            cases.append(Case("cq500", z.stem, "ct", zip_path=str(z), members=members, dicom_reader="dcm2niix"))
     return cases
 
 
@@ -635,9 +631,8 @@ RSNA_ICA_DATASET = {"CTA": ("rsna_ica_cta", "ct"), "MRA": ("rsna_ica_mra", "mri"
 def rsna_ica(rsna_zip: Path = DATASETS / "rsna_ica" / "rsna-intracranial-aneurysm-detection.zip") -> list[Case]:
     """RSNA Intracranial Aneurysm Detection (2025; MIRA dataset 7, non-commercial): 4,348 series (CTA, TOF MRA,
     T2, post-contrast T1) read straight from the pool zip by byte offsets (``series/<SeriesUID>/<SOP>.dcm``; some MR
-    series are one enhanced multi-frame file, so prep runs with ``BRAIN_DICOM_READER=dcm2niix``). The member index
+    series are one enhanced multi-frame file, so these cases read through dcm2niix). The member index
     and ``train.csv`` are cached under ``work/rsna_ica``."""
-    import io
     import json
     import zipfile
 
@@ -663,7 +658,7 @@ def rsna_ica(rsna_zip: Path = DATASETS / "rsna_ica" / "rsna-intracranial-aneurys
         if uid in index and mod in RSNA_ICA_DATASET:
             ds, modality = RSNA_ICA_DATASET[mod]
             cases.append(Case(ds, uid, modality, zip_path=str(rsna_zip),
-                              members=tuple(tuple(m) for m in sorted(index[uid]))))
+                              members=tuple(tuple(m) for m in sorted(index[uid])), dicom_reader="dcm2niix"))
     return cases
 
 
@@ -680,7 +675,7 @@ def ida_pick(project: str) -> pd.DataFrame:
 def ida(project: str) -> list[Case]:
     """ADNI / PPMI baseline scans (held out; data use agreements forbid redistribution, so pool, store and work dirs
     stay owner-only) read straight from the IDA Advanced Download zips by byte offsets
-    (``<PROJECT>/<subject>/<description>/<date>/I<image id>/*.dcm``; prep runs with ``BRAIN_DICOM_READER=dcm2niix``).
+    (``<PROJECT>/<subject>/<description>/<date>/I<image id>/*.dcm``; read through dcm2niix).
     case_id = IDA image ID; the subject comes from the pick table (``index.ida_subjects``). The member index is
     cached under ``work/<project>``."""
     import json
@@ -709,7 +704,7 @@ def ida(project: str) -> list[Case]:
         if iid in index and kind in IDA_KIND:
             zip_path, members = index[iid]
             cases.append(Case(f"{project}_{IDA_KIND[kind]}", iid, "mri", zip_path=zip_path,
-                              members=tuple(tuple(m) for m in sorted(members))))
+                              members=tuple(tuple(m) for m in sorted(members)), dicom_reader="dcm2niix"))
     return cases
 
 
@@ -721,7 +716,7 @@ def fastmri(root: Path = DATASETS / "fastmri_brain" / "nifti") -> list[Case]:
     """The 1,001 fastMRI+ annotated brain scans (NYU clinical 2D axial FLAIR / T1 / T1 post-contrast, 1.5 and 3 T,
     0.69 mm in-plane, 5 mm slices covering ~70-80 mm), staged as images by ``brain.prep.fastmri`` (geometry by
     convention, checked against the template) from the pool zips ``brain.prep.fastmri_fetch`` kept. Data use
-    agreement (NYU fastMRI): prep with umask 077 (jobs/prep_fastmri.sbatch)."""
+    agreement (NYU fastMRI): prep with umask 077 (jobs/archive/prep_fastmri.sbatch)."""
     from brain.prep.fastmri import DATASETS_OF
 
     return [Case(ds, p.name.removesuffix(".nii.gz"), "mri", p)
@@ -733,7 +728,7 @@ def synthrad(root: Path = SYNTHRAD_ROOT) -> list[Case]:
     the centre is the id's third letter): task 1 = CT + 3D T1 MR (60 with gadolinium labelled, the rest RT-planning
     TFE), task 2 = CT + cone-beam CT, rigidly co-registered by the challenge. Each patient's secondary scan takes the
     primary's registration (``ref``) so both land on one store grid: task 1 on the MR (MR registers to the template
-    more reliably), task 2 on the CT. Read from ``Task{1,2}/brain/<id>/`` as extracted by jobs/prep_synthrad.sbatch
+    more reliably), task 2 on the CT. Read from ``Task{1,2}/brain/<id>/`` as extracted by jobs/archive/prep_synthrad.sbatch
     (the pool holds only the original zips); the body ``mask.nii.gz`` is not used."""
     cases = []
     for task, (ref_name, ref_ds, ref_mod), (sec_name, sec_ds) in (

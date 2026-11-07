@@ -10,13 +10,13 @@
 #      ~/.config/brain/adni_links.txt (mode 600). Optional: ida.loni.usc.edu cookies (Netscape cookies.txt) in
 #      ~/.config/brain/adni_cookies.txt (mode 600), only if IDA turns out to want them too.
 #
-#   sbatch --export=ALL,PILOT=1 jobs/download_adni.sbatch     # first 50 MB of link 1: checks the links work here
-#   sbatch jobs/download_adni.sbatch                          # every link; resumable, re-submit to continue
-#   sbatch --export=ALL,PART=2 jobs/download_adni.sbatch      # link 2 only: one job per link runs them in parallel
+#   sbatch --export=ALL,PILOT=1 jobs/archive/download_adni.sbatch     # first 50 MB of link 1: checks the links work here
+#   sbatch jobs/archive/download_adni.sbatch                          # every link; resumable, re-submit to continue
+#   sbatch --export=ALL,PART=2 jobs/archive/download_adni.sbatch      # link 2 only: one job per link runs them in parallel
 #                                                             # (IDA serves ~1.5 MB/s per connection, and answers 503
 #                                                             # beyond 2 concurrent downloads: queue more with
 #                                                             # --dependency=afterany:<running job>)
-#   sbatch --export=ALL,DATASET=ppmi jobs/download_adni.sbatch  # PPMI is on IDA too: ppmi_links.txt -> ppmi/zips
+#   sbatch --export=ALL,DATASET=ppmi jobs/archive/download_adni.sbatch  # PPMI is on IDA too: ppmi_links.txt -> ppmi/zips
 #
 # Optional: the collection's metadata CSV (IDA "CSV" button) and ADNIMERGE from Study Data are small; copy them to
 # $DEST/../tables by hand.

@@ -17,12 +17,11 @@ from brain.prep import brainmask, centering, dicom, geometry, intensity, native,
 from brain.prep.sources import Case
 
 SIZE = geometry.GRID_XYZ  # (x, y, z)
-# raw structural scans; OASIS-1 is distributed gain-field corrected; DWI / ADC (and perfusion maps) are not bias-field
-# images. Before 2026-10-25 BraTS, MSD, BrainMetShare, VALDO and MS3SEG were not corrected either (BraTS is
-# "preprocessed", but not bias-corrected), so only some tumour cohorts were: they are now (``brain.prep.n4_store``
-# corrects the volumes already stored).
-LEGACY_N4_DATASETS = {"oasis2", "abide1", "ixi_t1", "ixi_t2", "atlas", "isles22_flair",
-                      "pixar", "piop1", "piop2", "id1000", "wmh_flair", "wmh_t1"}
+# N4 bias correction: raw structural MRI, named exactly or by prefix. OASIS-1 is distributed gain-field corrected; DWI /
+# ADC (and perfusion maps) are not bias-field images. BraTS is "preprocessed" but not bias-corrected. (Until 2026-10-25
+# BraTS, MSD, BrainMetShare, VALDO and MS3SEG were stored uncorrected and were N4-corrected in the store afterwards.)
+N4_DATASETS = {"oasis2", "abide1", "ixi_t1", "ixi_t2", "atlas", "isles22_flair",
+               "pixar", "piop1", "piop2", "id1000", "wmh_flair", "wmh_t1"}
 N4_PREFIXES = ("fomo_", "brats", "msd_braintumor", "brainmetshare", "valdo", "ms3seg", "ucsf_pdgm",
                "upenn_gbm", "rsna_ica_mra", "rsna_ica_t2w", "rsna_ica_t1c")
 NO_N4_SUFFIXES = ("_dwi", "_adc")
@@ -72,7 +71,7 @@ def needs_n4(dataset: str) -> bool:
     ds = str(dataset)
     if ds.endswith(NO_N4_SUFFIXES):
         return False
-    return ds in LEGACY_N4_DATASETS or ds.startswith(N4_PREFIXES)
+    return ds in N4_DATASETS or ds.startswith(N4_PREFIXES)
 TMP = os.environ.get("SLURM_TMPDIR") or "/tmp"
 
 
@@ -89,7 +88,7 @@ class Options:
 
 
 def add_cli_options(ap) -> None:
-    """Flags shared by ``brain.prep.run`` and ``brain.prep.pilot``. Defaults are the current recipe."""
+    """Prep flags of ``brain.prep.run``. Defaults are the current recipe."""
     ap.add_argument("--registration", choices=list(registration.MODES), default="affine",
                     help="register each scan to the template (affine), keep its size (rigid), or only center it (none)")
     ap.add_argument("--template", default=None, help="skull-on T1 template, e.g. MNI152_T1_1mm.nii.gz (or $BRAIN_TEMPLATE)")
@@ -121,9 +120,9 @@ class Result:
 
 def _read(case: Case) -> tuple[sitk.Image, dict]:
     if case.members:
-        return dicom.read_study(case.zip_path, case.members, TMP)
+        return dicom.read_study(case.zip_path, case.members, TMP, case.dicom_reader)
     if case.path is not None and Path(case.path).is_dir():
-        return dicom.read_series_dir(case.path)
+        return dicom.read_series_dir(case.path, case.dicom_reader)
     if case.dataset == "msd_braintumor" and case.path is not None:
         from brain.prep.sources import ensure_msd_t1w
 
@@ -269,6 +268,25 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
     return Partial(case, raw, masks, info, t, prior, float(cover), debug)
 
 
+# MRI z-scores come from the brain mask when it passed QC, or when it failed QC with a plausible extent
+# (``brainmask.PLAUSIBLE_FRAC``, i.e. it failed only the template-Dice check): those are mostly partial-coverage slabs and
+# infant brains whose masks are fine, while whole-head statistics (scalp and skull included) put the brain off the
+# store's scale (RSNA-ICA MRA: brain median 0.54, spread 0.36 instead of 0 / 1). The 2026-11-03 store was corrected
+# after prep (the former ``restat_failed`` step, stored as ``stats_from = brain_restat``); this rule makes a rebuild
+# produce that scale directly.
+
+
+def mri_stats_on_brain(brain: np.ndarray | None, binfo: dict) -> bool:
+    """Whether MRI robust-z statistics come from ``brain`` (else from the head foreground)."""
+    if brain is None:
+        return False
+    if binfo.get("brain_ok", True):
+        return True
+    frac = binfo.get("brain_frac")
+    lo, hi = brainmask.PLAUSIBLE_FRAC
+    return frac is not None and lo <= float(frac) <= hi
+
+
 def finish(p: Partial, opts: Options | None = None, synth: np.ndarray | None = None,
            brain_method: str | None = None) -> Result:
     """Brain mask -> native units -> QC. ``synth`` is a SynthStrip mask computed elsewhere (a GPU batch);
@@ -305,8 +323,7 @@ def finish(p: Partial, opts: Options | None = None, synth: np.ndarray | None = N
                                                      case.stripped, intensity.MRI_FLOOR, prior=prior,
                                                      fg=None if prior is None else prov > intensity.MRI_LO - 0.5,
                                                      synth=synth)
-            use = brain if brain is not None and binfo.get("brain_ok", True) else None
-            vol, stats = intensity.mri_native(raw, use)
+            vol, stats = intensity.mri_native(raw, brain if mri_stats_on_brain(brain, binfo) else None)
 
     info = p.info | stats | binfo | {"brain_cover": p.cover}
     if brain is not None and stats.get("fg_frac"):        # ~1 for skull-stripped input, 0.45-0.7 with a skull

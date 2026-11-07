@@ -11,7 +11,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as ndi
 
-from brain.prep.intensity import largest_cc, mri_mask
+from brain.prep.intensity import mri_mask
+from brain.prep.morph import ball, largest_cc
 
 BRAIN_OPEN_MM, HEAD_OPEN_MM = 8.0, 6.0
 VAULT_FRAC = 0.6       # brain blob: keep slices with at least this fraction of the max area
@@ -20,13 +21,8 @@ HEAD_R_FRAC = 0.85     # head: keep slices whose inscribed radius is this close 
 CORE_FRAC = 0.7        # head: core = pixels with distance >= this fraction of the slice max
 
 
-def _ball(r: int) -> np.ndarray:
-    a = np.arange(-r, r + 1)
-    return (a[:, None, None] ** 2 + a[None, :, None] ** 2 + a[None, None, :] ** 2) <= r * r
-
-
 def _opened(mask: np.ndarray, mm: float, open_mm: float) -> np.ndarray:
-    return largest_cc(ndi.binary_opening(mask, _ball(max(1, round(open_mm / mm)))))
+    return largest_cc(ndi.binary_opening(mask, ball(max(1, round(open_mm / mm)))))
 
 
 def _vault(blob: np.ndarray):

@@ -24,9 +24,6 @@ def _res(with_brain=True):
 
 def test_case_zip_holds_image_and_brain_and_labels_stay_separate(tmp_path):
     case = Case("cq500", "c1", "ct", None, (("seg", Path("unused.nii.gz")),))
-    legacy = store.brain_path(tmp_path, case)
-    legacy.parent.mkdir(parents=True)
-    legacy.write_bytes(b"old")                       # a format-5 brain zip is cleaned up
     store.write_case(tmp_path, case, _res())
     image = store.path_for(tmp_path, "cq500", "c1")
     assert sorted(p.name for p in image.parent.iterdir()) == ["c1.seg.zip", "c1.zip"]
@@ -81,27 +78,3 @@ def test_gpu_mask_runner_batches_synthstrip_and_writes_one_zip_per_case(tmp_path
     got = store.read_many(store.path_for(root, "cq500", "ct0"), ("image", "brain"))
     assert got["image"].shape == (DEPTH, 1, 256, 256) and got["brain"].shape == (DEPTH, 256, 256)
     assert got["brain"].any()
-
-
-def test_store_cleanup_keeps_current_format_and_index_outputs(tmp_path):
-    import zarr
-    from zarr.storage import ZipStore
-    from brain.prep import store_cleanup
-
-    case = Case("cq500", "c1", "ct", None, (("seg", Path("unused.nii.gz")),))
-    store.write_case(tmp_path, case, _res())                       # current: image zip + seg zip
-    old = tmp_path / "cq500" / "c0.zip"                           # a format-5 leftover
-    zs = ZipStore(old, mode="w")
-    zarr.open_group(zs, mode="w").create_array("image", data=np.zeros((2, 1, 2, 2), np.float16),
-                                               attributes={"format_version": 5})
-    zs.close()
-    (tmp_path / "cq500" / "c0.brain.zip").write_bytes(b"x")
-    (tmp_path / "cq500" / "c2.zip.partial.7").write_bytes(b"x")
-    (tmp_path / "labels").mkdir()
-    (tmp_path / "labels" / "masks.csv").write_text("a\n")
-    (tmp_path / "sinoct").mkdir()
-    for name in ("manifest_v5_0of2.jsonl", "manifest_v6_A_0of8.jsonl", "remask_0of4.jsonl", "volumes.csv"):
-        (tmp_path / name).write_text("{}\n")
-    doomed = {p.relative_to(tmp_path).as_posix() for p in store_cleanup.plan(tmp_path)}
-    assert doomed == {"cq500/c0.zip", "cq500/c0.brain.zip", "cq500/c2.zip.partial.7", "sinoct",
-                      "manifest_v5_0of2.jsonl", "remask_0of4.jsonl"}

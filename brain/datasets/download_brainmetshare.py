@@ -3,17 +3,13 @@
 156 skull-stripped brain-metastasis MRI studies (4 co-registered sequences;
 105 train with segs, 51 test). Lives only under ``$BRAIN_DATASETS/brainmetshare``.
 
-    python -m brain.datasets.download_brainmetshare
-    python -m brain.datasets.download_brainmetshare --prep
+    python -m brain.datasets.download_brainmetshare      # then brain.prep.run --datasets brainmetshare
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -25,7 +21,6 @@ from brain.prep.sources import DATASETS
 DATASET = "brainmetshare:1emj:v1_0"
 URL = "https://stanford.redivis.com/datasets/1emj-bjxt3p6s0"
 OUT = DATASETS / "brainmetshare"
-STORE = OUT / "processed"
 TABLES = (
     ("train_nifti:cbv1", "nifti/train"),
     ("test_nifti:ezk7", "nifti/test"),
@@ -134,27 +129,16 @@ def fetch(dest: Path = OUT, concurrency: int = 4) -> Path:
     return dest
 
 
-def prep(store: Path = STORE, workers: int = 8) -> None:
-    cmd = [sys.executable, "-m", "brain.prep.run", "--root", str(store), "--datasets", "brainmetshare",
-           "--workers", str(workers), "--z-anchor", "auto"]
-    print(f"[brainmetshare] {' '.join(cmd)}", flush=True)
-    subprocess.run(cmd, check=True)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--out", type=Path, default=OUT)
     ap.add_argument("--concurrency", type=int, default=4)
-    ap.add_argument("--prep", action="store_true")
-    ap.add_argument("--workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
     a = ap.parse_args()
     fetch(a.out, a.concurrency)
     from brain.prep import sources
     cases = sources.brainmetshare(a.out / "nifti")
     n_mask = sum(1 for c in cases if c.masks)
     print(f"[brainmetshare] {len(cases)} volumes, {n_mask} with segs under {a.out / 'nifti'}", flush=True)
-    if a.prep:
-        prep(STORE, a.workers)
 
 
 if __name__ == "__main__":

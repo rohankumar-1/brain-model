@@ -2,7 +2,7 @@
 # Format-6 prep for datasets kept on pool as their original downloads (brain.prep.stage_new: ms3seg, valdo).
 # Stages them onto this node's local disk (never scratch), writes their label tables to the store, preps, cleans up.
 #
-#   DATASETS=ms3seg,valdo sbatch jobs/prep_v6_new.sbatch     # then jobs/index_v6.sbatch and jobs/verify_v6.sbatch
+#   DATASETS=ms3seg,valdo sbatch jobs/prep_v6_new.sbatch     # then jobs/index_append.sbatch and jobs/archive/verify_v6.sbatch
 #SBATCH -p pi_dbertsim,sched_mit_sloan_gpu_r8
 #SBATCH --job-name=prep-v6-new
 #SBATCH -N 1

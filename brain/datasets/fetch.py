@@ -61,10 +61,11 @@ def brats_ped() -> None:
                 z.extractall(target)
 
 
-def _s3_keys(prefix: str):
+def _s3_keys(base: str, prefix: str):
+    """Every key under ``prefix`` of a public S3 bucket (``base``: the bucket URL), following continuation tokens."""
     token = ""
     while True:
-        q = f"{S3}/?list-type=2&prefix={prefix}" + (f"&continuation-token={quote(token, safe='')}" if token else "")
+        q = f"{base}/?list-type=2&prefix={prefix}" + (f"&continuation-token={quote(token, safe='')}" if token else "")
         root = ET.fromstring(urlopen(q, timeout=60).read())
         ns = {"s": root.tag.split("}")[0][1:]}
         yield from (k.text for k in root.iterfind("s:Contents/s:Key", ns))
@@ -77,7 +78,7 @@ def abide1() -> None:
     """Raw T1 (mprage) of every ABIDE I subject plus the phenotypic table (labels, age, site)."""
     out = DATASETS / "abide1"
     curl(f"{S3}/{ABIDE}/Phenotypic_V1_0b.csv", out / "Phenotypic_V1_0b.csv")
-    keys = [k for k in _s3_keys(f"{ABIDE}/RawData/") if k.endswith("session_1/anat_1/mprage.nii.gz")]
+    keys = [k for k in _s3_keys(S3, f"{ABIDE}/RawData/") if k.endswith("session_1/anat_1/mprage.nii.gz")]
     print(f"[fetch] abide1: {len(keys)} T1 volumes", flush=True)
     with ThreadPoolExecutor(6) as ex:
         list(ex.map(lambda k: curl(f"{S3}/{k}", out / "RawData" / k.split("RawData/")[1]), keys))
@@ -111,7 +112,7 @@ def pget(url: str, out: Path, chunk_mb: int = 512, workers: int = 16) -> None:
 
 
 def instance() -> None:
-    """INSTANCE 2022 training zip (OneDrive) into the pool. Preprocess with ``python -m brain.datasets.download_instance --prep``."""
+    """INSTANCE 2022 training zip (OneDrive) into the pool. Prep with ``brain.prep.run --datasets instance``."""
     from brain.datasets.download_instance import fetch
     fetch()
 
@@ -131,7 +132,7 @@ def fomo() -> None:
 
 
 def aisd() -> None:
-    """AISD image+mask zips (Google Drive) into the pool. Preprocess with ``python -m brain.datasets.download_aisd --prep``."""
+    """AISD image+mask zips (Google Drive) into the pool. Prep with ``brain.prep.run --datasets aisd``."""
     from brain.datasets.download_aisd import fetch
     fetch()
 
@@ -156,22 +157,10 @@ def isles24() -> None:
 OPENNEURO = "https://s3.amazonaws.com/openneuro.org"
 
 
-def _openneuro_keys(prefix: str):
-    token = ""
-    while True:
-        q = f"{OPENNEURO}/?list-type=2&prefix={prefix}" + (f"&continuation-token={quote(token, safe='')}" if token else "")
-        root = ET.fromstring(urlopen(q, timeout=60).read())
-        ns = {"s": root.tag.split("}")[0][1:]}
-        yield from (k.text for k in root.iterfind("s:Contents/s:Key", ns))
-        if root.findtext("s:IsTruncated", namespaces=ns) != "true":
-            return
-        token = root.findtext("s:NextContinuationToken", namespaces=ns)
-
-
 def openneuro(ds: str, out: Path) -> None:
     """Anatomical scans of a BIDS dataset from OpenNeuro, plus the participant tables (sidecars are small)."""
     keep = []
-    for k in _openneuro_keys(f"{ds}/"):
+    for k in _s3_keys(OPENNEURO, f"{ds}/"):
         rel = k.split("/", 1)[1]
         top = "/" not in rel and (rel.startswith("participants") or rel == "dataset_description.json")
         if top or ("/anat/" in rel and rel.startswith("sub-") and rel.endswith((".nii.gz", ".json"))):

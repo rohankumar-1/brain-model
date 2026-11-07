@@ -18,10 +18,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from brain.downstream.tasks import DEFAULT_VOLUMES
+from brain.common.paths import PROCESSED_ROOT
 from brain.prep import store
 
-ROOT = DEFAULT_VOLUMES.parent
+ROOT = PROCESSED_ROOT
 OUT = ROOT / "labels" / "synthseg"
 
 
@@ -32,7 +32,7 @@ def seg_path(row) -> Path:
 def select(n: int, cap_frac: float = 0.15, seed: int = 0) -> pd.DataFrame:
     """Train/val pretraining-pool volumes, family-balanced: every family keeps at most ``cap_frac * n`` volumes and
     the remainder is drawn uniformly from what is left (small families come in whole)."""
-    v = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
+    v = pd.read_csv(ROOT / "volumes.csv", low_memory=False)
     v = v[v.pretrain.astype(bool) & ~v.held_out.astype(bool) & v.split.isin(["train", "val"])]
     cap = int(cap_frac * n)
     parts = [g.sample(min(len(g), cap), random_state=seed) for _, g in v.groupby("dataset_family")]

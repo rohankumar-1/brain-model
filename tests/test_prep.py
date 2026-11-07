@@ -397,8 +397,8 @@ def test_fomo_case_ids_keep_contrasts_in_one_folder():
 
 
 def test_fomo_jpegls_roundtrip_uint16():
-    from brain.prep.archive import decode_volume, encode_volume, as_uint16_volume, archive_for_pt, pt_from_family
-    from pathlib import Path
+    from brain.prep.archive import as_uint16_volume, decode_volume, encode_volume
+    from brain.prep.fomo import pt_from_family
 
     vol = RNG.integers(0, 4000, size=(32, 32, 8), dtype=np.uint16)
     blob = encode_volume(vol)
@@ -411,8 +411,6 @@ def test_fomo_jpegls_roundtrip_uint16():
     q, qmeta = as_uint16_volume(np.linspace(1.1, 150.0, 32, dtype=np.float32).reshape(4, 4, 2))
     assert qmeta["kind"] == "uint16_quant" and q.dtype == np.uint16
     assert pt_from_family("fomo_hbn") == "PT018_HBN"
-    assert archive_for_pt("PT002_Nigerian_Clinical", Path("/tmp")).name == "fomo_group_small.jls.zip"
-    assert archive_for_pt("PT018_HBN", Path("/tmp")).name == "PT018_HBN.jls.zip"
 
 
 def test_qc_flags():
@@ -420,6 +418,28 @@ def test_qc_flags():
     _, stats = intensity.ct_native(blank)
     assert stats["fg_odd"]
     assert intensity.ct_native(np.full((128, 256, 256), -1000.0, np.float32))[1]["fg_odd"]  # all air: no anatomy
+
+
+def test_cq500_is_the_dicom_release_and_seg_cq500_the_masked_nifti_subset(tmp_path, monkeypatch):
+    import zipfile
+
+    from brain.prep import run, sources
+
+    d = tmp_path / "seg" / "CQ500-CT-1"
+    d.mkdir(parents=True)
+    for n in ("CT.nii.gz", "ICH_mask.nii.gz", "brain.nii.gz"):
+        (d / n).write_bytes(b"x")
+    seg = sources.seg_cq500(tmp_path / "seg")
+    assert [(c.dataset, c.case_id, [n for n, _ in c.masks]) for c in seg] == [("seg_cq500", "CQ500-CT-1", ["ICH", "brain"])]
+    dcm = tmp_path / "dicom"
+    dcm.mkdir()
+    with zipfile.ZipFile(dcm / "CQ500-CT-1.zip", "w") as zf:
+        zf.writestr("s/1.dcm", b"x")
+    (c,) = sources.cq500_dicom(dcm)
+    assert (c.dataset, c.case_id, c.dicom_reader) == ("cq500", "CQ500-CT-1", "dcm2niix")
+    monkeypatch.setattr(sources, "cq500_dicom", lambda: [c])
+    monkeypatch.setattr(sources, "seg_cq500", lambda: seg)
+    assert [x.dataset for x in run.discover(["cq500", "seg_cq500"])] == ["cq500", "seg_cq500"]
 
 
 if __name__ == "__main__":

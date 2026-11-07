@@ -2,8 +2,8 @@
 # Format-6 prep of SynthRAD2023 brain (brain.prep.sources.synthrad): extract only Task{1,2}/brain/ (9.5 GB) of the
 # pool zips onto this node's local disk (never scratch), point BRAIN_DATASETS there, prep, delete the copy.
 # 180 CT + T1 MR (task 1) and 180 CT + CBCT (task 2); the secondary scan reuses the primary's registration.
-#   sbatch jobs/prep_synthrad.sbatch
-#   sbatch --export=ALL,LIMIT=4,TAG=pilot jobs/prep_synthrad.sbatch
+#   sbatch jobs/archive/prep_synthrad.sbatch
+#   sbatch --export=ALL,LIMIT=4,TAG=pilot jobs/archive/prep_synthrad.sbatch
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-synthrad
 #SBATCH -N 1

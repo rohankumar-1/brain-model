@@ -20,10 +20,10 @@ import os
 import numpy as np
 import pandas as pd
 
-from brain.common.paths import SCRATCH
+from brain.common.paths import PROCESSED_ROOT, SCRATCH
 from brain.prep import native, store
 
-STORE = SCRATCH / "data" / "processed" / "slices_zarr"
+STORE = PROCESSED_ROOT
 ANN = SCRATCH / "work" / "fastmri" / "fastmri-plus" / "Annotations"
 # task id -> the fastMRI+ labels that make it positive
 FINDINGS = {

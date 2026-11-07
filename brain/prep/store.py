@@ -32,13 +32,8 @@ def paths(root: Path, case) -> tuple[Path, dict[str, Path]]:
             {name: path_for(root, case.folder, case.mask_id, name) for name, _ in case.masks})
 
 
-def brain_path(root: Path, case) -> Path:
-    """Format-5 brain mask zip (``<case_id>.brain.zip``); format 6 keeps the mask inside the image zip."""
-    return path_for(root, case.folder, case.case_id, "brain")
-
-
 def write_case(root: Path, case, res) -> None:
-    """One image zip (``image`` + ``brain``) and the dataset label-mask zips. A stale format-5 brain zip is removed."""
+    """One image zip (``image`` + ``brain``) and the dataset label-mask zips."""
     image, masks = paths(root, case)
     arrays = {"image": (res.vol[:, None], {**res.info, "kind": "ct_hu" if case.modality == "ct" else "mri_z"})}
     if res.brain is not None:
@@ -47,7 +42,6 @@ def write_case(root: Path, case, res) -> None:
     for name, m in res.masks.items():
         if name != "brain":                            # a shipped brain mask is the ``brain`` array above
             write(masks[name], "mask", m)
-    brain_path(root, case).unlink(missing_ok=True)
 
 
 BRAIN_ATTRS = ("brain_method", "brain_frac", "brain_ok", "brain_dice_tpl", "brain_rev", "stripped_input")
@@ -55,17 +49,18 @@ BRAIN_ATTRS = ("brain_method", "brain_frac", "brain_ok", "brain_dice_tpl", "brai
 
 def remove_case(root: Path, case) -> None:
     image, masks = paths(root, case)
-    for p in (image, *masks.values(), brain_path(root, case)):
+    for p in (image, *masks.values()):
         p.unlink(missing_ok=True)
 
 
-def _plain(v):
+def plain(v):
+    """A JSON-safe attribute / manifest value: numpy scalars to Python, non-finite floats to None, arrays to lists."""
     if isinstance(v, (np.floating, float)):
         return float(v) if np.isfinite(v) else None
     if isinstance(v, (np.integer, int, bool, np.bool_)):
         return v.item() if hasattr(v, "item") else v
     if isinstance(v, (list, tuple, np.ndarray)):          # geometry vectors / matrices stay JSON arrays
-        return [_plain(x) for x in (v.tolist() if isinstance(v, np.ndarray) else v)]
+        return [plain(x) for x in (v.tolist() if isinstance(v, np.ndarray) else v)]
     return v if isinstance(v, (str, type(None))) else str(v)
 
 
@@ -92,7 +87,7 @@ def write_arrays(path: Path, arrays: dict[str, tuple[np.ndarray, dict | None]]) 
                 name, data=arr, overwrite=True,
                 chunks=(min(CHUNK_Z, arr.shape[0]),) + arr.shape[1:],
                 compressors=BloscCodec(cname="zstd", clevel=5, shuffle="bitshuffle", typesize=arr.dtype.itemsize),
-                attributes={"format_version": FORMAT_VERSION, **{k: _plain(v) for k, v in (attrs or {}).items()}})
+                attributes={"format_version": FORMAT_VERSION, **{k: plain(v) for k, v in (attrs or {}).items()}})
     except Exception:
         store.close()
         tmp.unlink(missing_ok=True)
