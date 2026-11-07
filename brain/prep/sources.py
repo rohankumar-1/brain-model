@@ -716,7 +716,7 @@ def fastmri(root: Path = DATASETS / "fastmri_brain" / "nifti") -> list[Case]:
     """The 1,001 fastMRI+ annotated brain scans (NYU clinical 2D axial FLAIR / T1 / T1 post-contrast, 1.5 and 3 T,
     0.69 mm in-plane, 5 mm slices covering ~70-80 mm), staged as images by ``brain.prep.fastmri`` (geometry by
     convention, checked against the template) from the pool zips ``brain.prep.fastmri_fetch`` kept. Data use
-    agreement (NYU fastMRI): prep with umask 077 (jobs/prep_fastmri.sbatch)."""
+    agreement (NYU fastMRI): prep with umask 077 (jobs/archive/prep_fastmri.sbatch)."""
     from brain.prep.fastmri import DATASETS_OF
 
     return [Case(ds, p.name.removesuffix(".nii.gz"), "mri", p)
@@ -728,7 +728,7 @@ def synthrad(root: Path = SYNTHRAD_ROOT) -> list[Case]:
     the centre is the id's third letter): task 1 = CT + 3D T1 MR (60 with gadolinium labelled, the rest RT-planning
     TFE), task 2 = CT + cone-beam CT, rigidly co-registered by the challenge. Each patient's secondary scan takes the
     primary's registration (``ref``) so both land on one store grid: task 1 on the MR (MR registers to the template
-    more reliably), task 2 on the CT. Read from ``Task{1,2}/brain/<id>/`` as extracted by jobs/prep_synthrad.sbatch
+    more reliably), task 2 on the CT. Read from ``Task{1,2}/brain/<id>/`` as extracted by jobs/archive/prep_synthrad.sbatch
     (the pool holds only the original zips); the body ``mask.nii.gz`` is not used."""
     cases = []
     for task, (ref_name, ref_ds, ref_mod), (sec_name, sec_ds) in (

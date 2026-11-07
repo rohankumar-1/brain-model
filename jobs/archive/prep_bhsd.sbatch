@@ -1,6 +1,6 @@
 #!/bin/bash
 # Format-6 prep of BHSD (brain.prep.sources.bhsd): the 192 RSNA ICH studies with voxel hemorrhage masks, staged from
-# the pool archive onto node-local disk (never scratch). Then jobs/index_v6.sbatch and jobs/multitask_labels.sbatch.
+# the pool archive onto node-local disk (never scratch). Then jobs/index_append.sbatch and jobs/multitask_labels.sbatch.
 #   sbatch jobs/prep_bhsd.sbatch
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu

@@ -3,8 +3,8 @@
 # 3,129 subjects) and PPMI, read straight from the pool download zips by byte offsets (no staging), DICOM extracted to
 # node-local temp, dcm2niix reader (enhanced multi-frame MR) with the SimpleITK fallback. Data use agreements: pool,
 # store and work dirs are owner-only. Four shards; re-submit to resume (done cases are skipped).
-#   sbatch --export=ALL,DATASET=adni jobs/prep_ida.sbatch
-#   sbatch --array=0 --export=ALL,DATASET=adni,N=1,LIMIT=10,TAG=pilot jobs/prep_ida.sbatch      # pilot
+#   sbatch --export=ALL,DATASET=adni jobs/archive/prep_ida.sbatch
+#   sbatch --array=0 --export=ALL,DATASET=adni,N=1,LIMIT=10,TAG=pilot jobs/archive/prep_ida.sbatch      # pilot
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-ida
 #SBATCH --array=0-3

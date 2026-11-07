@@ -3,9 +3,9 @@
 # tumour segmentations, staged from pool onto node-local disk (never scratch). Held out of pretraining
 # (index.HELD_OUT); patients also in BraTS share their BraTS twin's dedup_key once the twins are found by content
 # (index.upenn_gbm_key). T1 cases are written first and the other sequences reuse T1's registration.
-# Then the index rebuild (jobs/index_v6.sbatch) and the downstream labels.
-#   sbatch --export=ALL,LIMIT=3 jobs/prep_upenn_gbm.sbatch     # pilot: 3 scans per sequence (kept; the full run skips them)
-#   sbatch jobs/prep_upenn_gbm.sbatch
+# Then the index rebuild (jobs/index_append.sbatch) and the downstream labels.
+#   sbatch --export=ALL,LIMIT=3 jobs/archive/prep_upenn_gbm.sbatch     # pilot: 3 scans per sequence (kept; the full run skips them)
+#   sbatch jobs/archive/prep_upenn_gbm.sbatch
 # EXTRA adds brain.prep.run arguments (no commas).
 
 #SBATCH -p pi_dbertsim,mit_normal_gpu

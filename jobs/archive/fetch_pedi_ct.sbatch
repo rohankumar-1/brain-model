@@ -4,8 +4,8 @@
 # this node's /tmp, never scratch. brain.prep.pedi_ct turns the .mha into bit-identical .nii.gz plus a FOMO-form
 # participants.tsv; brain.prep.rawpack packs the NIfTI as JPEG-XL lossless into pedi_cranial_ct.raw.zip, which goes
 # to pool only when it is at most MAX_ARCHIVE_GB (pool is ~91% full). Otherwise the NIfTI go to a temporary home
-# folder that jobs/prep_pedi_ct.sbatch reads and then deletes, and the raw data is not archived.
-#   sbatch jobs/fetch_pedi_ct.sbatch
+# folder that jobs/archive/prep_pedi_ct.sbatch reads and then deletes, and the raw data is not archived.
+#   sbatch jobs/archive/fetch_pedi_ct.sbatch
 #SBATCH -p mit_data_transfer
 #SBATCH --job-name=fetch-pedi-ct
 #SBATCH -c 8

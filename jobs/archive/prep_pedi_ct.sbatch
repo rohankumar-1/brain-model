@@ -1,9 +1,9 @@
 #!/bin/bash
 # Format-6 prep of Pedi-Cranial-CT-Healthy (brain.prep.sources.pedi_cranial_ct; 100 healthy children's head CTs):
 # stage the NIfTI from pool's pedi_cranial_ct.raw.zip (brain.prep.rawpack stage) onto this node's /tmp, or, when
-# jobs/fetch_pedi_ct.sbatch skipped the archive, read its temporary home copy and delete that afterwards. CT: no N4,
+# jobs/archive/fetch_pedi_ct.sbatch skipped the archive, read its temporary home copy and delete that afterwards. CT: no N4,
 # SynthStrip brain mask on the GPU. Scratch sits above prep's default 95% stop: ~1 GB of new volumes, so 98%.
-#   sbatch --dependency=afterok:<fetch job> jobs/prep_pedi_ct.sbatch
+#   sbatch --dependency=afterok:<fetch job> jobs/archive/prep_pedi_ct.sbatch
 #SBATCH -p pi_dbertsim,mit_normal_gpu
 #SBATCH --job-name=prep-pedi-ct
 #SBATCH -N 1
