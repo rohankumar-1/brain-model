@@ -98,7 +98,7 @@ def test_pretraining_step_with_three_channels():
                        proj_hidden=32, qk_norm=True, proj_norm="batch", dense_dim=16, dense_hidden=32)
     views = lejepa_batch(_batch(), cfg, torch.device("cpu"), gen=torch.Generator().manual_seed(0))
     assert views["global_view"].shape[2] == 3 and views["win_view"].shape[2] == 3
-    out = ViewNet(enc, local_pooled=False, dense=True)(views)
+    out = ViewNet(enc, dense=True)(views)
     parts = lejepa_loss(out, batch_meta(views), SIGReg(n_proj=16, knots=9), lamb=0.02, win_weight=1.0,
                         dense_weight=1.0, tokens_per_view=3, gather_ddp=False)
     assert all(torch.isfinite(v) for v in parts.values())

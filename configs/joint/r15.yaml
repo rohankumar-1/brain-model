@@ -164,10 +164,9 @@ loss:
   # SSL branch (v4's LeJEPA)
   lamb: 0.03
   win_weight: 0.0                 # the window pair (one crop, two contrasts must agree) is pure contrast invariance: off
-  local_pooled: false
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 1.0, tokens_per_view: 32, fine_weight: 0.0, stopgrad_mean: false}
+  dense: {weight: 1.0, tokens_per_view: 32}
   predict:
     weight: 1.0
     pixel_weight: 0.5
@@ -176,9 +175,6 @@ loss:
     block_tokens: [3, 6]
     depth: 4
     ramp_steps: 2000
-    fine_weight: 0.0
-    fine_blocks: 2
-    fine_block_tokens: [2, 3]
   # task branch (R14's)
   balance: uncertainty
   ema_decay: 0.99

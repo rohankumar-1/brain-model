@@ -193,15 +193,14 @@ def _group_from_boxes(
 
     With ``geo`` (one (B, 3, 3) map per view, ``draw_geometry``) a view is not cut here: it is sampled on the GPU
     (``batch3d.prepare``) from the whole volume through ``theta``, rotated / scaled / flipped about the crop's
-    center. Its tokens are then matched to the volume by where their centers land: ``pos`` / ``tok_pos`` are the
-    coarse / native cells of those points, and ``fg`` the volume's token gate there, so views of the same anatomy
+    center. Its tokens are then matched to the volume by where their centers land: ``pos`` are the coarse
+    cells of those points, and ``fg`` the volume's token gate there, so views of the same anatomy
     still meet in the dense terms."""
     ratio = [c // p for c, p in zip(coarse_patch, patch)]  # per (x, y, z); 1 for coarse groups
     size_tok = (size_coarse[0] * ratio[2], size_coarse[1] * ratio[1], size_coarse[2] * ratio[0])
     cpx, cpy, cpz = coarse_patch
-    views, coords, fg, pmm, parent, pos, tok_pos = [], [], [], [], [], [], []
+    views, coords, fg, pmm, parent, pos = [], [], [], [], [], []
     n_coarse = size_coarse[0] * size_coarse[1] * size_coarse[2]
-    native_grid = tuple(keep.shape[1:])
     zz, yy, xx = torch.meshgrid(*(torch.arange(n) for n in size_tok), indexing="ij")
     slot = ((zz // ratio[2]) * size_coarse[1] + yy // ratio[1]) * size_coarse[2] + xx // ratio[0]
     size_vox = tuple(t * q for t, q in zip(size_tok, (patch[2], patch[1], patch[0])))
@@ -217,7 +216,7 @@ def _group_from_boxes(
             thetas.append(_theta(m, center, size_vox, vol_zyx))
             src_tok = _map_tokens(m, center, size_vox, (patch[2], patch[1], patch[0]), size_tok)
             gate = keep_stripped if dropped and keep_stripped is not None else keep
-            nat, _, f = _lookup(src_tok, (patch[2], patch[1], patch[0]), gate)
+            _, _, f = _lookup(src_tok, (patch[2], patch[1], patch[0]), gate)
             slot_src = _map_tokens(m, center, size_vox, (cpz, cpy, cpx), size_coarse)
             cpos, cin, _ = _lookup(slot_src, (cpz, cpy, cpx), coarse_keep)
             # a token whose slot center left the volume has no partner position: drop it from every term
@@ -226,7 +225,6 @@ def _group_from_boxes(
             coords.append(c)
             pmm.append(p)
             pos.append(cpos)
-            tok_pos.append(nat)
             parent.append(slot.reshape(1, -1).expand(o.shape[0], -1))
             fg.append(f)
             continue
@@ -236,13 +234,12 @@ def _group_from_boxes(
         coords.append(c)
         pmm.append(p)
         pos.append(_flat_index(o, size_coarse, grid_zyx))
-        tok_pos.append(_flat_index(o_native, size_tok, native_grid))
         parent.append(slot.reshape(1, -1).expand(o.shape[0], -1))
         dropped = stripped is not None and drop is not None and drop[len(views) - 1]
         fg.append(_crop_fg(keep_stripped if dropped and keep_stripped is not None else keep, o_native, size_tok))
     out = {"coords": torch.stack(coords), "patch_mm": torch.stack(pmm),
            "parent": torch.stack(parent).to(torch.int32), "pos": torch.stack(pos).to(torch.int32),
-           "tok_pos": torch.stack(tok_pos).to(torch.int32), "fg": torch.stack(fg), "n_par": n_coarse}
+           "fg": torch.stack(fg), "n_par": n_coarse}
     if geo is not None:
         out["theta"] = torch.stack(thetas)
         out["drop"] = torch.tensor([bool(drop is not None and drop[k]) for k in range(len(thetas))])[:, None] \
@@ -265,9 +262,8 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
     """CPU crops of a (B, 1, Z, Y, X) volume in any float dtype.
 
     Per group ``g``: ``g_view`` (V, B, 1, Z, Y, X), ``g_coords`` (V, B, N, 3), ``g_fg`` (V, B, N),
-    ``g_patch_mm`` (V, B, 3), ``g_parent`` (V, B, N), ``g_pos`` (V, B, P) on the coarse volume grid, and
-    ``g_tok_pos`` (V, B, N) on this group's native volume grid (fine patches: 8 cells per coarse
-    position). The window pair is one crop.
+    ``g_patch_mm`` (V, B, 3), ``g_parent`` (V, B, N), ``g_pos`` (V, B, P) on the coarse volume grid.
+    The window pair is one crop.
     """
     volume = batch["volume"].detach()
     modality = batch["modality"].detach().cpu()
@@ -360,8 +356,6 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
         if "vshape" in g:
             out.setdefault("vshape", {})[name] = g.pop("vshape")
         out.update({f"{name}_{k}": t for k, t in g.items()})
-        if name == "fine":
-            out["n_pos_fine"] = int(keep[0].numel())
     if geo_on:
         out["volume_full"] = volume.half() if volume.dtype != torch.float16 else volume
         skull = (cfg.get("aug") or {}).get("skull") or {}

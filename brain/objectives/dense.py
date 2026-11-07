@@ -24,14 +24,13 @@ def parent_mean(tok: torch.Tensor, keep: torch.Tensor, parent: torch.Tensor, n_p
     return (s / c.clamp_min(1.0)[:, None]).view(r, n_par, d), (c > 0).view(r, n_par)
 
 
-def consensus(emb: list[torch.Tensor], valid: list[torch.Tensor], pos: list[torch.Tensor], n_pos: int,
-              stopgrad_mean: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+def consensus(emb: list[torch.Tensor], valid: list[torch.Tensor], pos: list[torch.Tensor],
+              n_pos: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Mean squared distance of each view's position embedding to the mean over views at that position.
 
     ``emb[i]`` is (B, P_i, D), ``valid[i]`` (B, P_i) bool, ``pos[i]`` (B, P_i) long in [0, n_pos). Only
     positions covered by at least two views count. Returns the loss and the fraction of entries that were
-    covered (a health number, not a loss term). ``stopgrad_mean`` freezes the consensus so each view has
-    to match a target it does not move.
+    covered (a health number, not a loss term).
 
     Each view first averages its own entries at a position (a rotated crop can put two of its tokens in one coarse
     cell), so the consensus is the mean over views and coverage counts views. Before 2026-10-25 it counted entries:
@@ -50,8 +49,6 @@ def consensus(emb: list[torch.Tensor], valid: list[torch.Tensor], pos: list[torc
         s = s + sv / cv.clamp_min(1.0)[:, None]
         c = c + (cv > 0).float()
     mean = s / c.clamp_min(1.0)[:, None]
-    if stopgrad_mean:
-        mean = mean.detach()
     total, covered, entries = emb[0].new_zeros(()).float(), emb[0].new_zeros(()).float(), emb[0].new_zeros(()).float()
     for e, v, f in zip(emb, valid, flats):
         cov = v.reshape(-1) & (c[f] >= 2)

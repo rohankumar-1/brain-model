@@ -62,9 +62,6 @@ def loss_kwargs(cfg: dict) -> dict:
         lamb=float(lc["lamb"]), win_weight=float(lc.get("win_weight", 1.0)),
         dense_weight=float(dense.get("weight", 0.0)), tokens_per_view=int(dense.get("tokens_per_view", 4)),
         predict_weight=float(pr.get("weight", 0.0)), pixel_weight=float(pr.get("pixel_weight", 0.0)),
-        stopgrad_mean=bool(dense.get("stopgrad_mean", False)),
-        fine_weight=float(dense.get("fine_weight", 0.0)),
-        fine_predict_weight=float(pr.get("fine_weight", 0.0)),
     )
 
 
@@ -75,10 +72,16 @@ def metric_keys(cfg: dict) -> list[str]:
     predict_on = dense_on and lk["predict_weight"] > 0
     pix = ["pix"] if lk["pixel_weight"] > 0 else []
     keys = ["loss", "inv", "win", "sigreg"] + (["dense_inv", "dense_sig", "overlap"] if dense_on else [])
-    keys += ["fine_inv", "fine_overlap"] if dense_on and lk["fine_weight"] > 0 else []
     keys += ["pred"] + pix if predict_on else []
-    keys += ["fine_pred"] + (["fine_pix"] if pix else []) if predict_on and lk["fine_predict_weight"] > 0 else []
     return keys
+
+
+def viewnet_from_config(enc: BrainEncoder, cfg: dict) -> ViewNet:
+    """The SSL view network over ``enc`` with the heads the loss config uses (lejepa3d and joint)."""
+    lk = loss_kwargs(cfg)
+    dense_on = lk["dense_weight"] > 0
+    return ViewNet(enc, dense=dense_on, predict=dense_on and lk["predict_weight"] > 0,
+                   cells_xyz=tuple((cfg["loss"].get("predict") or {}).get("pixel_cells", (2, 2, 2))))
 
 
 def _record(obj, stream) -> None:
@@ -155,7 +158,6 @@ class Trainer(engine.Trainer):
         if float(pcfg.get("weight", 0.0)) > 0 and not self.dense_on:
             raise SystemExit("loss.predict needs loss.dense.weight > 0: it predicts the token head's embeddings")
         predict_on = self.dense_on and self.lk["predict_weight"] > 0
-        fine_pred_on = predict_on and float(pcfg.get("fine_weight", 0.0)) > 0
         self.ramp = int(pcfg.get("ramp_steps", 0))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
 
@@ -176,9 +178,7 @@ class Trainer(engine.Trainer):
         if rt.world > 1:
             raw = torch.nn.SyncBatchNorm.convert_sync_batchnorm(raw)
         self.raw, self.module = raw, raw
-        self.core = ViewNet(raw, local_pooled=bool(lc.get("local_pooled", False)), dense=self.dense_on,
-                            predict=predict_on, predict_fine=fine_pred_on,
-                            cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
+        self.core = viewnet_from_config(raw, cfg)
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
         self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"])), lr=float(o["lr"]),
                                      betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
@@ -196,7 +196,7 @@ class Trainer(engine.Trainer):
         self.nxt, self.last_out = None, None
         self.core.train()
         self._banner = (f"brain-{raw.size} params={raw.count_parameters():,} batch={self.batch}x{rt.world} "
-                        f"dense={self.dense_on} predict={predict_on} fine={fine_pred_on} proj_norm={raw.projector.norm}")
+                        f"dense={self.dense_on} predict={predict_on} proj_norm={raw.projector.norm}")
 
     def _init_from(self, path) -> None:
         """Weights only: a fresh optimizer and schedule. Heads the source never had (the predictor) start random."""

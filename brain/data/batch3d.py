@@ -42,7 +42,7 @@ def block_mask(rows: int, grid_zyx: tuple[int, int, int], blocks: int, lo: int, 
     return out.reshape(rows, -1)
 
 
-_ROW_KEYS = ("view", "coords", "fg", "patch_mm", "parent", "pos", "tok_pos")
+_ROW_KEYS = ("view", "coords", "fg", "patch_mm", "parent", "pos")
 
 
 def _warp(x: torch.Tensor, grid: torch.Tensor, mode: str) -> torch.Tensor:
@@ -142,11 +142,6 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
     if float(pr.get("weight", 0.0)) > 0:
         _mask_group(d, chunks, device, buckets, group="global", ctx_key="ctx_keep", tgt_key="tgt_mask",
                     plan="ctx", blocks=int(pr.get("blocks", 3)), block_tokens=pr.get("block_tokens", (3, 6)))
-        if float(pr.get("fine_weight", 0.0)) > 0 and "fine" in d["groups"]:
-            _mask_group(d, chunks, device, buckets, group="fine", ctx_key="fine_ctx_keep",
-                        tgt_key="fine_tgt_mask", plan="fine_ctx",
-                        blocks=int(pr.get("fine_blocks", 2)),
-                        block_tokens=pr.get("fine_block_tokens", (2, 3)))
     return d
 
 

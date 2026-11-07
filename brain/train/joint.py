@@ -29,12 +29,12 @@ import torch.nn as nn
 
 from brain.common.paths import resolve
 from brain.data.batch3d import prepare as ssl_prepare
-from brain.models.viewnet3d import ViewNet, batch_meta
+from brain.models.viewnet3d import batch_meta
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
 from brain.train import multitask
 from brain.train.lejepa3d import build_encoder as build_ssl_encoder
-from brain.train.lejepa3d import forever_loader, loss_kwargs, metric_keys, synthetic_loader
+from brain.train.lejepa3d import forever_loader, loss_kwargs, metric_keys, synthetic_loader, viewnet_from_config
 
 
 def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
@@ -156,13 +156,7 @@ class Trainer(multitask.Trainer):
         return enc.train().requires_grad_(True)
 
     def wrap(self, rt):
-        lk, pcfg = loss_kwargs(self.cfg), self.cfg["loss"].get("predict") or {}
-        dense_on = lk["dense_weight"] > 0
-        predict_on = dense_on and lk["predict_weight"] > 0
-        core = ViewNet(self.raw.backbone, local_pooled=bool(self.cfg["loss"].get("local_pooled", False)),
-                       dense=dense_on, predict=predict_on,
-                       predict_fine=predict_on and float(pcfg.get("fine_weight", 0.0)) > 0,
-                       cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))))
+        core = viewnet_from_config(self.raw.backbone, self.cfg)
         self.joint = JointNet(core, self.raw)
         if rt.world > 1:     # the projector's BatchNorm sees one GPU's views otherwise (parameters are reused)
             self.joint = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.joint)

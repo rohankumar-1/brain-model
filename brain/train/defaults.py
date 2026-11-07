@@ -84,16 +84,14 @@ LEJEPA3D: dict[str, Any] = {
     "loss": {
         "lamb": 0.02,
         "win_weight": 1.0,
-        "local_pooled": False,
         "n_proj": 256,
         "gather_ddp": True,
-        "dense": {"weight": 1.0, "tokens_per_view": 32, "fine_weight": 0.0, "stopgrad_mean": False},
+        "dense": {"weight": 1.0, "tokens_per_view": 32},
         # Masked prediction on the global crops (needs the dense term); weight 0 builds no predictor.
         # Hidden blocks: ``blocks`` cuboids with sides in ``block_tokens``. The predictor regresses each
         # hidden token's full-crop embedding and, with pixel_weight > 0, the voxel cell means of kept patches.
         "predict": {"weight": 0.0, "pixel_weight": 0.5, "pixel_cells": [2, 2, 2], "blocks": 3,
-                    "block_tokens": [3, 6], "depth": 4, "ramp_steps": 2000,
-                    "fine_weight": 0.0, "fine_blocks": 2, "fine_block_tokens": [2, 3]},
+                    "block_tokens": [3, 6], "depth": 4, "ramp_steps": 2000},
     },
     # lr_floor: the schedule's final LR as a fraction of the peak (engine.lr_of)
     "optim": {"lr": 2.5e-4, "weight_decay": 0.05, "warmup_steps": 2000, "clip_grad": 1.0, "batch_size": 4,
