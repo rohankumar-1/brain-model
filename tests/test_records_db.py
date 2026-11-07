@@ -77,8 +77,8 @@ def test_probe_records_land_in_the_probe_report(tmp_path, monkeypatch):
 
     monkeypatch.setattr(records, "RESULTS_ROOT", tmp_path / "results")
     ck = _ckpt(tmp_path)
-    prov = SimpleNamespace(name="brainmodel_tiny/last", ckpt=ck, variant=None)
-    ctrl = SimpleNamespace(name="control/pixel", ckpt=None, variant=None)
+    prov = SimpleNamespace(name="brainmodel_tiny/last", ckpt=ck)
+    ctrl = SimpleNamespace(name="control/pixel", ckpt=None)
     one = {"ap": 0.2, "auroc": 0.8, "prevalence": 0.05, "lift": 4.0}
     les = {"atlas": {"linear": one, "mlp": one, "n_train": 3, "n_test": 2},
            **{f"mean_{k}_{m}": one[m] for k in ("linear", "mlp") for m in ("ap", "lift", "auroc")}}

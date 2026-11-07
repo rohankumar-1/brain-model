@@ -23,25 +23,6 @@ def resolve_path(slices_root: Path, rel: str) -> Path:
     return path if path.is_absolute() else Path(slices_root) / path
 
 
-def load_frozen_encoder(ckpt_path: Path, device: torch.device):
-    """One of our 3D BrainEncoder checkpoints (SSL, multitask or joint), frozen."""
-    from brain.downstream.models import resolve_model
-
-    return resolve_model(ckpt_path).load(device)
-
-
-def _fp(ckpt: Path) -> str:
-    from brain.downstream.records import fingerprint
-
-    return fingerprint(Path(ckpt))
-
-
-def cache_fresh(cache_path: Path, ckpt: Path, recorded: str | None) -> bool:
-    """Whether a cache was built from the checkpoint's current weights (its recorded fingerprint matches). Caches are
-    keyed by checkpoint path, and ``best.pt`` / ``last.pt`` are overwritten during training."""
-    return bool(recorded) and str(recorded) == _fp(ckpt)
-
-
 def _readable(path: Path) -> bool:
     try:
         with np.load(path, allow_pickle=False) as d:
@@ -52,26 +33,6 @@ def _readable(path: Path) -> bool:
         return {"volume_ids", "representation", "mus", "mask"} <= files
     except Exception:
         return False
-
-
-def cache_tag() -> str:
-    """Encoding variants of our 3D encoders set by environment (``BRAIN_FINE_GRID`` / ``FINE_POOL`` / ``EVAL_TILE`` /
-    ``REFINE`` / ``EVAL_TAPS``): part of the cache name, and recorded with every result (``records.ENV_FLAGS``, and the
-    protocol's ``encoding``, which keeps a variant's results apart from the plain encoder's)."""
-    tag = ""
-    if os.environ.get("BRAIN_FINE_GRID", "") == "1":
-        tag += "_finegrid"
-    elif os.environ.get("BRAIN_FINE_POOL", "") == "1":
-        tag += "_finepool"
-    if os.environ.get("BRAIN_EVAL_TILE", "") == "1":
-        tag += "_tiled"
-    refine = os.environ.get("BRAIN_REFINE", "").strip()        # e.g. "0.15": that share of cells as 8 half-size tokens
-    if refine and float(refine) > 0:
-        tag += f"_ref{refine}"
-    taps = os.environ.get("BRAIN_EVAL_TAPS", "").strip()       # e.g. "3": block 4's output (0-based index)
-    if taps:
-        tag += f"_tap{taps.replace(',', '-')}" + ("only" if os.environ.get("BRAIN_EVAL_TAPS_ONLY", "") == "1" else "")
-    return tag
 
 
 def load_or_build_embeddings(
@@ -91,9 +52,8 @@ def load_or_build_embeddings(
     from brain.downstream.models import ModelRef, resolve_model
 
     model = model if isinstance(model, ModelRef) else resolve_model(model)
-    tag = cache_tag() if model.is_checkpoint else ""
     win = (window or "canonical").lower() if model.is_checkpoint else "native"   # registry models do their own
-    path = Path(cache_dir) / model.cache_key / task / f"embeddings_{CACHE_VERSION_3D}_{win}{tag}.npz"
+    path = Path(cache_dir) / model.cache_key / task / f"embeddings_{CACHE_VERSION_3D}_{win}.npz"
     ids = [str(v) for v in volume_ids]
     if path.exists() and not force and not _readable(path):
         print(f"[cache] unreadable (truncated write?), rebuilding: {path}")
@@ -129,10 +89,6 @@ def load_or_build_embeddings(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     enc = model.load(device)
-    taps = os.environ.get("BRAIN_EVAL_TAPS", "").strip()
-    if taps and model.is_checkpoint:
-        enc.tap_blocks = tuple(int(t) for t in taps.split(","))
-        enc.tap_norm, enc.taps_only = True, os.environ.get("BRAIN_EVAL_TAPS_ONLY", "") == "1"
     print(f"[encoder] {model.model_id} ({model.training_class}, {getattr(enc, 'kind', '?')}) window={win}")
     e = extract_volume_embeddings(enc, image_paths, ids, slices_root, modalities=modalities, window=win)
     mus = e["mus"]

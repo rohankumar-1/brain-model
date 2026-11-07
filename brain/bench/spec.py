@@ -23,6 +23,7 @@ class Benchmark:
     seen: dict[str, list[str]]             # benchmark task -> registry tasks whose training makes it in-domain
     labels_dir: str | None                 # in-domain / few-shot label table
     readouts_file: Path | None             # the pinned readout per task (``python -m brain.bench pin``)
+    results_from: str | None               # results of this version: runs finished after this (UTC)
     raw: dict
     # later indexes that only add rows (``python -m brain.bench index-check``): results on them count as current
     index_compatible: tuple[str, ...] = ()
@@ -51,9 +52,8 @@ class Benchmark:
     def tasks_for(self, model, with_seg: bool = False) -> list[str]:
         """The benchmark tasks ``model`` (a ``ModelRef``) is scored on: its modalities, segmentation for our 3D
         encoders only (``with_seg``), its seen tasks left out."""
-        mods = {str(m).lower()[:2] for m in (model.spec.get("modalities") or ("ct", "mri"))}
         tasks = self.tasks + (self.seg_tasks if with_seg and model.is_checkpoint else [])
-        return [t for t in tasks if self.modality.get(t, "")[:2] in mods and t not in self.seen_by(model)]
+        return [t for t in tasks if self.modality.get(t, "")[:2] in model.modality_set and t not in self.seen_by(model)]
 
     def seen_by(self, model) -> set[str]:
         """Benchmark tasks whose labels ``model`` trained on: a registry model's ``seen_tasks``; for ours, the tasks
@@ -71,7 +71,8 @@ def load(path: Path = SPEC) -> Benchmark:
                   reference=str(raw["reference"]), groups=dict(raw["transfer"]),
                   seg_groups=dict(raw.get("transfer_seg") or {}), modality=modality,
                   seen={k: list(v) for k, v in (raw.get("seen") or {}).items()}, labels_dir=raw.get("labels_dir"),
-                  readouts_file=REPO_ROOT / raw["readouts"] if raw.get("readouts") else None, raw=raw,
+                  readouts_file=REPO_ROOT / raw["readouts"] if raw.get("readouts") else None,
+                  results_from=raw.get("results_from"), raw=raw,
                   index_compatible=tuple(raw.get("index_compatible") or ()))
     missing = [t for t in b.tasks + b.seg_tasks if t not in modality]
     if missing:

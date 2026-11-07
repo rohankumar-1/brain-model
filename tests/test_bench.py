@@ -51,6 +51,7 @@ def test_registry_entries_are_valid_and_resolve():
     assert m.training_class == "baseline" and m.model_id.startswith("regional_stats@") and not m.is_checkpoint
     with pytest.raises(SystemExit):
         resolve_model("no_such_model")
+    assert load().reference in reg                                   # the leaderboard's reference is a named model
 
 
 def test_every_benchmark_task_has_a_pinned_readout():
@@ -104,3 +105,19 @@ def test_index_check_accepts_added_rows_only(tmp_path):
     assert not index_check(tmp_path / "old.csv", tmp_path / "moved.csv")
     assert not index_check(tmp_path / "added.csv", tmp_path / "old.csv")      # a dropped row
     assert load().index_shas[0] == load().index_sha1
+
+
+def test_replicate_reads_our_encoders_by_their_mean_token():
+    """A BQ encoder has no trained CLS (None for task-token models): the replication feature is the mean foreground
+    token; a published model keeps its own global feature."""
+    import torch
+
+    from brain.bench.replicate import global_feature
+    from brain.downstream.models import VolumeEmbedding
+
+    tok = torch.tensor([[1.0, 0.0], [3.0, 2.0], [100.0, 100.0]])
+    e = VolumeEmbedding(tokens=tok, xyz=torch.zeros(3, 3), keep=torch.tensor([True, True, False]))
+    assert global_feature(e, external=False).tolist() == [2.0, 1.0]
+    e.cls = torch.tensor([7.0, 8.0])
+    assert global_feature(e, external=True).tolist() == [7.0, 8.0]
+    assert global_feature(e, external=False).tolist() == [2.0, 1.0]

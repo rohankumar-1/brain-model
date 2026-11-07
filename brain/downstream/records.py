@@ -37,11 +37,8 @@ from brain.common.paths import REPO_ROOT
 
 RECORD_VERSION = 1
 RESULTS_ROOT = Path(os.environ.get("BRAIN_RESULTS", REPO_ROOT / "results"))
-# environment settings that change what an evaluation computes (recorded with every result; the encoding ones are also
-# part of the embedding cache name, ``embeddings.cache_tag``)
-ENV_FLAGS = ("BRAIN_FINE_POOL", "BRAIN_FINE_GRID", "BRAIN_EVAL_TILE", "BRAIN_REFINE", "BRAIN_EVAL_TAPS",
-             "BRAIN_EVAL_TAPS_ONLY", "BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_EMBED_BATCH",
-             "BRAIN_STRIPPED", "OMP_NUM_THREADS")
+# environment settings that change what an evaluation computes (recorded with every result)
+ENV_FLAGS = ("BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_STRIPPED", "OMP_NUM_THREADS")
 
 
 def now_utc() -> str:
@@ -165,15 +162,16 @@ def _model_info(path: str, size: int, mtime: float) -> dict:
     return jsonable(info)
 
 
-def model_info(ckpt: Path | str | None, name: str | None = None, variant: str | None = None) -> dict:
-    """``model_id`` = ``<run>/<file>@<fingerprint[:10]>[+variant]``; controls without a checkpoint use ``name``."""
+def model_info(ckpt: Path | str | None, name: str | None = None) -> dict:
+    """``model_id`` = ``<run>/<file>@<fingerprint[:10]>``; controls without a checkpoint use ``name``. (Records from
+    before 2026-11-07 may carry ``+<variant>``, an encoding variant of probe3d: ``brain.eval.report.suite_heads`` drops
+    them.)"""
     if ckpt is None:
-        return {"model_id": name or "unknown", "ckpt": None, "control": True, "variant": variant}
+        return {"model_id": name or "unknown", "ckpt": None, "control": True, "variant": None}
     p = Path(ckpt).resolve()
     st = p.stat()
     info = dict(_model_info(str(p), st.st_size, st.st_mtime))
-    mid = f"{info['run_name']}/{p.stem}@{info['fingerprint'][:10]}"
-    info.update(model_id=mid + (f"+{variant}" if variant else ""), control=False, variant=variant)
+    info.update(model_id=f"{info['run_name']}/{p.stem}@{info['fingerprint'][:10]}", control=False, variant=None)
     return info
 
 

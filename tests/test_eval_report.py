@@ -1,4 +1,4 @@
-"""Run evaluation: the skill scale, the report's paired bootstrap, and the evaluation protocol fixes.
+"""Benchmark scoring: the skill scale, the paired bootstrap, and the evaluation protocol fixes.
 python tests/run.py tests/test_eval_report.py"""
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import balanced_accuracy_score, r2_score, roc_auc_score
 
-from brain.eval.report import core_tasks, metric_reps, pair_rows, summarise
+from brain.eval.report import metric_reps, pair_rows, summarise
 from brain.eval.skill import scale, skill, summarize
 
 
@@ -92,5 +92,8 @@ def test_head_is_never_picked_on_test():
 
 
 def test_core_transfer_set_has_no_duplicates():
-    ts = core_tasks(with_seg=True)
+    from brain.bench.spec import load
+
+    b = load()
+    ts = b.tasks + b.seg_tasks
     assert len(ts) == len(set(ts)) and "cq500" in ts and "rsna_ich" in ts

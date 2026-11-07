@@ -81,9 +81,6 @@ def multilabel_metrics(
         "auc_ovr_macro": _safe_auc(y_true, y_score, average="macro"),
         "auc_ovr_micro": _safe_auc(y_true, y_score, average="micro"),
         "auc_ovr_weighted": _safe_auc(y_true, y_score, average="weighted"),
-        # OVO is defined for multiclass, not multilabel
-        "auc_ovo_macro": None,
-        "auc_ovo_weighted": None,
         "accuracy_subset": float(accuracy_score(y_true, y_pred)),
         "accuracy_elementwise": float((y_true == y_pred).mean()),
         "per_label": per_label,
@@ -110,56 +107,16 @@ def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
-def region_dice(
-    gt: np.ndarray,
-    pred: np.ndarray,
-    regions: dict[str, tuple[int, ...]],
-    *,
-    eps: float = 1e-6,
-) -> dict:
-    """Dice per named region. ``gt`` and ``pred`` are integer label volumes."""
-    gt = np.asarray(gt)
-    pred = np.asarray(pred)
-    if gt.shape != pred.shape:
-        raise ValueError(f"shape mismatch {gt.shape} vs {pred.shape}")
-    per: dict[str, float] = {}
-    for name, ids in regions.items():
-        t = np.isin(gt, ids).astype(np.float64)
-        p = np.isin(pred, ids).astype(np.float64)
-        inter = 2.0 * float((t * p).sum())
-        denom = float(t.sum() + p.sum())
-        per[name] = float((inter + eps) / (denom + eps))
-    vals = list(per.values())
-    return {
-        "task_type": "segmentation",
-        "dice_macro": float(np.mean(vals)) if vals else float("nan"),
-        "dice_per_class": per,
-    }
+# the scalar metrics a run's summary.csv lists per head (with every ``dice_*``)
+TABLE_KEYS = ("auc", "auc_ovr_macro", "auc_ovr_micro", "auc_ovr_weighted", "accuracy", "accuracy_subset",
+              "accuracy_elementwise", "mae", "r2", "pearson")
 
 
 def summarize_for_table(head_name: str, metrics: dict) -> dict:
     """Flat row for CSV comparison across heads."""
     row = {"head": head_name, "task_type": metrics.get("task_type")}
-    for k in (
-        "auc",
-        "auc_ovr_macro",
-        "auc_ovr_micro",
-        "auc_ovr_weighted",
-        "auc_ovo_macro",
-        "auc_ovo_weighted",
-        "accuracy",
-        "accuracy_subset",
-        "accuracy_elementwise",
-        "dice_macro",
-        "dice_mean",
-        "mae",
-        "r2",
-        "pearson",
-    ):
-        if k in metrics and metrics[k] is not None and not isinstance(metrics[k], dict):
-            row[k] = metrics[k]
     for k, v in metrics.items():
-        if k.startswith("dice_") and k not in row and isinstance(v, (int, float)):
+        if (k in TABLE_KEYS or k.startswith("dice_")) and isinstance(v, (int, float)) and not isinstance(v, bool):
             row[k] = v
     return row
 

@@ -2,9 +2,10 @@
 # and published encoders and baselines behind adapters.
 #
 # A BrainQuery entry has ``ckpt`` (and a ``note``); its training class, modalities and the tasks it trained on are read
-# from the checkpoint. Naming: BQ-v3 is the self-supervised encoder; BQ-R<n> multitask post-training run n; BQ-A<n> joint
-# SSL + task run n; BQ-T<n> task-token multitask run n; BQ-S-<task> a single-task specialist; BQ-12k-* the 12k-step
-# readout comparison of 2026-10-26.
+# from the checkpoint. Naming: BQ-v3 / BQ-v4 are the self-supervised encoders; BQ-R<n> multitask post-training run n
+# (-EMA: its weight average; R14F: R14 with study-level input); BQ-random the untrained architecture. Older runs (R2-R6,
+# the joint A1 / A2, T1, the 12k-step readout comparison, the hemorrhage specialist) were retired on 2026-11-07: their
+# results stay in the records database under their model ids.
 #
 # Any other entry:
 #   adapter:            module:Class, a brain.downstream.models.ExternalEncoder subclass (brain/downstream/adapters/)
@@ -18,18 +19,6 @@
 #   kwargs:             adapter options
 models:
   BQ-v3:          {ckpt: runs/v3/cls_s42/best.pt, note: "self-supervised 3D LeJEPA ViT-S, step 18k: the encoder every BQ run starts from"}
-  BQ-R2:          {ckpt: runs/multitask/snapshots/mt_synthseg_s42/step_0017000.pt, note: "multitask run 2: SynthSeg anatomy, task groups"}
-  BQ-R3:          {ckpt: runs/multitask/v4general_s42/best.pt, note: "multitask run 3: + general slot, more tasks"}
-  BQ-R4:          {ckpt: runs/multitask/v5enclr_s42/best.pt, note: "multitask run 4: encoder 0.5x LR"}
-  BQ-R5:          {ckpt: runs/multitask/v6nogenunc_s42/best.pt, note: "multitask run 5: uncertainty balancing"}
-  BQ-R6:          {ckpt: runs/multitask/v7nosmall_s42/best.pt, note: "multitask run 6: run 5 without the small clinical tasks (slot readout)"}
-  BQ-A1:          {ckpt: runs/joint/a1_warm_v3/best.pt, note: "joint SSL + tasks warm from BQ-v3, slot readout, 40k steps"}
-  BQ-12k-slots:   {ckpt: runs/multitask/omni_a_slots/best.pt, note: "12k-step comparison: slot readout"}
-  BQ-12k-tokens:  {ckpt: runs/multitask/omni_b_tokens/best.pt, note: "12k-step comparison: task tokens (became the default)"}
-  BQ-12k-moe:     {ckpt: runs/multitask/omni_c_tokens_moe/best.pt, note: "12k-step comparison: task tokens + MoE top blocks"}
-  BQ-S-hemorrhage: {ckpt: runs/single/hemorrhage/best.pt, note: "single-task specialist: the 6 hemorrhage tasks"}
-  BQ-T1:          {ckpt: runs/multitask/tokens_s42/best.pt, note: "task tokens, full length (configs/multitask/tokens.yaml); next batch"}
-  BQ-A2:          {ckpt: runs/joint/tokens_warm_v3/best.pt, note: "joint SSL + task tokens (configs/joint/tokens_warm_v3.yaml); next batch"}
   BQ-v4:          {ckpt: runs/v4/scratch_s42/last.pt, note: "self-supervised LeJEPA ViT-S from scratch, LR 5e-4, stopped at step 27,660 of 30k (2026-10-30)"}
   BQ-R7:          {ckpt: runs/multitask/r7_targets/last.pt, note: "R7 targets on BQ-v4, task tokens, labels v5, 12k steps (configs/multitask/r7_targets.yaml)"}
   BQ-R7-SSL:      {ckpt: runs/multitask/r7_ssl/last.pt, note: "R7 + self-supervised tasks: masked reconstruction, contrast synthesis (configs/multitask/r7_ssl.yaml)"}
@@ -41,7 +30,7 @@ models:
   BQ-R13-EMA:     {ckpt: runs/multitask/r13/last_ema.pt, note: "R13's weight average (decay 0.999) at step 75k"}
   BQ-R14:         {ckpt: runs/multitask/r14/last.pt, note: "R13 + 25k steps: true negatives (labels v11 empty masks, 3,006 RSNA bleed pseudo-masks), negative_seg_loss, skull-strip matching, synthetic contrast, gantry shear, audit fixes (configs/multitask/r14.yaml)"}
   BQ-R14-EMA:     {ckpt: runs/multitask/r14/last_ema.pt, note: "R14's weight average (decay 0.999) at step 100k"}
-  BQ-R13-centergate: {ckpt: runs/multitask/r13/last_centergate.pt, note: "R13's weights read out with the centre-voxel token gate instead of its 25% gate (gate test)"}
+  BQ-R14F:        {ckpt: runs/multitask/r14f/last.pt, note: "R14 + 15k steps with study-level input: a study's co-registered sequences fused inside the encoder after block 8 (configs/multitask/r14f.yaml); scored on single scans here"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
   regional_stats:
@@ -90,6 +79,8 @@ models:
 #   sfcn         supervised, [mri]  age / sex on UK Biobank; github.com/ha-ha-ha-han/UKBiobank_deep_pretrain
 #                (seen_tasks: none of ours, but its age head makes the age tasks in-domain: list ixi_age etc.)
 #   brainfm      supervised, [ct, mri]  SynthSeg-style multitask UNet; github.com/jhuldr/BrainFM; arXiv 2509.00549
+# Adapters written, weights downloaded, not registered yet: brain/downstream/adapters/amaes.py (AMAES, FOMO-260K) and
+# brain/downstream/adapters/brainfm.py (BrainFM).
 # An adapter: subclass ExternalEncoder, set ``dim`` (and ``needs_brain`` for skull stripping), implement ``encode``
 # (resample / crop / normalise the stored 1 mm volume as the model expects, run it, return ``pooled`` and optionally
 # ``tokens`` + ``xyz`` + ``keep``); then add the entry above with its weights path.

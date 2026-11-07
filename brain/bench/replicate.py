@@ -2,17 +2,17 @@
 
 The benchmark scores every model under one protocol; this checks the adapter instead: each target copies the paper's
 protocol (its test scans where published, its training-set size, its linear probe and metric), so a correctly run
-model lands within the paper's interval. Features are the adapter's global feature (``pooled``, e.g. BrainIAC's first
-output token), extracted once per volume and cached; the probe is the paper's: dropout 0.2 + one linear layer, Adam
+model lands within the paper's interval. Features are one vector per volume (``global_feature``: a published model's
+own global feature, e.g. BrainIAC's first output token; for our encoders the mean foreground token, as the benchmark's
+pooled readout), extracted once per volume and cached; the probe is the paper's: dropout 0.2 + one linear layer, Adam
 (lr 0.001, batch 16), the best epoch on validation, over ``--seeds`` seeds (training / validation scans resampled per
 seed where the paper's are not published). Deviations: features without the paper's training augmentation.
 
     python -m brain.bench.replicate --model brainiac [--targets mci_oasis1 ...] [--seeds 5]
-    python -m brain.bench.replicate --paper brainiac --model BQ-R6     # another model under that paper's protocol
+    python -m brain.bench.replicate --paper brainiac --model BQ-R10    # another model under that paper's protocol
 
-Any model can run a paper's targets (its global feature: CLS for BQ), which compares it with the paper's numbers on the
-same test scans. Encoders trained with scan metadata get it as unknown here (it names the contrast: the answer of
-sequence classification).
+Any model can run a paper's targets, which compares it with the paper's numbers on the same test scans. Encoders
+trained with scan metadata get it as unknown here (it names the contrast: the answer of sequence classification).
 """
 
 from __future__ import annotations
@@ -58,6 +58,16 @@ def pool(target: dict, vols: pd.DataFrame) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def global_feature(e, external: bool) -> np.ndarray:
+    """One vector for a ``VolumeEmbedding``: a published model's global feature (``cls``, its adapter's ``pooled``),
+    else the mean of the foreground tokens (our task-token encoders have no trained CLS; as
+    ``run_suite.pooled_embedding``)."""
+    if external and e.cls is not None:
+        return e.cls.float().cpu().numpy()
+    tok, keep = e.tokens.float(), e.keep.bool()
+    return (tok[keep].mean(0) if keep.any() else tok.mean(0)).cpu().numpy()
+
+
 def features(model, df: pd.DataFrame, cache: Path, device: torch.device) -> np.ndarray:
     """(N, D) pooled features of ``df``'s volumes, cached per volume id in ``cache``."""
     have: dict[str, np.ndarray] = {}
@@ -71,7 +81,7 @@ def features(model, df: pd.DataFrame, cache: Path, device: torch.device) -> np.n
         window = "canonical" if model.is_checkpoint else "native"
         for i, r in enumerate(todo):
             e = enc.encode_volume(Path(r.path), r.volume_id, r.modality, window)
-            have[r.volume_id] = e.cls.float().cpu().numpy()
+            have[r.volume_id] = global_feature(e, external=not model.is_checkpoint)
             if (i + 1) % 200 == 0 or i + 1 == len(todo):
                 print(f"[replicate] features {i + 1}/{len(todo)}", flush=True)
                 ids = sorted(have)

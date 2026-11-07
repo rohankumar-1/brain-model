@@ -5,10 +5,9 @@ import torch
 
 from brain.downstream import probe3d as P
 from brain.downstream.embed3d import token_gate
-from brain.common.grid import DEPTH, FINE_TOKEN_GRID, GRID_XYZ, TOKEN_GRID
+from brain.common.grid import DEPTH, GRID_XYZ, TOKEN_GRID
 
 N_TOK = TOKEN_GRID[0] * TOKEN_GRID[1] * TOKEN_GRID[2]
-N_FINE = FINE_TOKEN_GRID[0] * FINE_TOKEN_GRID[1] * FINE_TOKEN_GRID[2]
 
 
 def _vol(device="cpu"):
@@ -55,7 +54,7 @@ def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path):
 
     from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
     from brain.train.lejepa3d import build_encoder
-    from brain.downstream.embeddings import load_frozen_encoder
+    from brain.downstream.models import resolve_model
 
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 16, "proj_hidden": 32},
            "loss": {**DEFAULT_CONFIG["loss"], "predict": {**DEFAULT_CONFIG["loss"]["predict"], "weight": 1.0, "depth": 1}}}
@@ -64,14 +63,14 @@ def test_a_new_checkpoint_loads_and_embeds_a_full_volume(tmp_path):
     d = tmp_path
     path = Path(d) / "m.pt"
     torch.save({"model": enc.state_dict(), "config": cfg, "step": 1}, path)
-    loaded = load_frozen_encoder(path, torch.device("cpu"))
+    loaded = resolve_model(path).load(torch.device("cpu"))
     assert loaded.kind == "brain3d" and loaded.model.token_head is not None
     feat, fg = P.Brain3D(loaded, "new").tokens(_vol(), "mri")
     assert feat.shape == (N_TOK, 64) and fg.shape == (N_TOK,)
     assert float(feat[~fg].abs().sum()) == 0.0 and float(feat[fg].abs().sum()) > 0.0
 
 
-def test_tiled_embedding_matches_one_pass_for_a_full_size_window_and_covers_every_token():
+def test_windows_batched_in_one_forward_match_one_window_at_a_time():
     from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
     from brain.train.lejepa3d import build_encoder
     from brain.downstream.embed3d import FrozenEncoder3D
@@ -79,20 +78,11 @@ def test_tiled_embedding_matches_one_pass_for_a_full_size_window_and_covers_ever
     cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
     enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), GRID_XYZ, (1.0, 1.0, 1.0))
     vol = _vol()
-    one, _, fg = enc.embed_tokens(vol, 0.0, 1.0, "mri")
-    same, _, _ = enc.embed_tokens(vol, 0.0, 1.0, "mri", window_xyz=GRID_XYZ)
-    assert torch.allclose(one.float(), same.float(), atol=1e-4), float((one - same).abs().max())
-    tiled, xyz, fg2 = enc.embed_tokens(vol, 0.0, 1.0, "mri", window_xyz=(128, 128, 64), stride_xyz=(64, 64, 32))
-    assert tiled.shape == one.shape and xyz.shape == (N_TOK, 3) and bool((fg == fg2).all())
-    assert float(tiled[fg].abs().sum(-1).min()) > 0.0 and float(tiled[~fg].abs().sum()) == 0.0
-    assert not torch.allclose(tiled, one, atol=1e-3)  # windows see less context, so the tokens differ
-    import os
-    os.environ["BRAIN_EMBED_BATCH"] = "1"
-    tiled1, _, _ = enc.embed_tokens(vol, 0.0, 1.0, "mri", window_xyz=(128, 128, 64), stride_xyz=(64, 64, 32))
-    os.environ["BRAIN_EMBED_BATCH"] = "8"
-    tiled8, _, _ = enc.embed_tokens(vol, 0.0, 1.0, "mri", window_xyz=(128, 128, 64), stride_xyz=(64, 64, 32))
-    assert torch.allclose(tiled1, tiled8, atol=1e-5)
-    os.environ.pop("BRAIN_EMBED_BATCH", None)
+    both, xyz, fg = enc.embed_windows(vol, [(0.0, 1.0), (0.5, 2.0)], "mri")
+    one, xyz1, fg1 = enc.embed_tokens(vol, 0.5, 2.0, "mri")
+    assert both.shape == (2, N_TOK, enc.dim) and xyz.shape == (N_TOK, 3) and torch.equal(fg, fg1)
+    assert torch.allclose(both[1].float(), one.float(), atol=1e-4) and torch.allclose(xyz, xyz1)
+    assert float(one[~fg].abs().sum()) == 0.0 and float(one[fg].abs().sum()) > 0.0
 
 
 def _volumes(signal: float, n_vol=6, n_tok=300, d=16, seed=0):
@@ -154,68 +144,6 @@ def test_probe_intervals_cover_the_estimate_and_pair_across_encoders():
     assert "paired difference vs bad" in table and "*" in table
     assert "_scores" not in str(good["lesion"]) and "_volumes" not in good["location"]
     assert "[" in P.format_summary({"good": good})
-
-
-def test_fine_patch_tiled_tokens_with_block_taps_cover_the_fine_grid():
-    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
-    from brain.train.lejepa3d import build_encoder
-    from brain.downstream.embed3d import FrozenEncoder3D
-
-    cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
-    model = build_encoder(cfg, torch.device("cpu")).eval()
-    enc = FrozenEncoder3D(model, (8, 8, 4), GRID_XYZ, (1.0, 1.0, 1.0))
-    enc.tap_blocks = (0,)
-    tok, _, fg = enc.embed_tokens(_vol(), 0.0, 1.0, "mri", window_xyz=(128, 128, 64), stride_xyz=(64, 64, 32))
-    assert tok.shape == (N_FINE, 2 * model.embed_dim) and fg.shape == (N_FINE,)
-    assert float(tok[~fg].abs().sum()) == 0.0 and float(tok[fg].abs().sum()) > 0.0
-
-
-def test_fine_pooled_tokens_land_on_the_coarse_grid():
-    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
-    from brain.train.lejepa3d import build_encoder
-    from brain.downstream.embed3d import FrozenEncoder3D
-
-    cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
-    enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), GRID_XYZ, (1.0, 1.0, 1.0))
-    vol = _vol()
-    coarse, xyz, fg = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_pool=False)
-    pooled, xyz2, fg2 = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_pool=True)
-    assert pooled.shape == coarse.shape and bool((fg == fg2).all()) and torch.allclose(xyz, xyz2)
-    assert float(pooled[~fg].abs().sum()) == 0.0 and float(pooled[fg].abs().sum()) > 0.0
-    assert enc.patch_xyz == (16, 16, 8)  # restored after the fine pass
-    assert not torch.allclose(pooled, coarse, atol=1e-3)
-
-
-def test_fine_grid_tokens_keep_the_native_grid():
-    from brain.train.defaults import LEJEPA3D as DEFAULT_CONFIG
-    from brain.train.lejepa3d import build_encoder
-    from brain.downstream.embed3d import FrozenEncoder3D
-
-    cfg = {**DEFAULT_CONFIG, "model": {**DEFAULT_CONFIG["model"], "size": "test", "dense_dim": 0, "proj_hidden": 32}}
-    enc = FrozenEncoder3D(build_encoder(cfg, torch.device("cpu")).eval(), (16, 16, 8), GRID_XYZ, (1.0, 1.0, 1.0))
-    vol = _vol()
-    native, _, fg = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_grid=True, fine_pool=False)
-    pooled, _, fg_coarse = enc.embed_tokens(vol, 0.0, 1.0, "mri", fine_pool=True, fine_grid=False)
-    assert native.shape[0] == N_FINE and fg.shape == (N_FINE,)
-    assert enc.patch_xyz == (16, 16, 8)
-    d = native.shape[-1]
-    avg = native.float().view(TOKEN_GRID[0], 2, TOKEN_GRID[1], 2, TOKEN_GRID[2], 2, d).mean(dim=(1, 3, 5)).reshape(-1, d)
-    avg = avg * fg_coarse.unsqueeze(-1)            # the pooled path keeps only coarse positions that pass the gate
-    assert torch.allclose(avg, pooled.float(), atol=1e-3, rtol=1e-3)
-    assert float(native[~fg].abs().sum()) == 0.0 and float(native[fg].abs().sum()) > 0.0
-
-
-def test_lesion_grid_and_pixel_on_the_fine_grid():
-    m = np.zeros((DEPTH, 256, 256), np.uint8)
-    m[0:4, 0:8, 0:8] = 1
-    g = P.lesion_grid(m, "atlas", grid=P.FINE_GRID, patch_xyz=P.FINE_PATCH_XYZ)
-    assert g.shape == (N_FINE,) and g[0] == 1.0 and g[1] == 0.0
-    pos = P.token_positions(P.FINE_GRID)
-    assert pos.shape == (N_FINE, 3)
-    assert pos[1, 2] > pos[0, 2] and pos[32, 1] > pos[0, 1] and pos[32 * 32, 0] > pos[0, 0]
-    feat, fg = P.Pixel(patch_xyz=P.FINE_PATCH_XYZ, grid=P.FINE_GRID).tokens(_vol(), "mri")
-    assert feat.shape == (N_FINE, 4) and fg.shape == (N_FINE,)
-    assert 0.1 < fg.float().mean() < 0.9
 
 
 if __name__ == "__main__":

@@ -1,7 +1,10 @@
-"""Volume-level heads on frozen token embeddings (N volumes, T tokens, D dims).
+"""Volume-level heads on frozen embeddings (N volumes, T tokens, D dims; the benchmark's pooled readouts pass T = 1).
 
-Default probes are linear (mean+max logreg / ridge, C or alpha on val). ``xgboost_mean`` and ``token_attn_mlp`` (an
-attention pool over the tokens and their positions) remain available via ``--heads``.
+- ``SklearnHead``: a linear probe on the mean token (logistic regression / ridge, C or alpha chosen on validation);
+- ``MLPProbe``: BrainDINO's frozen-feature MLP head on the mean token;
+- ``ProbeEnsemble``: seeds of a torch token-grid probe (``brain.downstream.token_probes.ConvProbe``), early-stopped.
+
+Every head has ``fit`` / ``predict_scores`` and a cross-fitted ``predict_val`` (``brain.downstream.cv``).
 """
 
 from __future__ import annotations
@@ -22,27 +25,14 @@ from sklearn.preprocessing import StandardScaler
 from brain.common.optim import lr_at
 from brain.downstream.metrics import _safe_auc
 
-DEFAULT_HEADS = "logreg_pool"
 LOGREG_CS = np.logspace(-2, 2, 9)
 RIDGE_ALPHAS = np.logspace(-1, 4, 12)
-_XGB = dict(n_estimators=200, max_depth=4, learning_rate=0.05, subsample=0.9,
-            colsample_bytree=0.9, n_jobs=4, tree_method="hist")
+HOST_BYTES = 4e9          # token arrays above this stay in host memory; only minibatches move to the GPU
 
 
 def mean_pool(x: np.ndarray, mask: np.ndarray) -> np.ndarray:
     w = mask[..., None].astype(np.float32)
     return (x * w).sum(1) / np.clip(w.sum(1), 1, None)
-
-
-def mean_max_pool(x: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    hi = np.where(mask[..., None], x, -np.inf).max(1)
-    return np.concatenate([mean_pool(x, mask), np.where(np.isfinite(hi), hi, 0.0)], axis=1)
-
-
-def flat_pool(x: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Keep every slot as its own feature. Invalid slots are zero."""
-    w = mask[..., None].astype(np.float32)
-    return (x * w).reshape(x.shape[0], -1)
 
 
 def _pipe(model: Any) -> Pipeline:
@@ -60,7 +50,6 @@ def _predict_proba(pipe, z: np.ndarray, multilabel: bool) -> np.ndarray:
 class SklearnHead:
     name: str
     pipeline: Any
-    pool: str  # "mean" | "mean_max"
     multilabel: bool = False
     regression: bool = False
     grid: np.ndarray | None = None
@@ -70,10 +59,6 @@ class SklearnHead:
     cross_: tuple | None = field(default=None, init=False, repr=False)   # per val half: the fit tuned on the other
 
     def inputs(self, x: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        if self.pool == "mean_max":
-            return mean_max_pool(x, mask)
-        if self.pool == "flat":
-            return flat_pool(x, mask)
         return mean_pool(x, mask)
 
     def _val_score(self, pipe, xv: np.ndarray, yv: np.ndarray) -> float:
@@ -135,64 +120,28 @@ class SklearnHead:
         return out
 
 
-def make_logreg_pool(multilabel: bool, seed: int) -> SklearnHead:
+def make_logreg(multilabel: bool, seed: int, name: str = "linear") -> SklearnHead:
     lr = LogisticRegression(max_iter=3000, C=0.1, class_weight="balanced", random_state=seed)
     if multilabel:
         model, param = OneVsRestClassifier(lr), "model__estimator__C"
     else:
         model, param = lr, "model__C"
-    return SklearnHead(
-        "logreg_pool", _pipe(model), "mean_max", multilabel,
-        grid=LOGREG_CS, grid_param=param, grid_higher_better=True,
-    )
+    return SklearnHead(name, _pipe(model), multilabel, grid=LOGREG_CS, grid_param=param, grid_higher_better=True)
 
 
-def make_ridge() -> SklearnHead:
-    return SklearnHead(
-        "ridge", _pipe(Ridge(solver="svd")), "mean_max", regression=True,
-        grid=RIDGE_ALPHAS, grid_param="model__alpha", grid_higher_better=False,
-    )
+def make_ridge(name: str = "linear") -> SklearnHead:
+    return SklearnHead(name, _pipe(Ridge(solver="svd")), regression=True, grid=RIDGE_ALPHAS,
+                       grid_param="model__alpha", grid_higher_better=False)
 
 
-def make_xgboost(multilabel: bool, regression: bool, seed: int) -> SklearnHead:
-    from xgboost import XGBClassifier, XGBRegressor
+class ProbeEnsemble:
+    """``n_seeds`` torch token probes from ``model_factory``, each early-stopped on val; scores are averaged. Probes
+    take ``(tokens, mask, xyz)``: 3D tokens with their normalised centres."""
 
-    if regression:
-        return SklearnHead("xgboost_mean", _pipe(XGBRegressor(random_state=seed, **_XGB)),
-                           "mean_max", regression=True)
-    clf = XGBClassifier(objective="binary:logistic", eval_metric="logloss", random_state=seed, **_XGB)
-    return SklearnHead("xgboost_mean", _pipe(OneVsRestClassifier(clf) if multilabel else clf),
-                       "mean_max", multilabel)
-
-
-class TokenAttnMLP(nn.Module):
-    """Attention pool over a 3D token grid. Position is the normalized token center."""
-
-    def __init__(self, dim: int, n_out: int, hidden: int = 256, dropout: float = 0.3):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.score = nn.Linear(dim + 3, 1)
-        self.mlp = nn.Sequential(
-            nn.Dropout(dropout), nn.Linear(dim, hidden), nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, n_out)
-        )
-
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, xyz: torch.Tensor) -> torch.Tensor:
-        h = self.norm(x)
-        w = self.score(torch.cat([h, xyz.to(dtype=h.dtype)], dim=-1)).squeeze(-1)
-        w = w.masked_fill(~mask, -1e9).softmax(dim=1)
-        return self.mlp((w.unsqueeze(-1) * h).sum(1))
-
-
-class AttnEnsemble:
-    """``n_seeds`` token probes (``TokenAttnMLP``, or ``model_factory``'s), each early-stopped on val; scores are
-    averaged. Probes take ``(tokens, mask, xyz)``: native 3D tokens with their normalised centres."""
-
-    def __init__(self, dim: int, n_out: int, multilabel: bool, seed: int,
-                 n_seeds: int = 5, epochs: int = 100, patience: int = 15, lr: float = 1e-3,
-                 batch_size: int = 32, regression: bool = False, model_factory=None, half: bool = False):
-        self.model_factory, self.half = model_factory, bool(half)
-        self.name = "token_attn_mlp"
-        self.args = (dim, n_out)
+    def __init__(self, model_factory, multilabel: bool, seed: int, *, name: str = "tok_conv", n_seeds: int = 5,
+                 epochs: int = 100, patience: int = 15, lr: float = 1e-3, batch_size: int = 32,
+                 regression: bool = False, half: bool = False):
+        self.model_factory, self.half, self.name = model_factory, bool(half), name
         self.multilabel, self.regression = multilabel, regression
         self.seed, self.n_seeds = seed, n_seeds
         self.epochs, self.patience, self.lr, self.bs = epochs, patience, lr, batch_size
@@ -200,9 +149,9 @@ class AttnEnsemble:
         self.models: list[nn.Module] = []
         self.stop_half_: list[int] | None = None
 
-    def _host_tokens(self, n_tok: int) -> bool:
-        """32^3 grids are too large to pin in GPU memory; only minibatches move over."""
-        return int(n_tok) > 8192
+    def _host(self, x) -> torch.device:
+        """Where the token arrays live: host memory for big (memory-mapped) caches, else the GPU."""
+        return torch.device("cpu") if np.asarray(x).nbytes > HOST_BYTES else self.device
 
     def _t(self, a, dtype=torch.float32, device=None):
         device = self.device if device is None else device
@@ -241,7 +190,7 @@ class AttnEnsemble:
 
     def _fit_one(self, seed, x, y, m, z, xv, yv, mv, zv) -> nn.Module:
         torch.manual_seed(seed)
-        model = (self.model_factory() if self.model_factory else TokenAttnMLP(*self.args)).to(self.device)
+        model = self.model_factory().to(self.device)
         opt = torch.optim.AdamW(model.parameters(), lr=self.lr, weight_decay=1e-2)
         loss_fn = nn.MSELoss() if self.regression else nn.BCEWithLogitsLoss()
         n, steps = len(y), self.epochs * -(-len(y) // self.bs)
@@ -273,7 +222,7 @@ class AttnEnsemble:
         """``n_seeds`` probes early-stopped on validation; with ``val_half`` (0 / 1 per validation volume) seed i
         stops on half i % 2 only, so ``predict_val`` can score each half with the seeds that never saw it."""
         y, y_val = (np.asarray(a, dtype=np.float32).reshape(len(a), -1) for a in (y, y_val))
-        host = torch.device("cpu") if self._host_tokens(x.shape[1]) else self.device
+        host = self._host(x)
         data = (
             self._t(x, torch.float16 if self.half else torch.float32, device=host), self._t(y, device=host),
             self._t(mask, torch.bool, device=host), self._z(z, len(x), x.shape[1], device=host),
@@ -293,7 +242,7 @@ class AttnEnsemble:
     @torch.no_grad()
     def _all_logits(self, x, mask, z) -> torch.Tensor:
         """(models, N, out) logits."""
-        host = torch.device("cpu") if self._host_tokens(x.shape[1]) else self.device
+        host = self._host(x)
         xt = self._t(x, torch.float16 if self.half else torch.float32, device=host)
         mt = self._t(mask, torch.bool, device=host)
         zt = self._z(z, len(x), x.shape[1], device=host)
@@ -327,7 +276,7 @@ class MLPProbe:
 
     def __init__(self, n_out: int, multilabel: bool, seed: int, regression: bool = False, n_seeds: int = 2,
                  epochs: int = 8, patience: int = 5, batch_size: int = 4):
-        self.name, self.pool = "mlp", "mean"
+        self.name = "mlp"
         self.n_out, self.multilabel, self.regression = n_out, multilabel, regression
         self.seed, self.n_seeds, self.epochs, self.patience, self.bs = seed, n_seeds, epochs, patience, batch_size
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -426,22 +375,3 @@ class MLPProbe:
         w = (np.asarray(self.stop_half_)[:, None] != h[None, :]).astype(np.float64)
         w = w.reshape(w.shape + (1,) * (per.ndim - 2))
         return (per * w).sum(0) / w.sum(0)
-
-
-def build_heads(*, latent_dim: int, n_out: int, multilabel: bool, seed: int, which: list[str],
-                task_type: str) -> list:
-    """Heads valid for the task type, in the order requested."""
-    reg = task_type == "regression"
-    makers = {
-        "logreg_pool": lambda: make_logreg_pool(multilabel, seed),
-        "token_attn_mlp": lambda: AttnEnsemble(latent_dim, n_out, multilabel, seed, regression=reg),
-        "xgboost_mean": lambda: make_xgboost(multilabel, reg, seed),
-        "ridge": make_ridge,
-    }
-    if reg:
-        default = ["ridge"]
-        picked = [h for h in which if h in makers] if which != DEFAULT_HEADS.split(",") else default
-        picked = picked or default
-    else:
-        picked = [h for h in which if h in makers and h != "ridge"] or DEFAULT_HEADS.split(",")
-    return [makers[h]() for h in picked]

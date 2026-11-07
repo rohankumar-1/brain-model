@@ -96,7 +96,7 @@ def test_validation_halves_split_subjects_and_hold_every_class():
 
 def test_linear_head_cross_fits_validation():
     """The grid value that scores a validation half is chosen on the other half; test uses the full-val choice."""
-    from brain.downstream.heads import make_logreg_pool
+    from brain.downstream.heads import make_logreg
 
     rng = np.random.default_rng(0)
     x = rng.normal(size=(200, 1, 8)).astype(np.float32)
@@ -104,14 +104,12 @@ def test_linear_head_cross_fits_validation():
     mask = np.ones((200, 1), bool)
     tr, va = slice(0, 140), slice(140, 200)
     half = np.arange(60) % 2
-    h = make_logreg_pool(False, 0)
-    h.pool = "mean"
+    h = make_logreg(False, 0)
     h.fit(x[tr], y[tr], mask[tr], x[va], y[va], mask[va], val_half=half)
     assert h.cross_ is not None and len(h.cross_) == 2
     pv = h.predict_val(x[va], mask[va], half)
     for k in (0, 1):
         assert np.allclose(pv[half == k], h._scores(h.cross_[k], h.inputs(x[va][half == k], mask[va][half == k])))
-    full = make_logreg_pool(False, 0)
-    full.pool = "mean"
+    full = make_logreg(False, 0)
     full.fit(x[tr], y[tr], mask[tr], x[va], y[va], mask[va])
     assert np.allclose(h.predict_scores(x[va], mask[va]), full.predict_scores(x[va], mask[va]))
