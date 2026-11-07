@@ -25,9 +25,9 @@ def test_scale_grad_keeps_the_value_and_scales_the_gradient():
     assert torch.equal(y, z)
     y.sum().backward()
     assert torch.allclose(z.grad, torch.full((3,), 4.0))
-    z2 = torch.randn(2, 3, 4, requires_grad=True)          # single process: world_ref reproduces the old 1/ref weighting
-    gather_batch(z2, True, world_ref=2).sum().backward()
-    assert torch.allclose(z2.grad, torch.full_like(z2, 0.5))
+    z2 = torch.randn(2, 3, 4, requires_grad=True)          # single process: the gathered batch is the local one
+    gather_batch(z2, True).sum().backward()
+    assert torch.allclose(z2.grad, torch.ones_like(z2))
 
 
 def test_fp32_rope_is_accurate_under_bf16_and_legacy_is_not():

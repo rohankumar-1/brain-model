@@ -11,8 +11,6 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from brain.data.index import enrich
-
 
 ROW_KEYS = ("modality", "thick_mm", "thick_axis", "volume_full", "brain_full", "contrast_id", "tissue_q", "meta_id")
 HIST_LEVELS = 32                     # whole-volume tissue quantiles shipped for histogram matching  # per volume (B, ...); views (V, B, ...)
@@ -103,10 +101,8 @@ class VolumeDataset(Dataset):
         self.fixed_crops = bool(fixed_crops)
         self.default_spacing_mm = tuple(float(v) for v in default_spacing_mm)
         self.default_origin_mm = tuple(float(v) for v in default_origin_mm)
-        parquet = self.store_root / "brainmodel_index.parquet"
-        src = parquet if parquet.exists() else self.store_root / index_name
-        df = pd.read_parquet(src) if src.suffix == ".parquet" else pd.read_csv(src, low_memory=False)
-        df = enrich(df)
+        src = self.store_root / index_name
+        df = pd.read_csv(src, low_memory=False)
         if "split" not in df.columns:
             raise ValueError(f"{src} needs a split column")
         df = df.loc[df["split"].astype(str) == self.split].copy()

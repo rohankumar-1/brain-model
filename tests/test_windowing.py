@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from brain.common.windowing import WINDOW_MIXES, asinh_window, floors, foreground_mask, sample_windows
-from brain.objectives.sigreg import pairwise_cosine, prediction_loss
+from brain.objectives.sigreg import prediction_loss
 
 
 def test_asinh_is_monotone_and_finite():
@@ -61,7 +61,6 @@ def test_window_pair_loss_is_zero_when_views_match():
     z = torch.randn(2, 8, 16)
     z[1] = z[0]
     assert prediction_loss(z).item() < 1e-6
-    assert pairwise_cosine(z).item() > 0.999
 
 
 

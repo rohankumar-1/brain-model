@@ -280,9 +280,6 @@ for _name, _c in _DEFAULTS.items():
     # inherits them from its init_from encoder.
     _c["model"].setdefault("rope_fp32", True)
     _c["model"].setdefault("fp32_residual", True)
-    if "gather_ddp" in _c["loss"]:
-        # None: gathered SSL terms get their full gradient; an int reproduces the old (1/W) weighting of that GPU count
-        _c["loss"].setdefault("gather_world_ref", None)
     # scan metadata (modality / contrast, brain.data.volumes.META) as an encoder input, replaced by "unknown" with
     # probability drop; checkpoints without the key have none. Off by default since 2026-10-28: the sequence label is a
     # shortcut against a modality-agnostic encoder (runs saved with it on keep it)

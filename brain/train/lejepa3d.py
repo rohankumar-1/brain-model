@@ -65,7 +65,6 @@ def loss_kwargs(cfg: dict) -> dict:
         stopgrad_mean=bool(dense.get("stopgrad_mean", False)),
         fine_weight=float(dense.get("fine_weight", 0.0)),
         fine_predict_weight=float(pr.get("fine_weight", 0.0)),
-        gather_world_ref=lc.get("gather_world_ref"),
     )
 
 
