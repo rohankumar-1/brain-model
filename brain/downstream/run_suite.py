@@ -4,9 +4,11 @@
   python -m brain.downstream.run_suite --task cq500 --model runs/multitask/tokens_s42/best.pt
   python -m brain.downstream.run_suite --task ixi_age --model sfcn            # a model in configs/bench/models.yaml
 
-The model's cached tokens (``brain.downstream.embeddings``) feed linear probes on PCA plane / grid / global readouts
-and a 3D conv probe when they lie on the standard 20 x 16 x 16 grid, pooled linear heads otherwise, and a linear head
-on each global embedding the model has (CLS, registers). Our encoders use the asinh windows of ``--window``
+The model's cached tokens (``brain.downstream.embeddings``) feed the benchmark v3 readouts: on one embedding per
+volume (the mean foreground token) a linear probe (``linear``: logistic / ridge, C or alpha on val) and BrainDINO's MLP
+head (``mlp``); a linear probe on the 8 octant means of the token grid (``spatial``: side and coarse position); and the
+3D conv probe on the full token grid (``tok_conv``; ``--no-token-heads`` skips it). The grid readouts need tokens on the
+20 x 16 x 16 grid; a global-only encoder gets the pooled heads. Our encoders use the asinh windows of ``--window``
 (``multi``: CT brain / subdural / bone, MRI tissue / wide); registry models normalise intensities themselves.
 Segmentation tasks run in ``brain.downstream.seg3d``.
 
@@ -27,10 +29,8 @@ import numpy as np
 from brain.common.paths import REPO_ROOT as ROOT
 from brain.prep.store import FORMAT_VERSION
 from brain.downstream.embeddings import load_or_build_embeddings, resolve_path
-from brain.downstream.embeddings import cache_tag
-from brain.downstream.heads import DEFAULT_HEADS, MLPProbe, build_heads, make_logreg_pool, make_ridge
-from brain.downstream.token_probes import make_token_heads
-from brain.downstream.token_readout import token_grid_zyx, token_readout_views
+from brain.downstream.heads import MLPProbe, make_logreg, make_ridge
+from brain.downstream.token_probes import make_token_heads, token_grid_zyx
 from brain.downstream import cv
 from brain.downstream.metrics import HEADLINE, binary_metrics, bootstrap_ci, multilabel_metrics, regression_metrics
 from brain.downstream.results import eval_banner, finalize_run, new_run_dir, print_head_table, save_head_result
@@ -49,7 +49,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--run-name", type=str, default=None)
     p.add_argument("--force-embed", action="store_true")
-    p.add_argument("--heads", type=str, default=DEFAULT_HEADS, help="comma-separated head names")
     p.add_argument("--msd-target", type=str, default="enhancing_high")
     p.add_argument("--cq500-threshold", type=float, default=0.5)
     p.add_argument("--volumes-csv", type=Path, default=None, help="volume table (default slices_zarr/volumes.csv)")
@@ -58,11 +57,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=True,
                    help="also fit the 3D-conv probe (tok_conv) on the token grid (brain.bench run turns it off for "
                         "tasks whose pinned readout is another head)")
-    p.add_argument("--readout", choices=["pooled", "axial", "raw"], default="pooled",
-                   help="pooled (benchmark v3): a linear probe and BrainDINO's MLP head on one embedding per volume "
-                        "(the mean foreground token), plus a linear probe on the 8 octant means of a 3D token grid "
-                        "(spatial: side and coarse position); axial (v2): PCA, then per-plane and 4x4x4 probes on a cubic token "
-                        "grid, plus linear heads on each global embedding; raw: pool every token")
     p.add_argument("--cv", choices=["auto", "on", "off"], default="auto",
                    help="repeated subject-grouped k-fold CV instead of the fixed split (auto: small held-out tasks)")
     p.add_argument("--cv-folds", type=int, default=5)
@@ -131,13 +125,6 @@ def ensure_val(packs: dict, frac: float = 0.15, seed: int = 0) -> dict:
     return {**packs, "val": take(order[:n]), "train": take(order[n:])}
 
 
-def _rename(head, name: str, pool: str | None = None):
-    head.name = name
-    if pool is not None:
-        head.pool = pool
-    return head
-
-
 def pooled_embedding(emb: dict, chunk: int = 64) -> tuple[np.ndarray, str]:
     """One vector per volume: the mean of its foreground tokens (chunked: large caches are memory-mapped); the CLS token
     only for a model that exposes no tokens. Not CLS first (2026-11-05): in task-token BrainQuery models no objective
@@ -161,8 +148,7 @@ def octant_embedding(emb: dict, grid_zyx: tuple[int, int, int], chunk: int = 32)
     nz, ny, nx = grid_zyx
     d = mus.shape[-1]
     out = np.zeros((len(mus), 8, d), dtype=np.float32)
-    cells = [(slice(0, nz // 2), slice(nz // 2, nz)), (slice(0, ny // 2), slice(ny // 2, ny)),
-             (slice(0, nx // 2), slice(nx // 2, nx))]
+    cells = [(slice(0, n // 2), slice(n // 2, n)) for n in grid_zyx]
     for i in range(0, len(mus), chunk):
         x = np.asarray(mus[i:i + chunk], dtype=np.float32).reshape(-1, nz, ny, nx, d)
         m = mask[i:i + chunk].reshape(-1, nz, ny, nx, 1).astype(np.float32)
@@ -176,37 +162,25 @@ def octant_embedding(emb: dict, grid_zyx: tuple[int, int, int], chunk: int = 32)
     return out.reshape(len(mus), 8 * d)
 
 
-def spatial_head(task: TaskBundle, seed: int):
-    """``spatial``: the linear probe (logistic / ridge, C or alpha on val) on the octant embedding."""
-    reg, multi = task.task_type == "regression", task.task_type == "multilabel"
-    return _rename(make_ridge(), "spatial", "mean") if reg else _rename(make_logreg_pool(multi, seed), "spatial", "mean")
+def one_token(emb: dict, vec: np.ndarray) -> dict:
+    """``emb`` with one vector per volume (``vec``, (N, D)) as its only token: what the linear and MLP heads read."""
+    out = {**emb, "mus": vec[:, None, :], "mask": np.ones((len(vec), 1), dtype=bool)}
+    out.pop("z", None)
+    return out
+
+
+def linear_head(task: TaskBundle, seed: int, name: str = "linear"):
+    """A linear probe (logistic regression, or ridge for regression; C or alpha chosen on val) named ``name``."""
+    if task.task_type == "regression":
+        return make_ridge(name)
+    return make_logreg(task.task_type == "multilabel", seed, name)
 
 
 def pooled_heads(task: TaskBundle, seed: int) -> list:
-    """Benchmark v3 readouts on the pooled embedding: ``linear`` (logistic / ridge, C or alpha on val) and ``mlp``."""
-    reg, multi = task.task_type == "regression", task.task_type == "multilabel"
-    linear = _rename(make_ridge(), "linear", "mean") if reg else _rename(make_logreg_pool(multi, seed), "linear", "mean")
-    return [linear, MLPProbe(len(task.label_names) if multi else 1, multi, seed, regression=reg)]
-
-
-def readout_head_sets(task: TaskBundle, views: dict, seed: int) -> list[tuple[str, dict, list]]:
-    """Heads for each spatial view. Linear probes see the flattened layout."""
-    reg = task.task_type == "regression"
+    """The readouts on the pooled embedding: ``linear`` and ``mlp``."""
     multi = task.task_type == "multilabel"
-    sets = []
-
-    def linear(name: str, pool: str):
-        if reg:
-            return _rename(make_ridge(), name, pool)
-        return _rename(make_logreg_pool(multi, seed), name, pool)
-
-    plane_heads = [linear("plane_ridge" if reg else "plane_logreg", "flat")]
-    grid_heads = [linear("grid_ridge" if reg else "grid_logreg", "mean")]
-    global_heads = [linear("pca_global_ridge" if reg else "pca_global_logreg", "mean")]
-    sets.append(("plane", views["plane"], plane_heads))
-    sets.append(("grid", views["grid"], grid_heads))
-    sets.append(("global", views["global"], global_heads))
-    return sets
+    return [linear_head(task, seed), MLPProbe(len(task.label_names) if multi else 1, multi, seed,
+                                              regression=task.task_type == "regression")]
 
 
 def headline(task: TaskBundle, m: dict) -> str:
@@ -242,66 +216,23 @@ def main() -> None:
     print(f"[embed] {emb['mus'].shape} ({emb['representation']}) cache={emb['cache_path']}")
     multilabel = task.task_type == "multilabel"
     grid = token_grid_zyx(emb["mus"].shape[1])
-    use_readout = args.readout == "axial" and grid is not None
-    token_heads = args.token_heads
-    if args.readout == "pooled":
-        vec, pooled_kind = pooled_embedding(emb)
-        p_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((len(vec), 1), dtype=bool)}
-        p_emb.pop("z", None)
-        o_emb = None
-        if grid is not None:
-            octs = octant_embedding(emb, grid)
-            o_emb = {**emb, "mus": octs[:, None, :], "mask": np.ones((len(octs), 1), dtype=bool)}
-            o_emb.pop("z", None)
-        print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp"
-              + (f"; spatial (octants) {octs.shape}" if o_emb is not None else ""))
+    vec, pooled_kind = pooled_embedding(emb)
+    p_emb = one_token(emb, vec)
+    o_emb = one_token(emb, octant_embedding(emb, grid)) if grid is not None else None
+    token_heads = args.token_heads and grid is not None
+    print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp"
+          + ("; spatial (octants)" if o_emb is not None else "") + ("; tok_conv" if token_heads else ""))
 
     def head_sets_for(task_s: TaskBundle, packs_s: dict) -> list[tuple[str, dict, list]]:
-        """Fresh heads for one split (PCA readouts are refit on this split's training volumes)."""
-        if args.readout == "pooled":
-            sets = [(pooled_kind, ensure_val(split_xy(task_s, p_emb), seed=args.seed), pooled_heads(task_s, args.seed))]
-            if o_emb is not None:
-                sets.append(("octants", ensure_val(split_xy(task_s, o_emb), seed=args.seed),
-                             [spatial_head(task_s, args.seed)]))
-            if token_heads and grid is not None:
-                n_out = len(task_s.label_names) if multilabel else 1
-                sets.append(("tokens", packs_s, make_token_heads(
-                    emb["mus"].shape[-1], n_out, multilabel, args.seed, task_s.task_type == "regression",
-                    grid_zyx=grid)))
-            return sets
-        if use_readout:
-            views = token_readout_views(packs_s, seed=args.seed, grid_zyx=grid)
-            print(f"[readout] grid={grid} pca={views['pca_dim']} explained={views['explained_variance']:.3f} "
-                  f"plane={views['plane']['train']['mus'].shape} bins={views['grid']['train']['mus'].shape}")
-            sets = readout_head_sets(task_s, views, args.seed)
-            if token_heads:
-                n_out = len(task_s.label_names) if multilabel else 1
-                sets.append(("tokens", packs_s, make_token_heads(
-                    emb["mus"].shape[-1], n_out, multilabel, args.seed, task_s.task_type == "regression",
-                    grid_zyx=grid)))
-        else:
-            sets = [("raw", packs_s, build_heads(
-                latent_dim=emb["latent_dim"], n_out=len(task_s.label_names) if multilabel else 1,
-                multilabel=multilabel, seed=args.seed, which=[h.strip() for h in args.heads.split(",") if h.strip()],
-                task_type=task_s.task_type))]
-        # Prefix-token models: a linear head on each global embedding the model has (CLS; the registers; both),
-        # next to the patch-token heads, so a CLS / register model is read out the way it summarises a volume.
-        n_vol = len(emb["volume_ids"])
-        globals_ = {}
-        if emb.get("cls") is not None:
-            globals_["cls"] = np.asarray(emb["cls"], dtype=np.float32)
-        if emb.get("registers") is not None:
-            globals_["reg"] = np.asarray(emb["registers"], dtype=np.float32)
-            if "cls" in globals_:
-                globals_["clsreg"] = np.concatenate([globals_["cls"], globals_["reg"]], axis=1)
-        reg = task_s.task_type == "regression"
-        for view_name, vec in globals_.items():
-            g_emb = {**emb, "mus": vec[:, None, :], "mask": np.ones((n_vol, 1), dtype=bool)}
-            g_emb.pop("z", None)
-            g_packs = ensure_val(split_xy(task_s, g_emb), seed=args.seed)
-            head = _rename(make_ridge(), f"{view_name}_ridge", "mean") if reg else \
-                _rename(make_logreg_pool(multilabel, args.seed), f"{view_name}_logreg", "mean")
-            sets.append((view_name, g_packs, [head]))
+        """(view, packs, fresh heads) for one split: the token packs ``packs_s`` and the pooled / octant views."""
+        sets = [(pooled_kind, ensure_val(split_xy(task_s, p_emb), seed=args.seed), pooled_heads(task_s, args.seed))]
+        if o_emb is not None:
+            sets.append(("octants", ensure_val(split_xy(task_s, o_emb), seed=args.seed),
+                         [linear_head(task_s, args.seed, "spatial")]))
+        if token_heads:
+            sets.append(("tokens", packs_s, make_token_heads(
+                emb["mus"].shape[-1], len(task_s.label_names) if multilabel else 1, multilabel, args.seed,
+                task_s.task_type == "regression")))
         return sets
 
     overlap = model.pretrain_overlap(task.volume_ids, volumes)
@@ -387,8 +318,7 @@ def main() -> None:
               "ckpt": str(model.ckpt) if model.ckpt else None, "model_info": model.info(),
               "representation": emb["representation"], "slices_root": str(args.slices_root),
               "latent_dim": emb["latent_dim"], "heads": head_names,
-              "readout": "pooled" if args.readout == "pooled" else "axial" if use_readout else "raw",
-              "seed": args.seed, "window": args.window, "encoding": cache_tag() if model.is_checkpoint else "",
+              "readout": "pooled", "seed": args.seed, "window": args.window,
               "time_utc": datetime.now(timezone.utc).isoformat(),
               "started_utc": started, "volumes_csv": str(args.volumes_csv or DEFAULT_VOLUMES),
               "token_heads": token_heads, "msd_target": args.msd_target if task.name == "msd" else None,

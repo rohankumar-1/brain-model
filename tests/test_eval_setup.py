@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from brain.common.windowing import windows_for
-from brain.downstream.heads import DEFAULT_HEADS, TokenAttnMLP, build_heads, make_logreg_pool, make_ridge, make_xgboost
+from brain.downstream.heads import make_logreg, make_ridge
 from brain.downstream.seg3d import uniform_slice_indices
 from brain.downstream.tasks import (
     AISD_REGIONS, CLASSIFICATION_TASKS, CQ500_LABELS, FROZEN_TASKS, ICH_REGIONS, REGRESSION_TASKS,
@@ -47,7 +47,7 @@ def test_logreg_selects_c_on_val():
     x = rng.normal(size=(80, 4, 6)).astype(np.float32)
     y = (x[:, :, 0].mean(1) > 0).astype(np.int64)
     mask = np.ones((80, 4), dtype=bool)
-    head = make_logreg_pool(False, 0)
+    head = make_logreg(False, 0)
     head.fit(x[:50], y[:50], mask[:50], x[50:65], y[50:65], mask[50:65])
     assert head.chosen_ is not None
     scores = head.predict_scores(x[65:], mask[65:])
@@ -61,41 +61,9 @@ def test_ridge_selects_alpha_on_val():
     mask = np.ones((80, 4), dtype=bool)
     head = make_ridge()
     head.fit(x[:50], y[:50], mask[:50], x[50:65], y[50:65], mask[50:65])
-    assert head.name == "ridge" and head.chosen_ is not None
+    assert head.name == "linear" and head.chosen_ is not None
     pred = head.predict_scores(x[65:], mask[65:])
     assert pred.shape == (15,) and np.isfinite(pred).all()
-
-
-def test_ridge_and_xgboost_use_mean_max():
-    assert make_ridge().pool == "mean_max"
-    assert make_xgboost(False, False, 0).pool == "mean_max"
-    assert make_xgboost(False, True, 0).pool == "mean_max"
-
-
-def test_token_attention_scorer_reads_positions():
-    torch.manual_seed(0)
-    m = TokenAttnMLP(8, 1)
-    x = torch.randn(3, 4, 8)
-    mask = torch.ones(3, 4, dtype=torch.bool)
-    out = m(x, mask, torch.rand(3, 4, 3))
-    assert out.shape == (3, 1) and torch.isfinite(out).all()
-    assert m.score.in_features == 11
-
-
-def test_default_heads_are_linear_probes():
-    common = dict(latent_dim=8, n_out=1, multilabel=False, seed=0, which=DEFAULT_HEADS.split(","))
-    clf = [h.name for h in build_heads(**common, task_type="binary")]
-    reg = [h.name for h in build_heads(**common, task_type="regression")]
-    assert clf == ["logreg_pool"]
-    assert reg == ["ridge"]
-
-
-def test_optional_heads_still_build_when_requested():
-    names = [h.name for h in build_heads(
-        latent_dim=8, n_out=1, multilabel=False, seed=0,
-        which=["ridge", "xgboost_mean", "token_attn_mlp"], task_type="regression",
-    )]
-    assert names == ["ridge", "xgboost_mean", "token_attn_mlp"]
 
 
 def test_aisd_task_pins_official_test_ids():

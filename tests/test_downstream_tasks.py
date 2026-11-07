@@ -1,4 +1,4 @@
-"""Every frozen and seg task name loads; 3D readout heads stay linear. python -m tests.test_downstream_tasks"""
+"""Every frozen and seg task name loads; the benchmark readouts are linear / mlp / spatial. python -m tests.test_downstream_tasks"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from brain.downstream.run_suite import readout_head_sets
+from brain.downstream.run_suite import linear_head, octant_embedding, pooled_heads
 from brain.downstream.tasks import (
     CLASSIFICATION_TASKS,
     CQ500_LABELS,
@@ -354,30 +354,21 @@ def test_instance_is_in_the_seg_suite():
     assert ICH_REGIONS["ICH"] == (1, 2)
 
 
-def _fake_views():
-    n, d = 4, 8
-    pack = {
-        "train": {"mus": np.zeros((n, 3, d), np.float32), "mask": np.ones((n, 3), bool),
-                  "y": np.zeros(n), "volume_ids": [f"v{i}" for i in range(n)]},
-        "val": {"mus": np.zeros((2, 3, d), np.float32), "mask": np.ones((2, 3), bool),
-                "y": np.zeros(2), "volume_ids": ["a", "b"]},
-        "test": {"mus": np.zeros((2, 3, d), np.float32), "mask": np.ones((2, 3), bool),
-                 "y": np.zeros(2), "volume_ids": ["c", "d"]},
-    }
-    return {"plane": pack, "grid": pack, "global": pack}
-
-
-def test_readout_heads_are_linear_probes():
-    views = _fake_views()
+def test_pooled_readout_heads():
     clf = TaskBundle("t", "binary", ["v0"], {"v0": "train"}, np.array([1]), ["y"])
-    names = [h.name for _, _, heads in readout_head_sets(clf, views, 0) for h in heads]
-    assert names == ["plane_logreg", "grid_logreg", "pca_global_logreg"]
-    for h in (h for _, _, hs in readout_head_sets(clf, views, 0) for h in hs):
-        assert "xgb" not in h.name and "attn" not in h.name
-
+    assert [h.name for h in pooled_heads(clf, 0)] == ["linear", "mlp"]
+    assert linear_head(clf, 0, "spatial").name == "spatial" and not linear_head(clf, 0).regression
     reg = TaskBundle("t", "regression", ["v0"], {"v0": "train"}, np.array([1.0]), ["Age"])
-    names = [h.name for _, _, heads in readout_head_sets(reg, views, 0) for h in heads]
-    assert names == ["plane_ridge", "grid_ridge", "pca_global_ridge"]
+    assert [h.name for h in pooled_heads(reg, 0)] == ["linear", "mlp"] and linear_head(reg, 0).regression
+
+
+def test_octant_embedding_keeps_side():
+    """Each octant is the mean foreground token of its half-grid cells; a left-only signal stays in the left octants."""
+    grid = (2, 2, 4)
+    mus = np.zeros((1, 16, 1), np.float32)
+    mus[0].reshape(2, 2, 4)[:, :, :2] = 1.0               # x < 2: the first half along x
+    out = octant_embedding({"mus": mus, "mask": np.ones((1, 16), bool)}, grid)
+    assert out.shape == (1, 8) and np.allclose(out[0], [1, 0] * 4)
 
 
 def test_store_has_every_frozen_and_seg_family():
