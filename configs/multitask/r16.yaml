@@ -1,0 +1,119 @@
+# R16 (2026-11-07): the run for the 2026-11-09 meeting. R14-F (study-level fusion) continued 30k steps with every data
+# and sampling fix that needs no architecture change (user: base R14-F + fixes, keep the per-slot decoder):
+#   * labels v12: enhancing tumour / tumour core on post-contrast T1 only (fastMRI+ normal T1c as negatives); CT skull
+#     (>= 300 HU) and intracranial CSF (0-15 HU) masks; CT measures in their own group at full weight; anatomy targets
+#     ignore lesion voxels (tasks.lesion_ignore); Pedi-Cranial-CT-Healthy (age / sex, bleed-free negatives);
+#   * subject-balanced sampling (data.subject_beta 1): a patient counts once, not once per sequence / session;
+#   * decontamination from here on: benchmark cohorts (ABIDE, IXI, OASIS-1/2, Pixar), BrainFMBench's NKI / HBN and the
+#     pixel-verified copies / QC failures (train_exclude_r15.csv) out of training. Earlier exposure stays: the benchmark
+#     keeps those tasks marked seen;
+#   * fusion: tasks measured on the anchor's own image (derived, CT measures) are never asked with partners
+#     (data.ANCHOR_ONLY_GROUPS; R14-F lost 0.29 on intensity asymmetry with partners);
+#   * radiology findings at full weight; synthetic contrast 0.2 -> 0.1;
+#   * batch 6 per GPU on 3 L40S (global 18; R14-F 16, R14 32): the 4th GPU of the node runs the baseline benchmarks;
+#     R14-F's single-scan heads were ~0.02 below R14.
+# Schedule: from R14-F's last.pt, re-warmed WSD (warmup 500, cooldown 6000), 30k steps; --reset-schedule.
+#   sbatch -p pi_dbertsim -G l40s:3 -c 36 --mem=270G -t 2-00:00:00 -J r16 \
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=3,CONFIG=configs/multitask/r16.yaml,EXTRA_ARGS=--reset-schedule jobs/train.sbatch
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v12
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 10
+  balance_alpha: 0.5
+  subject_beta: 1.0
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets: [abide1, ixi, oasis1, oasis2, pixar, fomo_nki, fomo_hbn, rsna_ica]   # benchmark cohorts, BrainFMBench, RSNA-ICA
+  exclude_volumes: configs/multitask/train_exclude_r15.csv     # copies of benchmark scans, val/test twins, QC failures
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: runs/v4/scratch_s42/last.pt
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: false
+  fp32_residual: false
+  meta: {enabled: true, drop: 0.2}
+  task_tokens: {enabled: true, share: true, write_bias: 10.0, write_ramp_steps: 2000}
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+  fusion: {after_block: 8, heads: 6}     # study-level input: blocks 0-7 per scan, fused, 8-11 on the study
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac            # a token counts when >= 25% of its voxels are foreground (centre mode lost 1.2% of brain)
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  lesion_ignore: true
+  study: {p_multi: 0.5, max_scans: 3}   # half the scans with partners come with 1-2 co-registered sequences
+  group_weights: {synthesis: 0.5, radiology: 1.0, derived: 0.5}   # derived: 38.5% of task slots at 1.0 (audit 2026-11-03)
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf, wmh_grade,
+    aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca, aneurysm_acom, aneurysm_aca,
+    aneurysm_pcom, aneurysm_basilar_tip, aneurysm_posterior_other, aneurysm_location, seg_vessels]
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+    shear_deg: 10.0           # residual CT gantry tilt (rigid-registered RSNA keep theirs)
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
+  synth_contrast: {p: 0.1}
+  task_aware: true
+loss: {balance: uncertainty, ema_decay: 0.99, seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
+optim:
+  lr: 0.0003
+  enc_lr_mult: 1.0
+  layer_decay: 0.75
+  weight_decay: 0.05
+  warmup_steps: 500
+  freeze_steps: 0
+  clip_grad: 1.0
+  batch_size: 6                    # anchors per GPU; with partners up to 12 scans (4 L40S, global 16)
+  schedule: wsd
+  decay_steps: 6000
+  betas: [0.9, 0.999]
+train: {max_steps: 145000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false}
+output: {out_dir: runs/multitask/r16, resume_from: runs/multitask/r14f/last.pt}

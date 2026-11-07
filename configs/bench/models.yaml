@@ -42,6 +42,7 @@ models:
   BQ-R14:         {ckpt: runs/multitask/r14/last.pt, note: "R13 + 25k steps: true negatives (labels v11 empty masks, 3,006 RSNA bleed pseudo-masks), negative_seg_loss, skull-strip matching, synthetic contrast, gantry shear, audit fixes (configs/multitask/r14.yaml)"}
   BQ-R14-EMA:     {ckpt: runs/multitask/r14/last_ema.pt, note: "R14's weight average (decay 0.999) at step 100k"}
   BQ-R14F:        {ckpt: runs/multitask/r14f/last.pt, note: "R14 + 15k steps with study-level input: a study's co-registered sequences fused inside the encoder after block 8 (configs/multitask/r14f.yaml); scored on single scans here"}
+  BQ-R16:         {ckpt: runs/multitask/r16/last.pt, note: "R14-F + 30k steps: labels v12 (T1c-only enhancing / core, CT HU masks, lesion-aware anatomy, Pedi-CT), subject-balanced sampling, training decontamination, anchor-only image measures under fusion (configs/multitask/r16.yaml)"}
   BQ-R13-centergate: {ckpt: runs/multitask/r13/last_centergate.pt, note: "R13's weights read out with the centre-voxel token gate instead of its 25% gate (gate test)"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
@@ -83,6 +84,25 @@ models:
     reference: "BrainIAC, Tak et al. 2026 (Nature Neuroscience); github.com/AIM-KannLab/BrainIAC; non-commercial research licence"
     kwargs: {template: weights/brainiac/temp_head.nii.gz}
 
+  brainfm:
+    adapter: brain.downstream.adapters.brainfm:BrainFM
+    class: supervised
+    modalities: [ct, mri]
+    weights: weights/brainfm/backbone.safetensors
+    # its generator / trainer data (Generator/constants.py): HCP, AIBL, OASIS, ADNI, ADNI3, ATLAS, ISLES (2022, MRI)
+    pretrain_datasets: [adni, oasis1, oasis2, atlas, isles22]
+    reference: "BrainFM, Liu et al. 2025 (arXiv 2509.00549); huggingface.co/peirong26/BrainFM; Apache 2.0"
+    # the authors' 64-d unit-norm decoder feature (feature_only), pooled to 16 mm: the 2048-d bottleneck would need
+    # ~65 GB of token cache for ADNI alone (scratch ~96% full)
+    kwargs: {feature: final}
+  hlip:
+    adapter: brain.downstream.adapters.hlip:HLIP
+    class: ssl                                         # language-supervised (CLIP on radiology reports), no task labels
+    modalities: [mri]
+    weights: weights/hlip/model.safetensors
+    # ~220k clinical brain-MRI studies of one health system (private): none of our datasets
+    pretrain_datasets: []
+    reference: "HLIP, Zhao et al. TMLR 2026; huggingface.co/zch0414/clip-vit_base-scan_study-dualdinotxt1568; CC-BY-NC-SA 4.0"
 # Weights of published models live in weights/ (git-ignored; /home/roku/brain-model/weights, symlinked in worktrees).
 # Planned (adapter and weights still to do; 2026-10-27 survey, check each licence before use):
 #   brain2vec    ssl, [mri]   3D, 74k T1; github.com/CBICA/Brain2Vec; arXiv 2610.28411

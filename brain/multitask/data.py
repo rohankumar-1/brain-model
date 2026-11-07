@@ -46,6 +46,8 @@ RECON, NO_DENSE = -2, -1        # ``dense_slot`` codes: reconstruction (target f
 
 # lesion masks whose voxels the anatomy targets ignore (tasks.lesion_ignore); core / enhancing lie inside whole tumour
 LESION_MASK_TASKS = ("whole_tumor", "resection_cavity", "hemorrhage_segmentation")
+# task groups measured on the scan's own image: answered from the anchor alone, never with study partners (R16)
+ANCHOR_ONLY_GROUPS = ("derived", "ct_measures")
 
 
 class MultitaskDataset(Dataset):
@@ -271,6 +273,23 @@ class MultitaskDataset(Dataset):
                 synth_map, drawn = None, drawn_full
                 drawn = [d for d in drawn if d[0] not in (self.skull_tasks if strip else
                                                            self.strip_match if self.strippable[idx] else ())]
+        # study-level input: choose the partner scans first, so tasks measured on the anchor's own image (groups in
+        # ANCHOR_ONLY_GROUPS: brain volume / mask, asymmetries, CT measures) leave a sample that gets partners; fused
+        # input contaminates them (R14-F test: intensity asymmetry -0.29, brain volume -0.08). Loaded further below.
+        pick = []
+        cand = self.partners.get(vid) if self.study and synth_map is None and not masked else None
+        if cand and rng.random() < float(self.study.get("p_multi" if self.train else "eval_p", 0.5 if self.train else 1.0)):
+            k_max = max(1, int(self.study.get("max_scans", 3)) - 1)
+            if self.train:
+                k = int(rng.integers(1, min(k_max, len(cand)) + 1))
+                pick = [cand[i] for i in rng.permutation(len(cand))[:k]]
+            else:
+                pick = cand[:k_max]
+            keep = [d for d in drawn if self.reg.tasks[d[0]].group not in ANCHOR_ONLY_GROUPS]
+            if keep:
+                drawn = keep
+            else:                                    # only anchor-measured tasks were drawn: answer them alone
+                pick = []
         lesion = None
         if self.lesion_ignore and any(t in self.anatomy_tasks for t, _, _ in drawn):
             for t, _, ref in avail:
@@ -335,14 +354,7 @@ class MultitaskDataset(Dataset):
             img = np.where(brain, img, img.min())
             dense_raw = [np.where(brain, o, o.min()) for o in dense_raw]     # a synthesis target keeps the input's FOV
         study_imgs, study_mod, study_seq = [], [], []
-        cand = self.partners.get(vid) if self.study and synth_map is None and not masked else None
-        if cand and rng.random() < float(self.study.get("p_multi" if self.train else "eval_p", 0.5 if self.train else 1.0)):
-            k_max = max(1, int(self.study.get("max_scans", 3)) - 1)
-            if self.train:
-                k = int(rng.integers(1, min(k_max, len(cand)) + 1))
-                pick = [cand[i] for i in rng.permutation(len(cand))[:k]]
-            else:
-                pick = cand[:k_max]
+        if pick:
             brain = np.asarray(arrays["brain"]) > 0 if strip else None
             for _pvid, ppath, pmod, pseq in pick:
                 rel_p = Path(ppath)
