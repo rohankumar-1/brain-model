@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 import torch
 
-from brain.multitask.data import MultitaskDataset, SyntheticMultitask, collate, prepare
+from brain.common.optim import param_groups
+from brain.multitask.data import MultitaskDataset, SyntheticMultitask, collate, prepare, protected_tasks
 from brain.multitask.labels import live_targets
 from brain.multitask.losses import Balancer, seg_loss, slot_losses
 from brain.multitask.model import BrainQuery
@@ -28,11 +29,10 @@ def _cfg(**aug):
     return cfg
 
 
-def _model(tokens: bool = True, **slot):
-    """The default (task-token) model, or with ``tokens=False`` the slot readout older checkpoints use."""
+def _model(tokens: bool = True):
+    """The default (task-token) model, or with ``tokens=False`` the slot readout (the ResNet specialists')."""
     torch.manual_seed(0)
     cfg = _cfg()
-    cfg["model"]["slot"].update(slot)
     cfg["model"]["task_tokens"]["enabled"] = tokens
     model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
     if tokens:
@@ -98,14 +98,6 @@ def test_slots_are_permutation_equivariant():
 
 
 @torch.no_grad()
-def test_cross_task_off_makes_slots_independent():
-    cfg, model = _model(tokens=False, cross_task=False)
-    b = _prepared(cfg)
-    n = b["x"].shape[0]
-    alone, both = (model(b["x"], b["keep"], torch.tensor([t] * n), NO_SEG)["binary"][:, 0] for t in ([1], [1, 4, 5]))
-    assert torch.allclose(alone, both, atol=1e-5)
-
-
 @torch.no_grad()
 def test_multiclass_logits_cover_only_the_tasks_classes():
     cfg, model = _model()
@@ -123,19 +115,18 @@ def test_losses_are_masked_per_slot_and_balanced_per_task():
     out = model(b["x"], b["keep"], b["task"], b["seg_pair"])
     loss, has = slot_losses(out, b["task"], b["y"], model.task_type, b["seg"], b["seg_pair"])
     assert not has[b["task"] < 0].any() and (loss[~has] == 0).all()
-    for mode in ("uniform", "ema", "uncertainty"):
-        total, per_task = Balancer(len(REG), mode)(loss, has, b["task"])
-        assert torch.isfinite(total) and (per_task >= 0).all()
+    total, per_task = Balancer(len(REG))(loss, has, b["task"])
+    assert torch.isfinite(total) and (per_task >= 0).all()
     total.backward()
     assert model.task_emb.weight.grad is not None
 
 
 def test_balancer_weighs_groups_not_task_counts():
-    bal = Balancer(len(REG), "uniform", group_of=[REG.groups.index(t.group) for t in REG.tasks])
+    bal = Balancer(len(REG), group_of=[REG.groups.index(t.group) for t in REG.tasks])
     many = [REG.index[t.id] for t in REG.trained if t.group == "anatomy_volume"][:10]
     task = torch.tensor([many + [REG.index["age"]]])
     total, _ = bal(torch.tensor([[1.0] * len(many) + [3.0]]), torch.ones_like(task, dtype=torch.bool), task)
-    assert abs(float(total) - 2.0) < 1e-5            # (group means 1 and 3) / 2, not (10 + 3) / 11
+    assert abs(float(total) - 2.0) < 1e-5            # (group means 1 and 3) / 2, not (10 + 3) / 11 (s = 0)
 
 
 def test_seg_loss_prefers_the_right_mask():
@@ -218,12 +209,12 @@ def test_fewshot_fits_only_the_held_out_row():
 
 
 def test_trainer_runs_on_phantoms(tmp_path):
-    """Three steps of the slot readout across its encoder-freeze boundary, on phantoms (raises on any failure); the
-    task-token trainer has its own test (test_task_tokens)."""
+    """Three steps of the slot readout on phantoms (raises on any failure); the task-token trainer has its own test
+    (test_task_tokens)."""
     from brain.train import engine
 
     engine.run(["multitask", "--synthetic", "--max-steps", "3", "--log-every", "1", "--out-dir", str(tmp_path),
-                "--set", "optim.freeze_steps=1", "--set", "model.task_tokens.enabled=false"])
+                "--set", "model.task_tokens.enabled=false"])
 
 
 def test_weight_average_is_saved_evaluated_and_resumed(tmp_path, monkeypatch):
@@ -440,3 +431,73 @@ def test_synthrad_ct_mirrors_its_mr_rows():
     out = _mirror_synthrad_ct(f, v)
     ct = out[out.volume_id == "ct1"]
     assert len(out) == 4 and len(ct) == 1 and ct.value.iloc[0] == 1.0 and ct.ref.iloc[0] == "a"   # mr2 has no CT
+
+
+def test_live_target_rows_get_no_rotation_bias_or_drift():
+    fov, live = protected_tasks(REG)
+    live_ids = {REG.tasks[i].id for i in torch.nonzero(live).flatten().tolist()}
+    assert {"brain_asymmetry", "intensity_asymmetry", "ct_brain_density"} <= live_ids and bool((fov | ~live).all())
+    raw = collate([SyntheticMultitask(REG, (16, 32, 32), n=4)[i] for i in range(4)])
+    li = REG.index["brain_asymmetry"]
+    raw["task"][0] = -1
+    raw["task"][0, 0] = li                                   # row 0 asks a live target; the others do not
+    raw["task"][1:] = torch.where(live[raw["task"][1:].clamp_min(0)], torch.full_like(raw["task"][1:], -1), raw["task"][1:])
+    cfg = smoke_config(default_config("multitask"))
+    cfg["aug"] = {"flip_lr": 0.0, "affine": {"p": 1.0, "rot_deg": [10, 10, 10], "shift_mm": 4.0},
+                  "appearance": {"bias": {"p": 1.0, "amp": 0.3}, "drift": {"p": 1.0, "amp": 0.3}}}
+    plain = prepare(raw, cfg, CPU, (8, 8, 4), train=False)
+    aug = prepare(raw, cfg, CPU, (8, 8, 4), train=True, aug_unsafe=live)
+    assert torch.allclose(aug["x"][0], plain["x"][0], atol=1e-5)            # protected row untouched
+    assert not torch.allclose(aug["x"][1:], plain["x"][1:])
+
+
+def test_final_norm_gets_the_deepest_lr_and_task_tables_no_decay():
+    from brain.multitask.model import BrainQuery
+    from brain.train.multitask import build_encoder
+
+    cfg = smoke_config(default_config("multitask"))
+    model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"])
+    groups = param_groups(model, 0.05, layer_decay=0.8)
+    where = {id(p): g for g in groups for p in g["params"]}
+    named = dict(model.named_parameters())
+    assert where[id(named["backbone.norm.weight"])]["lr_scale"] == 1.0
+    assert where[id(named["backbone.patch_embed.proj.weight"])]["lr_scale"] < 1.0
+    assert where[id(named["task_emb.weight"])]["weight_decay"] == 0.0
+
+
+def test_metadata_ids_harmonise_contrast_names():
+    from brain.data.volumes import META, meta_id
+
+    assert META[meta_id("t1w", "mri")] == META[meta_id("t1n", 1)] == META[meta_id(None, "mri", "oasis1")] == "t1"
+    assert META[meta_id("t2f", "mri")] == "flair" and META[meta_id(float("nan"), "mri", "brainmetshare_bravo")] == "t1c"
+    assert META[meta_id(None, "ct", "rsna_ich")] == "ct" and META[meta_id("cta", "ct")] == "cta"
+    assert meta_id("weird", "mri") == 0                       # unknown label -> unknown
+
+
+def test_skull_strip_never_touches_scans_asked_a_skull_task(tmp_path, monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from brain.data.volumes import META
+    from brain.multitask.data import MultitaskDataset
+
+    shape = (8, 12, 12)
+    brain = np.zeros(shape, bool)
+    brain[2:6, 3:9, 3:9] = True
+    img = np.where(brain, 1.0, 5.0).astype(np.float32)      # "skull" brighter than brain
+    img[0] = -6.0                                             # background floor
+    monkeypatch.setattr("brain.prep.store.read_many", lambda path, keys: {"image": img, "brain": brain.astype(np.uint8)})
+    rows = [("v_age", "age", 40.0, ""), ("v_mask", "brain_mask", np.nan, "@brain")]
+    labels = pd.DataFrame([(v, t, y, r) for v, t, y, r in rows], columns=["volume_id", "task", "value", "ref"]) \
+        .assign(split="train", use="train")
+    vols = pd.DataFrame({"volume_id": ["v_age", "v_mask"], "image_path": "a.zip", "modality": "mri",
+                         "dataset_family": ["f0", "f1"], "dataset": "d", "contrast": "t1w", "brain_ok": True,
+                         "brain_method": "synthstrip", "stripped_input": False})
+    ds = MultitaskDataset(tmp_path, labels, vols, REG, {"age": {"mean": 0.0, "std": 1.0}}, split="train",
+                          k_max=1, p_all=0.0, max_seg=1, skull_strip=1.0)
+    i_age = [v for v, _ in ds.items].index("v_age")
+    a = ds[i_age]["image"].numpy()
+    assert (a[~brain] == -6.0).all() and (a[brain] == 1.0).all()          # stripped to the background floor
+    b = ds[1 - i_age]["image"].numpy()
+    assert (b[~brain & (img == 5.0)] == 5.0).all()                        # brain_mask asked: skull kept
+    assert ds[i_age]["meta"] == META.index("t1")

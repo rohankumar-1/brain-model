@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from brain.data.index import enrich
+from brain.common.windowing import FG_THRESH, FLOOR
 
 
 ROW_KEYS = ("modality", "thick_mm", "thick_axis", "volume_full", "brain_full", "contrast_id", "tissue_q", "meta_id")
@@ -79,7 +79,7 @@ def tissue_quantiles(volume: torch.Tensor, modality: int, levels: int = HIST_LEV
         return torch.full((levels,), float("nan"))
     flat = volume.reshape(-1)
     v = flat[:: max(1, flat.numel() // 300000)].float()        # ~300k voxels: a full-res volume takes every 35th
-    v = v[v > -5.5]
+    v = v[v > FG_THRESH["mri"]]
     if v.numel() < 100:
         return torch.full((levels,), float("nan"))
     return torch.quantile(v[:: max(1, v.numel() // 200000)], torch.linspace(0.01, 0.99, levels))
@@ -101,12 +101,11 @@ class VolumeDataset(Dataset):
         self.split = str(split)
         self.crop_cfg = crop_cfg
         self.fixed_crops = bool(fixed_crops)
-        self.default_spacing_mm = tuple(float(v) for v in default_spacing_mm)
-        self.default_origin_mm = tuple(float(v) for v in default_origin_mm)
-        parquet = self.store_root / "brainmodel_index.parquet"
-        src = parquet if parquet.exists() else self.store_root / index_name
-        df = pd.read_parquet(src) if src.suffix == ".parquet" else pd.read_csv(src, low_memory=False)
-        df = enrich(df)
+        # every store volume is resampled to one grid: spacing and origin are the config's (data.default_*_mm)
+        self.spacing_mm = torch.tensor([float(v) for v in default_spacing_mm], dtype=torch.float32)
+        self.origin_mm = torch.tensor([float(v) for v in default_origin_mm], dtype=torch.float32)
+        src = self.store_root / index_name
+        df = pd.read_csv(src, low_memory=False)
         if "split" not in df.columns:
             raise ValueError(f"{src} needs a split column")
         df = df.loc[df["split"].astype(str) == self.split].copy()
@@ -130,33 +129,11 @@ class VolumeDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
-    def _spacing_origin(self, row) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-volume spacing and origin from optional columns; v4 volumes are 1 mm, origin 0."""
-        sp, orig = list(self.default_spacing_mm), list(self.default_origin_mm)
-        for i, axis in enumerate("xyz"):
-            if f"spacing_{axis}" in self.df.columns and pd.notna(row[f"spacing_{axis}"]):
-                sp[i] = float(row[f"spacing_{axis}"])
-            if f"origin_{axis}" in self.df.columns and pd.notna(row[f"origin_{axis}"]):
-                orig[i] = float(row[f"origin_{axis}"])
-        return torch.tensor(sp, dtype=torch.float32), torch.tensor(orig, dtype=torch.float32)
-
     def _native(self, row) -> tuple[torch.Tensor, torch.Tensor]:
         """Acquisition thickness (mm) and its grid axis from prep; (1.0, -1) when the index has no record."""
         mm = float(row["thick_mm"]) if "thick_mm" in self.df.columns and pd.notna(row["thick_mm"]) else 1.0
         ax = int(row["thick_axis"]) if "thick_axis" in self.df.columns and pd.notna(row["thick_axis"]) else -1
         return torch.tensor([mm], dtype=torch.float32), torch.tensor([ax], dtype=torch.long)
-
-    def _lesion_path(self, row) -> Path | None:
-        """Lesion label zip for this volume: ``mask_seg`` / ``mask_lesion`` / ``mask_ich``, or for a BraTS sequence the
-        subject's segmentation (all four sequences share the t1n grid it was drawn on)."""
-        for col in ("mask_seg", "mask_lesion", "mask_ich"):
-            if col in self.df.columns and pd.notna(row.get(col)) and str(row[col]) not in ("", "nan"):
-                return self.store_root / str(row[col])
-        case = str(row.get("case_id", ""))
-        if str(row.get("dataset", "")).startswith("brats") and "-" in case:
-            p = self.store_root / str(row["folder"]) / f"{case.rsplit('-', 1)[0]}.seg.zip"
-            return p if p.exists() else None
-        return None
 
     def _skull_mask_ok(self, row) -> bool:
         """A brain mask exists and passed QC (a failed mask would cut real anatomy or leave scalp)."""
@@ -168,11 +145,8 @@ class VolumeDataset(Dataset):
     def _draw_skull_dropout(self, row, gen) -> bool:
         """Cut this sample to its brain mask? Probability ``aug.skull.p``; never without a mask that passed QC."""
         p = float(((self.crop_cfg or {}).get("aug") or {}).get("skull", {}).get("p", 0.0))
-        rel = str(row["mask_brain"]) if "mask_brain" in self.df.columns and pd.notna(row["mask_brain"]) else ""
-        if p <= 0 or not rel or rel == "nan":
+        if p <= 0 or not self._skull_mask_ok(row):
             return False
-        if "brain_ok" in self.df.columns and str(row["brain_ok"]).strip().lower() in {"false", "0", "0.0"}:
-            return False  # a mask that failed QC would cut real anatomy (or leave scalp) and teach a false cue
         return float(torch.rand(1, generator=gen)) < p
 
     def __getitem__(self, idx: int) -> dict:
@@ -190,7 +164,6 @@ class VolumeDataset(Dataset):
         volume = torch.from_numpy(np.ascontiguousarray(store.squeeze_channel(arrays["image"])))  # (Z, Y, X)
         if volume.ndim != 3:
             raise ValueError(f"expected (Z,Y,X), got {tuple(volume.shape)}")
-        spacing, origin = self._spacing_origin(row)
         modality = 0 if str(row["modality"]).lower().startswith("ct") else 1
         from brain.data.crops3d import raw_views
 
@@ -204,22 +177,14 @@ class VolumeDataset(Dataset):
             extra["brain"] = torch.from_numpy(np.ascontiguousarray(arrays["brain"])).bool().unsqueeze(0).unsqueeze(0)
         extra["contrast_id"] = torch.tensor([contrast_group(row.get("contrast"), modality)])
         extra["meta_id"] = torch.tensor([meta_id(row.get("contrast"), modality, row.get("dataset", ""))])
-        if ((self.crop_cfg or {}).get("loss") or {}).get("predict", {}).get("lesion"):
-            # lesion-aware MAE masking: per-token lesion flags are derived from this in the worker (not shipped)
-            les, path = None, self._lesion_path(row)
-            if path is not None and path.exists():
-                m = store.read_image(path, "mask")
-                if m.shape == tuple(volume.shape):
-                    les = torch.from_numpy(np.ascontiguousarray(m > 0))
-            extra["lesion"] = (les if les is not None else torch.zeros(volume.shape, dtype=torch.bool))[None, None]
         extra["tissue_q"] = tissue_quantiles(volume, modality)[None]
         return raw_views({
             **extra,
             "geometric": not self.fixed_crops,          # validation keeps unaugmented crops, comparable across runs
             "volume": volume.unsqueeze(0).unsqueeze(0),
             "modality": torch.tensor([modality]),
-            "spacing_mm": spacing.unsqueeze(0),
-            "origin_mm": origin.unsqueeze(0),
+            "spacing_mm": self.spacing_mm.unsqueeze(0),
+            "origin_mm": self.origin_mm.unsqueeze(0),
             "thick_mm": thick,
             "thick_axis": axis,
         }, self.crop_cfg, gen)
@@ -247,7 +212,7 @@ def make_synthetic_volume(
         vol = np.full((nx, ny, nz), -1000.0, np.float32)
         vol[inside] = 35.0 + rng.normal(0, 8, size=int(inside.sum())).astype(np.float32)
     else:
-        vol = np.full((nx, ny, nz), -6.0, np.float32)
+        vol = np.full((nx, ny, nz), FLOOR["mri"], np.float32)
         vol[inside] = rng.normal(0.0, 1.0, size=int(inside.sum())).astype(np.float32)
     return {
         "volume": torch.from_numpy(vol).unsqueeze(0),
@@ -360,11 +325,10 @@ def make_loader(
     shuffle: bool,
     seed: int,
     distributed: bool = False,
-    n_volumes: int | None = None,
 ) -> DataLoader:
     """Loader of crop chunks of ``crop_microbatch(batch_size)`` volumes, cut inside the workers.
 
-    ``shuffle=False`` is for validation: a fixed random subset of ``n_volumes`` volumes with fixed crops.
+    ``shuffle=False`` is for validation: a fixed random subset of ``batch_size`` volumes with fixed crops.
     """
     d = cfg["data"]
     ds = VolumeDataset(
@@ -377,7 +341,7 @@ def make_loader(
     )
     workers = int(d.get("num_workers", 8))
     if not shuffle:
-        keep = torch.randperm(len(ds), generator=torch.Generator().manual_seed(0))[: int(n_volumes or batch_size)]
+        keep = torch.randperm(len(ds), generator=torch.Generator().manual_seed(0))[: int(batch_size)]
         ds = torch.utils.data.Subset(ds, keep.tolist())
         workers = min(workers, 2)
     alpha = float(d.get("balance_alpha", 1.0))

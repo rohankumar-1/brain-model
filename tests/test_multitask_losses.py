@@ -1,11 +1,11 @@
-"""True negatives for lesion segmentation (labels v11): empty-mask loss, the label cap, Dice / false-positive scoring."""
+"""Multitask losses and scoring: ignored voxels, true negatives (labels v11: empty-mask loss, slot routing, Dice /
+false-positive scoring), uncertainty balancing."""
 import numpy as np
-import pandas as pd
 import torch
 
 from brain.multitask.data import TYPE_ID
-from brain.multitask.labels import empty_cap
-from brain.multitask.losses import negative_seg_loss, seg_loss, slot_losses
+from brain.multitask.evaluate import dice
+from brain.multitask.losses import Balancer, negative_seg_loss, seg_loss, slot_losses
 from brain.multitask.test_eval import score
 
 
@@ -43,16 +43,36 @@ def test_slot_losses_routes_negative_tasks():
     assert neg[0, 0] != base[0, 0] and torch.isclose(neg[1, 0], base[1, 0])
 
 
-def test_empty_cap_is_stable_and_bounded():
-    f = pd.DataFrame({"volume_id": [f"v{i}" for i in range(50)], "value": np.nan, "ref": "@empty",
-                      "split": ["train"] * 40 + ["test"] * 10})
-    a = empty_cap(f, 7, {"per_positive": 2.0, "eval_n": 3})
-    b = empty_cap(f.sample(frac=1.0, random_state=1), 7, {"per_positive": 2.0, "eval_n": 3})
-    assert (a.split == "train").sum() == 14 and (a.split == "test").sum() == 3
-    assert sorted(a.volume_id) == sorted(b.volume_id)   # the same scans whatever the row order
-
-
 def test_segmentation_score_ignores_empty_targets():
     y = np.array([1.0, 1.0, 0.0, 0.0, 1.0])
     p = np.array([0.6, 0.8, 0.0, 1.0, 0.7])
     assert np.isclose(score("segmentation", y, p), 0.7)
+
+
+def test_one_channel_target_is_unchanged_and_ignored_voxels_do_not_count():
+    g = torch.Generator().manual_seed(0)
+    logits = torch.randn(2, 1, 4, 4, 4, generator=g)
+    t = (torch.rand(2, 1, 4, 4, 4, generator=g) > 0.7).float()
+    ones = torch.ones_like(t)
+    assert torch.allclose(seg_loss(logits, t), seg_loss(logits, torch.cat([t, ones], 1)))
+    # a confidently wrong prediction inside an ignored region costs nothing
+    bad = logits.clone()
+    ign = torch.zeros_like(t, dtype=torch.bool)
+    ign[:, :, :2] = True
+    bad[ign] = 20.0
+    w = (~ign).float()
+    t2 = torch.where(ign, torch.zeros_like(t), t)
+    clean = torch.where(ign, torch.full_like(logits, -20.0), logits)
+    assert torch.allclose(seg_loss(bad, torch.cat([t2, w], 1)), seg_loss(clean, torch.cat([t2, w], 1)), atol=1e-4)
+    assert (dice(bad.masked_fill(w < 0.5, -1.0), t2) == dice(clean, t2)).all()
+
+
+def test_uncertainty_weights_are_clamped_and_the_data_term_stays_positive():
+    bal = Balancer(3, clamp=1.0)
+    with torch.no_grad():
+        bal.log_var.copy_(torch.tensor([-5.0, 0.0, 5.0]))
+    w = bal.weights()
+    assert float(w.max()) <= torch.e + 1e-4 and float(w.min()) >= 1 / torch.e - 1e-4
+    loss = torch.tensor([[0.05, 0.05, 0.05]])
+    total, _ = bal(loss, torch.ones_like(loss, dtype=torch.bool), torch.tensor([[0, 1, 2]]))
+    assert float(bal.data_term) > 0 and float(total) < float(bal.data_term)    # the +s part can push the total down

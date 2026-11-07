@@ -72,7 +72,7 @@ model:
   init_from: runs/v4/scratch_s42/last.pt
   checkpoint: true
   taps: [3, 7]
-  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  slot: {dim: 256, layers: 3, heads: 8}
   seg:
     widths: [128, 64, 32, 16]
   rope_fp32: false
@@ -129,14 +129,13 @@ aug:
     mm: [10, 40]
   skull_strip: {p: 0.3}
   task_aware: true
-loss: {balance: uncertainty, ema_decay: 0.99, seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5}
+loss: {seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5}
 optim:
   lr: 0.0003
   enc_lr_mult: 1.0
   layer_decay: 0.75
   weight_decay: 0.05
   warmup_steps: 1000
-  freeze_steps: 0
   clip_grad: 1.0
   batch_size: 8
   schedule: wsd

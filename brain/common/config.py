@@ -11,12 +11,14 @@ import yaml
 
 
 def deep_update(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """A copy of ``base`` with ``overrides`` merged in: nested mappings merge, anything else replaces. Shares no
+    objects with either input."""
     out = deepcopy(base)
     for k, v in overrides.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = deep_update(out[k], v)
         else:
-            out[k] = v
+            out[k] = deepcopy(v)
     return out
 
 

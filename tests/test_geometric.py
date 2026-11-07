@@ -35,7 +35,7 @@ def test_identity_geometry_reproduces_the_grid_crops():
     for g in old["groups"]:
         # float32 grid coordinates land on voxel centers up to rounding, so trilinear weights can be ~1e-3 off on O(1) values
         assert torch.allclose(views[f"{g}_view"].float(), old[f"{g}_view"].float(), atol=5e-3), g
-        for k in ("pos", "fg", "parent", "tok_pos", "coords"):
+        for k in ("pos", "fg", "parent", "coords"):
             assert torch.equal(old[f"{g}_{k}"], new[f"{g}_{k}"]), (g, k)
 
 

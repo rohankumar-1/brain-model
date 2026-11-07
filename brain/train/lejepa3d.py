@@ -1,30 +1,31 @@
 """3D LeJEPA pretraining on native-grid crops: pooled crop agreement, dense token agreement, SIGReg.
 
-  python -m brain.train lejepa3d --config configs/lejepa3d/tiny.yaml
+  python -m brain.train lejepa3d --config configs/lejepa3d/v4_scratch.yaml
   python -m brain.train lejepa3d --synthetic --max-steps 8        # CPU smoke run, no store needed
-  torchrun --standalone --nproc_per_node=4 -m brain.train lejepa3d --config configs/lejepa3d/small.yaml
+  torchrun --standalone --nproc_per_node=4 -m brain.train lejepa3d --config configs/lejepa3d/v4_scratch.yaml
 """
 
 from __future__ import annotations
 
 import torch
 
-from brain.common.checkpoint import load_ckpt, strip_module_prefix
 from brain.common.metrics import embedding_health
 from brain.common.optim import param_groups
 from brain.common.paths import resolve
 from brain.data.batch3d import prepare
 from brain.data.crops3d import raw_views
 from brain.data.volumes import collate_volumes, crop_microbatch, make_loader, make_synthetic_volume
-from brain.models.viewnet3d import ViewNet, batch_meta
 from brain.data.volumes import n_meta
-from brain.models.vit3d import BrainEncoder, widen_patch_embed
+from brain.models.viewnet3d import ViewNet, batch_meta
+from brain.models.vit3d import BrainEncoder
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
 from brain.train import engine
 
 
 def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
+    """The ViT a config describes (``model`` / ``views``), with the token head and predictor its SSL loss uses (none
+    without ``loss.dense`` / ``loss.predict``): lejepa3d, joint and from-scratch multitask runs."""
     m = cfg["model"]
     dense = float(cfg["loss"].get("dense", {}).get("weight", 0.0)) > 0
     pr = cfg["loss"].get("predict") or {}
@@ -62,10 +63,6 @@ def loss_kwargs(cfg: dict) -> dict:
         lamb=float(lc["lamb"]), win_weight=float(lc.get("win_weight", 1.0)),
         dense_weight=float(dense.get("weight", 0.0)), tokens_per_view=int(dense.get("tokens_per_view", 4)),
         predict_weight=float(pr.get("weight", 0.0)), pixel_weight=float(pr.get("pixel_weight", 0.0)),
-        stopgrad_mean=bool(dense.get("stopgrad_mean", False)),
-        fine_weight=float(dense.get("fine_weight", 0.0)),
-        fine_predict_weight=float(pr.get("fine_weight", 0.0)),
-        gather_world_ref=lc.get("gather_world_ref"),
     )
 
 
@@ -76,10 +73,16 @@ def metric_keys(cfg: dict) -> list[str]:
     predict_on = dense_on and lk["predict_weight"] > 0
     pix = ["pix"] if lk["pixel_weight"] > 0 else []
     keys = ["loss", "inv", "win", "sigreg"] + (["dense_inv", "dense_sig", "overlap"] if dense_on else [])
-    keys += ["fine_inv", "fine_overlap"] if dense_on and lk["fine_weight"] > 0 else []
     keys += ["pred"] + pix if predict_on else []
-    keys += ["fine_pred"] + (["fine_pix"] if pix else []) if predict_on and lk["fine_predict_weight"] > 0 else []
     return keys
+
+
+def viewnet_from_config(enc: BrainEncoder, cfg: dict) -> ViewNet:
+    """The SSL view network over ``enc`` with the heads the loss config uses (lejepa3d and joint)."""
+    lk = loss_kwargs(cfg)
+    dense_on = lk["dense_weight"] > 0
+    return ViewNet(enc, dense=dense_on, predict=dense_on and lk["predict_weight"] > 0,
+                   cells_xyz=tuple((cfg["loss"].get("predict") or {}).get("pixel_cells", (2, 2, 2))))
 
 
 def _record(obj, stream) -> None:
@@ -95,10 +98,10 @@ def _record(obj, stream) -> None:
             _record(v, stream)
 
 
-def forever_loader(store, split, cfg, *, batch_size, shuffle, seed, distributed, n_volumes=None):
+def forever_loader(store, split, cfg, *, batch_size, shuffle, seed, distributed):
     """Yields lists of crop chunks that together hold ``batch_size`` volumes."""
     loader = make_loader(store, split, cfg, batch_size=batch_size, shuffle=shuffle, seed=seed,
-                         distributed=distributed, n_volumes=n_volumes)
+                         distributed=distributed)
     parts = batch_size // crop_microbatch(batch_size)
 
     def _gen():
@@ -138,7 +141,6 @@ def synthetic_loader(cfg: dict, batch_size: int, seed: int):
 
 class Trainer(engine.Trainer):
     unit = "vol"
-    synthetic_ok = True
 
     def __init__(self, rt, cfg, args, ckpt, step):
         super().__init__(rt, cfg, args, ckpt, step)
@@ -156,7 +158,6 @@ class Trainer(engine.Trainer):
         if float(pcfg.get("weight", 0.0)) > 0 and not self.dense_on:
             raise SystemExit("loss.predict needs loss.dense.weight > 0: it predicts the token head's embeddings")
         predict_on = self.dense_on and self.lk["predict_weight"] > 0
-        fine_pred_on = predict_on and float(pcfg.get("fine_weight", 0.0)) > 0
         self.ramp = int(pcfg.get("ramp_steps", 0))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
 
@@ -177,17 +178,13 @@ class Trainer(engine.Trainer):
         if rt.world > 1:
             raw = torch.nn.SyncBatchNorm.convert_sync_batchnorm(raw)
         self.raw, self.module = raw, raw
-        self.core = ViewNet(raw, local_pooled=bool(lc.get("local_pooled", False)), dense=self.dense_on,
-                            predict=predict_on, predict_fine=fine_pred_on,
-                            cells_xyz=tuple(pcfg.get("pixel_cells", (2, 2, 2))), refine=m.get("refine"))
+        self.core = viewnet_from_config(raw, cfg)
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
         self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"])), lr=float(o["lr"]),
                                      betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
         if ckpt is not None:
             raw.load_state_dict(ckpt["model"])
             self.opt.load_state_dict(ckpt["optimizer"])
-        elif cfg["output"].get("init_from") and not synthetic:
-            self._init_from(resolve(cfg["output"]["init_from"]))
         self.net = torch.nn.parallel.DistributedDataParallel(self.core, device_ids=[rt.local]) \
             if rt.world > 1 else self.core
 
@@ -197,16 +194,7 @@ class Trainer(engine.Trainer):
         self.nxt, self.last_out = None, None
         self.core.train()
         self._banner = (f"brain-{raw.size} params={raw.count_parameters():,} batch={self.batch}x{rt.world} "
-                        f"dense={self.dense_on} predict={predict_on} fine={fine_pred_on} proj_norm={raw.projector.norm}")
-
-    def _init_from(self, path) -> None:
-        """Weights only: a fresh optimizer and schedule. Heads the source never had (the predictor) start random."""
-        src = load_ckpt(path, self.rt.device)
-        state = widen_patch_embed(strip_module_prefix(src["model"]), self.raw.patch_embed.proj.in_channels)
-        res = self.raw.load_state_dict(state, strict=False)
-        if res.unexpected_keys or any(not k.startswith("predictor.") for k in res.missing_keys):
-            raise SystemExit(f"[init_from] mismatch: missing={res.missing_keys[:4]} unexpected={res.unexpected_keys[:4]}")
-        self.rt.log(f"[init] weights from {path} (step {src.get('step')}); new: {len(res.missing_keys)} tensors")
+                        f"dense={self.dense_on} predict={predict_on} proj_norm={raw.projector.norm}")
 
     def banner(self) -> str:
         return self._banner

@@ -8,8 +8,9 @@ it came from, so that agreement between views can only be reached through anatom
                      also look thick-slice. The extra blur is the quadrature difference to a randomly drawn target
                      thickness, so a scan already at or beyond the target is left alone (uses ``thick_mm`` and
                      ``thick_axis`` recorded by prep; without them the axis is random).
-3. ``window``        asinh window (``y = asinh((x - c) / w)``), random centre and width per row.
-4. ``curve``         random monotone re-rendering of tissue contrast: a piecewise-linear map whose knots sit at quantiles
+3. ``window``        asinh window (``y = asinh((x - c) / w)``): ``fixed`` the canonical window; ``roles`` the three role
+                     windows (``windowing.role_windows``), applied last, after every native-unit augmentation.
+4. ``curve``         (roles) random monotone re-rendering of tissue contrast: a piecewise-linear map whose knots sit at quantiles
                      of the crop's own foreground intensities, so each tissue mode can be stretched or squeezed
                      independently. ``flip`` negates it about the median, which swaps the order of tissues as T1 -> T2
                      does. Background stays the darkest value. MRI rows only: CT density is physical (hyperdense acute
@@ -20,7 +21,7 @@ it came from, so that agreement between views can only be reached through anatom
    the signal plus complex Gaussian noise, which is how MRI noise arises (biased upward and grainy in dark tissue and
    air, Gaussian in bright tissue). CT rows keep Gaussian noise.
 
-Optional ``histmatch`` (MRI only, first, in native units): a row's tissue intensities are remapped to the quantiles of
+Optional ``histmatch`` (roles; MRI only, first, in native units): a row's tissue intensities are remapped to the quantiles of
 another volume's row of the same contrast group in the batch (blended), so contrast and dynamic range of a real other
 scanner are borrowed and "which scanner" stops being a cheap cue. Not CT: Hounsfield units are physical (blood ~60 HU).
 
@@ -35,7 +36,7 @@ import math
 import torch
 import torch.nn.functional as F
 
-from brain.common.windowing import MOD_CT, MOD_MRI, asinh_window, fg_thresh, floors, role_windows, sample_windows
+from brain.common.windowing import FLOOR, MOD_CT, MOD_MRI, asinh_window, canonical_windows, fg_thresh, floors, role_windows
 
 FWHM_TO_SIGMA = 1.0 / 2.3548
 QUANTILE_SAMPLES = 16384  # foreground voxels sampled per row to place the curve knots
@@ -115,10 +116,10 @@ def through_plane(x: torch.Tensor, cfg: dict, thick: tuple[torch.Tensor, torch.T
     return x
 
 
-def window_view(x: torch.Tensor, modality: torch.Tensor, aug: dict) -> torch.Tensor:
-    win = aug.get("window") or {}
+def window_view(x: torch.Tensor, modality: torch.Tensor) -> torch.Tensor:
+    """Each row in its modality's canonical window (``window.mode: fixed``)."""
     b = x.shape[0]
-    c, w = sample_windows(modality.reshape(b), str(win.get("mode", "random")), mix=str(win.get("mix", "brain")))
+    c, w = canonical_windows(modality.reshape(b))
     return asinh_window(x.float(), c.view(b, 1, 1, 1, 1), w.view(b, 1, 1, 1, 1))
 
 
@@ -288,19 +289,21 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
                quant: torch.Tensor | None = None, protect: torch.Tensor | None = None,
                sharp: torch.Tensor | None = None, tie_seed: int | None = None) -> torch.Tensor:
     """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
-    ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching against another volume of the same contrast
-    group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
+    ``window.mode`` is ``fixed`` (one canonical window; bias, through-plane, noise, blur and drift only) or ``roles``
+    (``_appearance_roles``). ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching (roles) against
+    another volume of the same contrast group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
     measured on the unaugmented intensities); ``sharp`` rows no through-plane or isotropic blur (small targets).
     ``tie_seed`` (roles mode): the contrast draws come from that seed (``_Seeded``), so calls with the same seed and
     the same rows share each row's contrast (R15: SSL views agree on content, not across contrasts)."""
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
-    if (aug.get("window") or {}).get("mode") == "roles":
+    mode = (aug.get("window") or {}).get("mode", "fixed")
+    if mode == "roles":
         return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp, tie_seed)
+    if mode != "fixed":
+        raise ValueError(f"window.mode {mode!r}: fixed or roles")
     if tie_seed is not None:
         raise ValueError("tie_seed needs window.mode roles")
-    if _enabled(aug.get("histmatch")) and vol is not None and contrast is not None and quant is not None:
-        x = histogram_match(x, modality, fg, vol, contrast, quant, aug["histmatch"])
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"], skip=protect)
     if _enabled(aug.get("through_plane")):
@@ -309,9 +312,7 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     noise = aug.get("noise") or {}
     if _enabled(noise) and str(noise.get("kind", "gaussian")) == "rician":
         x, noisy = rician_noise(x, modality, noise)
-    y = window_view(x, modality, aug)
-    if _enabled(aug.get("curve")):
-        y = mri_curve(y, modality, fg, aug["curve"])
+    y = window_view(x, modality)
     return degrade(y, aug, skip_noise=noisy, skip_drift=protect, skip_blur=sharp)
 
 
@@ -371,5 +372,5 @@ def skull_dropout(volume: torch.Tensor, brain: torch.Tensor, modality: int, p: f
     """With probability ``p``, set everything outside ``brain`` to the background floor. ``volume`` is (Z, Y, X)."""
     if p <= 0 or float(torch.rand(1, generator=gen)) >= p:
         return volume
-    floor = -1024.0 if modality == MOD_CT else -6.0
+    floor = FLOOR["ct"] if modality == MOD_CT else FLOOR["mri"]
     return torch.where(brain.bool(), volume, volume.new_tensor(floor))

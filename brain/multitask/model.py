@@ -1,28 +1,27 @@
 """BrainQuery (BQ): the project's model, a 3D BrainEncoder that answers task queries.
 
-Named checkpoints (``configs/bench/models.yaml``): BQ-v3 is the self-supervised encoder alone; BQ-R6 / BQ-A1 the slot
-readout runs; BQ-T1 / BQ-A2 the task-token runs. The pieces:
+Named checkpoints (``configs/bench/models.yaml``): BQ-v3 / BQ-v4 are the self-supervised encoders alone; BQ-R7 ..
+BQ-R14 (and R14-F) the task-token runs. The pieces:
 
     token_t = task_emb[t] + type_emb[type_t]                  one token per trained task, in the encoder's sequence
     tokens  = encoder([CLS | task tokens | patches])          task tokens see the patches and themselves, never each
                                                               other; patches read them (OMNI, arXiv 2610.12574)
     output  = typed head(proj(token_t))                       shared per output type, conditioned only by the token
 
-Heads are shared by every task of a type (binary logit, standardised regression value, survival hazards, the
-segmentation decoder via FiLM, whose ``dense_head`` answers the dense (self-supervised intensity) tasks; multiclass
+Heads are shared by every task of a type (binary logit, standardised regression value, the segmentation decoder via
+FiLM, whose ``dense_head`` answers the dense (self-supervised intensity) tasks; multiclass
 scores the token against learned per-(task, class) vectors). Every trained
 task's token is always in the sequence, so an answer never depends on which other tasks were asked; a held-out task
 gets a read-only token (it reads the scan, nothing reads it), so few-shot fits only its embedding row.
-``moe.blocks`` turns the encoder's top blocks' MLPs into mixtures of experts.
 
-``task_tokens.enabled: false`` is the earlier readout (runs up to 2026-10-26, e.g. run 6 and A1), kept so those
-checkpoints load: slot queries cross-attend to the finished encoding through ``slot.layers`` slot layers.
+``task_tokens.enabled: false`` is the slot readout (the from-scratch specialists in ``configs/single``, whose ResNet
+encoders have no sequence for task tokens): slot queries cross-attend to the finished encoding through ``slot.layers``
+slot layers.
 """
 
 from __future__ import annotations
 
 import math
-import re
 
 import torch
 import torch.nn as nn
@@ -41,37 +40,49 @@ def mlp(cin: int, hidden: int, cout: int) -> nn.Sequential:
 
 
 class SlotLayer(nn.Module):
-    def __init__(self, dim: int, heads: int, cross_task: bool = True):
+    """A slot query reads the encoding (cross-attention), then the other slots of its scan (self-attention)."""
+
+    def __init__(self, dim: int, heads: int):
         super().__init__()
         self.n1, self.n2, self.n3 = nn.LayerNorm(dim), nn.LayerNorm(dim), nn.LayerNorm(dim)
         self.cross = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.self_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.mlp = mlp(dim, 4 * dim, dim)
-        self.cross_task = bool(cross_task)
 
     def forward(self, q, slot_pad, kv, kv_pad):
         h = self.n1(q)
         q = q + self.cross(h, kv, kv, key_padding_mask=kv_pad, need_weights=False)[0]
         h = self.n2(q)
-        mask = None
-        if not self.cross_task:                       # each slot sees only itself
-            k = q.shape[1]
-            mask = ~torch.eye(k, dtype=torch.bool, device=q.device)
-        q = q + self.self_attn(h, h, h, key_padding_mask=None if mask is not None else slot_pad, attn_mask=mask,
-                               need_weights=False)[0]
+        q = q + self.self_attn(h, h, h, key_padding_mask=slot_pad, need_weights=False)[0]
         return q + self.mlp(self.n3(q))
+
+
+def _mlp_heads(f, hw, hb, w, b):
+    """Per-voxel task MLPs: ``f`` (C, Z, Y, X) shared features -> (K, Z, Y, X) logits through (K, C, H) / (K, H) weights."""
+    g = F.gelu(torch.einsum("czyx,kch->khzyx", f, hw) + hb.view(*hb.shape, 1, 1, 1))
+    return torch.einsum("khzyx,kh->kzyx", g, w) + b.view(-1, 1, 1, 1)
 
 
 class SegDecoder(nn.Module):
     """Token grid (+ earlier-block taps) -> one logit map at ``out_stride`` per segmentation slot.
 
     The slot-independent parts (token projection, an image pyramid for detail the 16 mm tokens lack) run once per
-    volume; the upsampling stages run once per segmentation slot, each stage FiLM-modulated by the slot
-    (x * (1 + gamma) + beta, zero-initialised so training starts from the unconditioned decoder).
+    volume. ``conditioned`` (the default): the upsampling stages run once per segmentation slot, each stage
+    FiLM-modulated by the slot (x * (1 + gamma) + beta, zero-initialised so training starts from the unconditioned
+    decoder); ``dense`` adds a 1x1 output for dense (intensity) slots, built only for a registry with dense tasks.
+
+    ``conditioned=False`` (2026-11-04, ``model.seg.shared``): decoded once per volume, no FiLM, and a 1x1 output per
+    registry task (``chan``: the slot's task index) read from the shared top features. The per-slot decoder runs every
+    upsampling stage once per segmentation slot (a third of a ViT-B training step at 3 slots per scan); this one's cost
+    does not grow with the slots, so a scan can be asked all its masks every step (``tasks.all_seg``). Gives up
+    query-conditioned decoding of tasks the registry lacks. ``head_hidden`` > 0 (v2, 2026-11-05): each task reads the
+    shared features through its own small per-voxel MLP (C -> head_hidden -> 1, GELU) instead of a 1x1 linear map;
+    with 16 shared channels the linear readout starved the ~25 spatial tasks (decoder pilot: anatomy Dice 0.42 vs 0.63
+    per slot, tumour collapsed), so v2 also widens the shared stages (``model.seg.widths``, e.g. 128 / 96 / 64 / 64).
     """
 
     def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
-                 dense: bool = False):
+                 dense: bool = False, conditioned: bool = True, n_tasks: int = 1, head_hidden: int = 0):
         super().__init__()
         pz, py, px = patch_zyx
         n_z, n_xy = int(math.log2(pz)) - 1, int(math.log2(py)) - 1  # upsamplings to stride 2 per axis
@@ -79,6 +90,7 @@ class SegDecoder(nn.Module):
             raise ValueError(f"patch {patch_zyx} needs {n_xy} upsamplings, decoder has {len(widths) - 1}")
         widths = tuple(widths[len(widths) - 1 - n_xy:])                # the finest n_xy + 1 widths
         n_up = n_xy
+        self.conditioned = bool(conditioned)
         self.steps = [(2 if i < n_z else 1, 2, 2) for i in range(n_up)]
         self.stem = nn.Sequential(nn.Conv3d(in_dim, widths[0], 1, bias=False), group_norm(widths[0]), nn.GELU(),
                                   Res(widths[0], widths[0]))
@@ -93,71 +105,14 @@ class SegDecoder(nn.Module):
             nn.Sequential(nn.ConvTranspose3d(widths[i], widths[i + 1], s, stride=s, bias=False), group_norm(widths[i + 1]),
                           nn.GELU()) for i, s in enumerate(self.steps))
         self.fuse = nn.ModuleList(Res(2 * widths[i + 1], widths[i + 1]) for i in range(n_up))
-        self.film = nn.ModuleList(nn.Linear(cond_dim, 2 * w) for w in widths)
-        for f in self.film:
-            nn.init.zeros_(f.weight)
-            nn.init.zeros_(f.bias)
-        self.head = nn.Conv3d(widths[-1], 1, 1)
-        # dense (intensity) slots: their own 1x1 output; only built for a registry with dense tasks, so earlier
-        # checkpoints load unchanged
-        self.dense_head = nn.Conv3d(widths[-1], 1, 1) if dense else None
-        self._register_load_state_dict_pre_hook(self._legacy_keys)
-
-    @staticmethod
-    def _legacy_keys(state, prefix, *_):
-        """Checkpoints from before the shared ``conv3d.Res`` named its two convolutions ``a`` / ``b``."""
-        for k in [k for k in state if k.startswith(prefix)]:
-            new = re.sub(r"\.a\.(\d)", r".block.0.\1", re.sub(r"\.b\.(\d)", r".block.1.\1", k[len(prefix):]))
-            if new != k[len(prefix):]:
-                state[prefix + new] = state.pop(k)
-
-    @staticmethod
-    def _mod(x, film, cond):
-        g, b = film(cond).chunk(2, dim=-1)
-        return x * (1 + g.view(*g.shape, 1, 1, 1)) + b.view(*b.shape, 1, 1, 1)
-
-    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
-                dense: torch.Tensor | None = None):
-        """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, in_chans, Z, Y, X); ``rows`` (P,) the volume of each
-        spatial slot, ``cond`` (P, cond_dim) its slot, ``dense`` (P,) bool: the slot is a dense task (``dense_head``).
-        Returns (P, 1, Z/2, Y/2, X/2) logits / intensities."""
-        x = self.stem(grid)
-        feats, h = [], image
-        for p in self.pyramid:
-            h = p(h)
-            feats.append(h)
-        feats = feats[::-1]                                   # coarse to fine, one per decoder stage
-        x = self._mod(x[rows], self.film[0], cond)
-        for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
-            x = fuse(torch.cat([up(x), feats[i][rows]], dim=1))
-            x = self._mod(x, self.film[i + 1], cond)
-        if dense is None or self.dense_head is None or not bool(dense.any()):
-            return self.head(x)
-        return torch.where(dense.view(-1, 1, 1, 1, 1), self.dense_head(x), self.head(x))
-
-
-def _mlp_heads(f, hw, hb, w, b):
-    """Per-voxel task MLPs: ``f`` (C, Z, Y, X) shared features -> (K, Z, Y, X) logits through (K, C, H) / (K, H) weights."""
-    g = F.gelu(torch.einsum("czyx,kch->khzyx", f, hw) + hb.view(*hb.shape, 1, 1, 1))
-    return torch.einsum("khzyx,kh->kzyx", g, w) + b.view(-1, 1, 1, 1)
-
-
-class SharedSegDecoder(SegDecoder):
-    """``SegDecoder`` decoded once per volume (2026-11-04, ``model.seg.shared``): no per-slot FiLM, and a 1x1 output per
-    registry task (``chan``: the slot's task index) read from the shared top features. The per-slot decoder runs every
-    upsampling stage once per segmentation slot (a third of a ViT-B training step at 3 slots per scan); this one's cost
-    does not grow with the slots, so a scan can be asked all its masks every step (``tasks.all_seg``). Gives up
-    query-conditioned decoding of tasks the registry lacks.
-
-    ``head_hidden`` > 0 (v2, 2026-11-05): each task reads the shared features through its own small per-voxel MLP
-    (C -> head_hidden -> 1, GELU) instead of a 1x1 linear map; with 16 shared channels the linear readout starved the
-    ~25 spatial tasks (decoder pilot: anatomy Dice 0.42 vs 0.63 per slot, tumour collapsed), so v2 also widens the
-    shared stages (``model.seg.widths``, e.g. 128 / 96 / 64 / 64)."""
-
-    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
-                 dense: bool = False, n_tasks: int = 1, head_hidden: int = 0):
-        super().__init__(in_dim, cond_dim, patch_zyx, widths, in_chans, dense=False)
-        del self.film, self.head
+        if self.conditioned:
+            self.film = nn.ModuleList(nn.Linear(cond_dim, 2 * w) for w in widths)
+            for f in self.film:
+                nn.init.zeros_(f.weight)
+                nn.init.zeros_(f.bias)
+            self.head = nn.Conv3d(widths[-1], 1, 1)
+            self.dense_head = nn.Conv3d(widths[-1], 1, 1) if dense else None
+            return
         c, h, t = int(widths[-1]), int(head_hidden), int(n_tasks)                     # the finest decoder width
         self.head_hidden = h
         if h:
@@ -166,17 +121,43 @@ class SharedSegDecoder(SegDecoder):
         self.out_w = nn.Parameter(torch.randn(t, h or c) * 0.02)
         self.out_b = nn.Parameter(torch.zeros(t))
 
-    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
-                dense: torch.Tensor | None = None, chan: torch.Tensor | None = None):
-        if chan is None:
-            raise ValueError("SharedSegDecoder needs the task index of every slot (chan)")
-        uniq, inv = torch.unique(rows, return_inverse=True)
-        x = self.stem(grid[uniq])
-        feats, h = [], image[uniq]
+    @staticmethod
+    def _mod(x, film, cond):
+        g, b = film(cond).chunk(2, dim=-1)
+        return x * (1 + g.view(*g.shape, 1, 1, 1)) + b.view(*b.shape, 1, 1, 1)
+
+    def _pyramid(self, image: torch.Tensor) -> list[torch.Tensor]:
+        """Image features, coarse to fine: one per decoder stage."""
+        feats, h = [], image
         for p in self.pyramid:
             h = p(h)
             feats.append(h)
-        feats = feats[::-1]
+        return feats[::-1]
+
+    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
+                dense: torch.Tensor | None = None, chan: torch.Tensor | None = None):
+        """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, in_chans, Z, Y, X); ``rows`` (P,) the volume of each
+        spatial slot, ``cond`` (P, cond_dim) its slot, ``dense`` (P,) bool: the slot is a dense task (``dense_head``),
+        ``chan`` (P,) its task index (unconditioned decoder). Returns (P, 1, Z/2, Y/2, X/2) logits / intensities."""
+        if not self.conditioned:
+            return self._forward_shared(grid, image, rows, chan)
+        x = self.stem(grid)
+        feats = self._pyramid(image)
+        x = self._mod(x[rows], self.film[0], cond)
+        for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
+            x = fuse(torch.cat([up(x), feats[i][rows]], dim=1))
+            x = self._mod(x, self.film[i + 1], cond)
+        if dense is None or self.dense_head is None or not bool(dense.any()):
+            return self.head(x)
+        return torch.where(dense.view(-1, 1, 1, 1, 1), self.dense_head(x), self.head(x))
+
+    def _forward_shared(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor,
+                        chan: torch.Tensor | None) -> torch.Tensor:
+        if chan is None:
+            raise ValueError("the unconditioned decoder needs the task index of every slot (chan)")
+        uniq, inv = torch.unique(rows, return_inverse=True)
+        x = self.stem(grid[uniq])
+        feats = self._pyramid(image[uniq])
         for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
             x = fuse(torch.cat([up(x), feats[i]], dim=1))
         w, b = self.out_w[chan].to(x.dtype), self.out_b[chan].to(x.dtype)               # (P, C or H), (P,)
@@ -205,12 +186,6 @@ class BrainQuery(nn.Module):
         self.backbone = backbone
         self.reg = reg
         d_enc, dim = backbone.embed_dim, int(s.get("dim", 256))
-        for key, plain in (("mode", "slots"), ("embedding", "learned")):
-            if str(s.get(key, plain)) != plain:          # ablations retired on 2026-10-27 (text / shared readouts)
-                raise ValueError(f"slot.{key}={s[key]} is no longer supported")
-        if s.get("width") or (cfg.get("general") or {}).get("enabled"):
-            raise ValueError("slot.width and model.general are no longer supported")
-        self.mode = "slots"
         self.taps = tuple(int(t) for t in cfg.get("taps", (3, 7)) if int(t) < backbone.depth - 1)
         n_tasks, n_cls = len(reg), reg.max_classes()
         # ``task_tokens.enabled``: OMNI-style (arXiv 2610.12574) task tokens inside the encoder instead of slot layers
@@ -219,7 +194,6 @@ class BrainQuery(nn.Module):
         # encoder's width then.
         self.tokens = bool((cfg.get("task_tokens") or {}).get("enabled", False))
         if self.tokens:
-            self.mode = "tokens"
             self.register_buffer("tt_write", torch.zeros(n_tasks, dtype=torch.bool))
         qdim = d_enc if self.tokens else dim
         # task identity
@@ -227,10 +201,6 @@ class BrainQuery(nn.Module):
         nn.init.normal_(self.task_emb.weight, std=0.02)
         self.type_emb = nn.Embedding(len(TYPE_ID), qdim)
         nn.init.normal_(self.type_emb.weight, std=0.02)
-        # ``moe``: mixture-of-experts MLPs in the encoder's last ``blocks`` blocks, experts copied from the trained MLP
-        moe = cfg.get("moe") or {}
-        if int(moe.get("blocks", 0)) and not backbone.moe_blocks:
-            backbone.enable_moe(int(moe["blocks"]), int(moe.get("experts", 5)), int(moe.get("top_k", 2)))
         self.register_buffer("task_type", torch.tensor([TYPE_ID[t.type] for t in reg.tasks]), persistent=False)
         self.register_buffer("n_classes", torch.tensor([len(t.classes) for t in reg.tasks]), persistent=False)
         # shared task tokens (registry ``token``, on with ``task_tokens.share``; earlier checkpoints keep one token per
@@ -243,16 +213,14 @@ class BrainQuery(nn.Module):
                              persistent=False)
         if self.tokens:
             self.tt_proj = nn.Linear(d_enc, dim)                # a task token's output -> the heads' input
-            self._register_load_state_dict_pre_hook(self._unused_slot_keys)
         else:
-            # slot readout (checkpoints before task tokens): tokens -> keys / values with an absolute position code
+            # slot readout: tokens -> keys / values with an absolute position code
             # (RoPE leaves tokens position-relative), then the slot layers
             self.kv_norm = nn.LayerNorm(d_enc)
             self.kv = nn.Linear(d_enc, dim)
             self.pos = mlp(3, dim, dim)
             self.cls_pos = nn.Parameter(torch.zeros(1, 1, dim))
-            self.layers = nn.ModuleList(SlotLayer(dim, int(s.get("heads", 8)), bool(s.get("cross_task", True)))
-                                        for _ in range(int(s.get("layers", 3))))
+            self.layers = nn.ModuleList(SlotLayer(dim, int(s.get("heads", 8))) for _ in range(int(s.get("layers", 3))))
         self.out_norm = nn.LayerNorm(dim)
         # typed heads, shared across tasks
         self.binary = mlp(dim, dim, 1)
@@ -282,32 +250,16 @@ class BrainQuery(nn.Module):
             self.tok_bias = nn.Parameter(torch.tensor(-3.0))          # prior ~5% of tokens on
         self.cls_query = nn.Linear(dim, dim)
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
-        n_bins = max([len(t.survival_bins) for t in reg.tasks] + [1])
-        self.survival = mlp(dim, dim, n_bins)
+        self.survival = mlp(dim, dim, 1)        # no survival task is trained or asked: kept so checkpoints load
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
-        # ``seg.shared``: decode once per volume, a 1x1 output per task (SharedSegDecoder); else once per slot
+        # ``seg.shared``: decode once per volume, an output per task (SegDecoder unconditioned); else once per slot
         self.seg_shared = bool(seg_cfg.get("shared", False))
-        self.seg = (SharedSegDecoder if self.seg_shared else SegDecoder)(
+        self.seg = SegDecoder(
             d_enc * (len(self.taps) + 1), dim, patch_zyx, tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
             in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
-            dense=any(t.type == "dense" for t in reg.tasks),
-            **({"n_tasks": n_tasks, "head_hidden": int(seg_cfg.get("head_hidden", 0))} if self.seg_shared else {}))
-        self._register_load_state_dict_pre_hook(self._pad_type_emb)
-
-    @staticmethod
-    def _unused_slot_keys(state, prefix, *_):
-        """Task-token checkpoints from 2026-10-26 also carry the slot readout's (never used) key / value projection."""
-        for k in [k for k in state if k.startswith(prefix) and
-                  k[len(prefix):].startswith(("kv_norm.", "kv.", "pos.", "cls_pos"))]:
-            state.pop(k)
-
-    def _pad_type_emb(self, state, prefix, *_):
-        """Checkpoints from before the ``dense`` type have one ``type_emb`` row fewer: keep this model's extra rows."""
-        k = prefix + "type_emb.weight"
-        if k in state and state[k].shape[0] < self.type_emb.weight.shape[0]:
-            extra = self.type_emb.weight.detach()[state[k].shape[0]:].to(state[k].device, state[k].dtype)
-            state[k] = torch.cat([state[k], extra])
+            dense=any(t.type == "dense" for t in reg.tasks), conditioned=not self.seg_shared, n_tasks=n_tasks,
+            head_hidden=int(seg_cfg.get("head_hidden", 0)))
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):
@@ -438,8 +390,7 @@ class BrainQuery(nn.Module):
         t = task.clamp_min(0)
         logits = torch.einsum("bkd,bkcd->bkc", self.cls_query(z), self.cls_emb[t]) / math.sqrt(self.cls_emb.shape[-1])
         valid = torch.arange(logits.shape[-1], device=z.device) < self.n_classes[t].unsqueeze(-1)
-        out = {"binary": self.binary(z)[..., 0], "multiclass": logits.masked_fill(~valid, float("-inf")),
-               "survival": self.survival(z)}
+        out = {"binary": self.binary(z)[..., 0], "multiclass": logits.masked_fill(~valid, float("-inf"))}
         if self.regress_bins is None:
             out["regression"] = self.regress(z)[..., 0]
         else:
@@ -489,41 +440,21 @@ class BrainQuery(nn.Module):
 
 
 class TokenTraining:
-    """What a trainer does for task tokens and MoE blocks, shared by the multitask and joint trainers.
+    """What a trainer does for task tokens, shared by the multitask and joint trainers.
 
     * registers the trained tasks as the always-present (written) tokens;
     * ``at_step``: the patch tokens' attention to the task tokens starts damped by ``write_bias`` logits and opens
       linearly over ``write_ramp_steps`` from ``start`` (a warm-started encoder: undamped, random task tokens shift its
-      features ~40% before any training);
-    * ``moe_loss``: the MoE load-balancing term of the last forward, weighted by ``moe.aux_weight`` (0 without MoE),
-      averaged for the log as ``moe`` (1 = even routing; it rises towards the expert count as routing collapses).
-    A model without task tokens or MoE makes every call a no-op."""
+      features ~40% before any training).
+    A model without task tokens makes every call a no-op."""
 
-    def __init__(self, model: BrainQuery, cfg_model: dict, trained: list[int], device: torch.device):
+    def __init__(self, model: BrainQuery, cfg_model: dict, trained: list[int]):
         self.model = model
         tt = cfg_model.get("task_tokens") or {}
         self.bias0, self.ramp = float(tt.get("write_bias", 10.0)), int(tt.get("write_ramp_steps", 2000))
         if model.tokens:
             model.set_token_tasks(trained)
-        self.moe_w = float((cfg_model.get("moe") or {}).get("aux_weight", 0.05)) if model.backbone.moe_blocks else 0.0
-        self.moe_sum, self.moe_cnt = torch.zeros((), device=device), 0
 
     def at_step(self, step: int, start: int = 0) -> None:
         if self.model.tokens:
             self.model.backbone.task_write_bias = self.bias0 * max(0.0, 1.0 - (step - start) / max(self.ramp, 1))
-
-    def moe_loss(self) -> torch.Tensor | float:
-        if not self.moe_w:
-            return 0.0
-        aux = self.model.backbone.moe_aux()
-        self.moe_sum += aux.detach()
-        self.moe_cnt += 1
-        return self.moe_w * aux
-
-    def log_extras(self) -> dict[str, str]:
-        if not self.moe_w:
-            return {}
-        out = {"moe": f"{(self.moe_sum / max(self.moe_cnt, 1)).item():.3f}"}
-        self.moe_sum.zero_()
-        self.moe_cnt = 0
-        return out

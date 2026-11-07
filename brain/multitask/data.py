@@ -35,7 +35,7 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 from brain.common.windowing import asinh_window, canonical_c_w, floors, role_windows
 from brain.data.augment import appearance
-from brain.data.gate import token_keep
+from brain.data.gate import gate_kwargs, token_keep
 from brain.data.volumes import FamilySampler, _worker_threads, meta_id
 from brain.multitask.labels import live_targets
 from brain.multitask.registry import SPATIAL_TYPES, Registry
@@ -720,15 +720,13 @@ def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | Non
 
 def foreground_tokens(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None) -> torch.Tensor:
     """Foreground token mask (B, N) of native-unit volumes ``raw`` (B, 1, Z, Y, X)."""
-    gate = gate or {}
-    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz, mode=str(gate.get("mode", "center")),
-                      ct_hu=tuple(gate.get("ct_hu", (-500.0, 200.0))), mri_lo=float(gate.get("mri_lo", -5.5)),
-                      min_frac=float(gate.get("min_frac", 0.25))).reshape(raw.shape[0], -1)   # gate on (B,1,X,Y,Z)
+    return token_keep(raw.permute(0, 1, 4, 3, 2), mod, patch_xyz,                   # gate on (B, 1, X, Y, Z)
+                      **gate_kwargs(gate)).reshape(raw.shape[0], -1)
 
 
 def gate_cfg(cfg: dict) -> dict:
-    """The run's token gate: ``views.gate`` (what the frozen benchmark reads too), else the legacy ``model.gate``."""
-    return (cfg.get("views") or {}).get("gate") or (cfg.get("model") or {}).get("gate") or {}
+    """The run's token gate: ``views.gate`` (what the frozen benchmark reads too)."""
+    return (cfg.get("views") or {}).get("gate") or {}
 
 
 def canonical_window(raw: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
@@ -824,6 +822,20 @@ def protected_tasks(reg) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.tensor(fov), torch.tensor(live)
 
 
+def _flip(x: torch.Tensor, flip: torch.Tensor) -> torch.Tensor:
+    """Rows of (R, C, Z, Y, X) ``x`` with ``flip`` (R,) True mirrored left-right."""
+    return torch.where(flip.view(-1, 1, 1, 1, 1), x.flip(-1), x)
+
+
+def _warp(x: torch.Tensor, grid: torch.Tensor, background: bool = True) -> torch.Tensor:
+    """``x`` resampled through ``grid`` (bilinear); with ``background`` the area moved in from outside takes each row's
+    minimum (air) instead of 0."""
+    if not background:
+        return F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+    bg = x.amin(dim=(1, 2, 3, 4), keepdim=True)
+    return F.grid_sample(x - bg, grid, mode="bilinear", padding_mode="zeros", align_corners=False) + bg
+
+
 def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None,
             aug_unsafe: torch.Tensor | None = None, sharp: torch.Tensor | None = None) -> dict:
     """Raw batch -> encoder input (B, C, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
@@ -856,31 +868,27 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     drows = batch["dense_row"].to(device) if raw_dense is not None else None
     prow = batch["study_row"].to(device) if "study_row" in batch else torch.zeros(0, dtype=torch.long, device=device)
     praw = batch["study_img"].to(device, non_blocking=True).float().unsqueeze(1) if len(prow) else None
+    has_dense = raw_dense is not None and len(raw_dense) > 0
     flip = None
     if train and float(aug.get("flip_lr", 0.0)) > 0:
         flip = torch.rand(b, device=device) < float(aug["flip_lr"])
-        raw = torch.where(flip.view(-1, 1, 1, 1, 1), raw.flip(-1), raw)
+        raw = _flip(raw, flip)
         if praw is not None:
-            praw = torch.where(flip[prow].view(-1, 1, 1, 1, 1), praw.flip(-1), praw)
+            praw = _flip(praw, flip[prow])
         if len(seg):
-            seg = torch.where(flip[rows].view(-1, 1, 1, 1, 1), seg.flip(-1), seg)
-        if raw_dense is not None and len(raw_dense):
-            raw_dense = torch.where(flip[drows].view(-1, 1, 1, 1, 1), raw_dense.flip(-1), raw_dense)
+            seg = _flip(seg, flip[rows])
+        if has_dense:
+            raw_dense = _flip(raw_dense, flip[drows])
     theta = augment_theta(b, raw.shape[2:], aug.get("affine") or {}, device, skip=live_rows) if train else None
     if theta is not None:
-        bg = raw.amin(dim=(1, 2, 3, 4), keepdim=True)
         grid = F.affine_grid(theta, list(raw.shape), align_corners=False)
-        raw = F.grid_sample(raw - bg, grid, mode="bilinear", padding_mode="zeros", align_corners=False) + bg
+        raw = _warp(raw, grid)
         if len(seg):
-            seg = F.grid_sample(seg, grid[rows], mode="bilinear", padding_mode="zeros", align_corners=False)
+            seg = _warp(seg, grid[rows], background=False)
         if praw is not None:
-            pbg = praw.amin(dim=(1, 2, 3, 4), keepdim=True)
-            praw = F.grid_sample(praw - pbg, grid[prow], mode="bilinear", padding_mode="zeros",
-                                 align_corners=False) + pbg
-        if raw_dense is not None and len(raw_dense):
-            dbg = raw_dense.amin(dim=(1, 2, 3, 4), keepdim=True)
-            raw_dense = F.grid_sample(raw_dense - dbg, grid[drows], mode="bilinear", padding_mode="zeros",
-                                      align_corners=False) + dbg
+            praw = _warp(praw, grid[prow])
+        if has_dense:
+            raw_dense = _warp(raw_dense, grid[drows])
         del grid
     if train and (aug.get("fov_cut") or {}).get("p", 0.0):
         unsafe = fov_unsafe.to(device)[task.clamp_min(0)] & (task >= 0) if fov_unsafe is not None \
@@ -1058,17 +1066,11 @@ def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:
     return pd.read_parquet(d / "labels.parquet"), json.loads((d / "stats.json").read_text())
 
 
-LEGACY_STATS = "stats_legacy.json"     # the label table's regression stats before the 2026-10-25 rebuild
-
-
 def checkpoint_stats(saved: dict | None, labels_dir: str | Path, current: dict) -> dict:
-    """The regression-target normalisation a checkpoint was trained with: ``saved`` in it (``label_stats``, runs from
-    2026-10-25 on), else the frozen pre-rebuild copy (``stats_legacy.json``), else the label table's current stats.
-    The loader standardises targets with these: other stats than the training ones bias the comparison."""
-    if saved:
-        return dict(saved)
-    legacy = Path(labels_dir) / LEGACY_STATS
-    return json.loads(legacy.read_text()) if legacy.exists() else current
+    """The regression-target normalisation a checkpoint was trained with: ``saved`` in it (``label_stats``; every kept
+    checkpoint has them), else the label table's current stats. The loader standardises targets with these: other
+    stats than the training ones bias the comparison."""
+    return dict(saved) if saved else current
 
 
 class SyntheticMultitask(Dataset):

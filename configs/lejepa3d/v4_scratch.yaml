@@ -78,10 +78,9 @@ aug:
 loss:
   lamb: 0.03
   win_weight: 1.0
-  local_pooled: false
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 1.0, tokens_per_view: 32, fine_weight: 0.0, stopgrad_mean: false}
+  dense: {weight: 1.0, tokens_per_view: 32}
   predict:
     weight: 1.0
     pixel_weight: 0.5
@@ -90,9 +89,6 @@ loss:
     block_tokens: [3, 6]
     depth: 4
     ramp_steps: 2000
-    fine_weight: 0.0
-    fine_blocks: 2
-    fine_block_tokens: [2, 3]
 optim: {lr: 0.0005, weight_decay: 0.05, warmup_steps: 3000, clip_grad: 1.0, batch_size: 48, lr_floor: 0.002, schedule: cosine}
 train: {max_steps: 30000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 5000, stop_poll: 20, best_metric: loss}
-output: {out_dir: runs/v4/scratch_s42, resume_from: null, init_from: null}
+output: {out_dir: runs/v4/scratch_s42, resume_from: null}

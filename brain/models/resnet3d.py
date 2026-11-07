@@ -62,7 +62,6 @@ class ResNetEncoder(nn.Module):
         self.embed_dim = self.widths[-1]
         self.depth = 0                 # no transformer blocks: no taps, no layer-wise LR decay
         self.size = "resnet3d"
-        self.moe_blocks = 0
         self.checkpoint_blocks = bool(checkpoint_blocks)
         self.stem = nn.Sequential(nn.Conv3d(in_chans, self.widths[0], (3, 7, 7), stride=(1, 2, 2), padding=(1, 3, 3),
                                             bias=False), _norm(self.widths[0]), nn.ReLU(inplace=True))
@@ -83,15 +82,12 @@ class ResNetEncoder(nn.Module):
     def param_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
-    def moe_aux(self) -> float:
-        return 0.0
-
     def _stem(self, x: torch.Tensor) -> torch.Tensor:
         return F.max_pool3d(self.stem(x), 3, stride=2, padding=1)
 
     def forward(self, view: torch.Tensor, coords_mm: torch.Tensor | None = None,
                 patch_size_mm: torch.Tensor | None = None, patch_xyz=None, keep: torch.Tensor | None = None,
-                taps: Sequence[int] = (), meta=None, task_tokens=None, task_write=None, refine=None) -> dict:
+                taps: Sequence[int] = (), meta=None, task_tokens=None, task_write=None) -> dict:
         x = view.permute(0, 1, 4, 3, 2)                                   # (B, C, Z, Y, X)
         # the full-resolution stem holds the largest activations: recomputed in backward too (GroupNorm: exact)
         x = (checkpoint(self._stem, x, use_reentrant=False) if self.checkpoint_blocks and self.training

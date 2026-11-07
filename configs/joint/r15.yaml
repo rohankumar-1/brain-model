@@ -60,7 +60,7 @@ model:
   checkpoint: true
   init_from: null
   taps: [3, 7]
-  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  slot: {dim: 256, layers: 3, heads: 8}
   seg:
     widths: [128, 96, 64, 64]
     shared: true
@@ -164,10 +164,9 @@ loss:
   # SSL branch (v4's LeJEPA)
   lamb: 0.03
   win_weight: 0.0                 # the window pair (one crop, two contrasts must agree) is pure contrast invariance: off
-  local_pooled: false
   n_proj: 256
   gather_ddp: true
-  dense: {weight: 1.0, tokens_per_view: 32, fine_weight: 0.0, stopgrad_mean: false}
+  dense: {weight: 1.0, tokens_per_view: 32}
   predict:
     weight: 1.0
     pixel_weight: 0.5
@@ -176,12 +175,7 @@ loss:
     block_tokens: [3, 6]
     depth: 4
     ramp_steps: 2000
-    fine_weight: 0.0
-    fine_blocks: 2
-    fine_block_tokens: [2, 3]
   # task branch (R14's)
-  balance: uncertainty
-  ema_decay: 0.99
   seg_stride: 2
   uncertainty_clamp: 1.0
   token_weight: 0.5
@@ -202,7 +196,6 @@ optim:
   layer_decay: 1.0
   weight_decay: 0.05
   warmup_steps: 3000
-  freeze_steps: 0
   clip_grad: 1.0
   batch_size: 8                   # 4 H200 x 8 = global 32 (R10-R14's); profile job 28052436
   schedule: wsd
@@ -210,4 +203,4 @@ optim:
   betas: [0.9, 0.95]
 train: {max_steps: 120000, log_every: 50, eval_every: 2000, ckpt_every: 500, keep_every: 10000, stop_poll: 20,
   best_metric: score, ema_decay: 0.999, keep_full: false}   # weights-only snapshots: scratch is ~97% full
-output: {out_dir: runs/joint/r15, resume_from: null, init_from: null}
+output: {out_dir: runs/joint/r15, resume_from: null}

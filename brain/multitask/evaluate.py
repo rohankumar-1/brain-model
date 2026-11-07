@@ -32,11 +32,10 @@ def dice(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 @torch.no_grad()
-def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp: dict, return_preds: bool = False,
-             alone: bool = True):
-    """Per-task metrics over ``loader`` (the model's own heads). ``return_preds`` also returns the (target, output,
-    volume_id) rows per task index, in loader order (paired comparisons across checkpoints pair by volume_id). ``alone=False`` asks a volume's
-    tasks together in one query (slots attend to each other), as before 2026-10-25."""
+def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp: dict, return_preds: bool = False):
+    """Per-task metrics over ``loader`` (the model's own heads), every task asked on its own. ``return_preds`` also
+    returns the (target, output, volume_id) rows per task index, in loader order (paired comparisons across
+    checkpoints pair by volume_id)."""
     was = model.training
     model.eval()
     preds: dict[int, list] = defaultdict(list)
@@ -47,7 +46,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     for raw in loader:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
-            out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=alone, meta=b.get("meta"),
+            out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
                         dense_pair=b.get("dense_pair"), study=b.get("study"))
         loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b,
                                 negatives=negatives)

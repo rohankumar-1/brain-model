@@ -40,7 +40,6 @@ model:
     dim: 256
     layers: 3
     heads: 8
-    cross_task: true
   seg:
     widths:
     - 128
@@ -183,8 +182,6 @@ aug:
     p: 0.2
   task_aware: true
 loss:
-  balance: uncertainty
-  ema_decay: 0.99
   seg_stride: 2
   uncertainty_clamp: 1.0
   token_weight: 0.5
@@ -202,7 +199,6 @@ optim:
   layer_decay: 1.0
   weight_decay: 0.05
   warmup_steps: 1000
-  freeze_steps: 0
   clip_grad: 1.0
   batch_size: 4
   schedule: wsd

@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+
+from brain.common.config import deep_update
 from brain.common.grid import GRID_XYZ
 
 METHODS = {
     "lejepa3d": "brain.train.lejepa3d",
-    "mae3d": "brain.train.mae3d",
     "multitask": "brain.train.multitask",
     "joint": "brain.train.joint",
 }
@@ -37,8 +38,6 @@ LEJEPA3D: dict[str, Any] = {
         "rope_base_mm": 100.0, "checkpoint": True, "proj_norm": "batch", "length_buckets": 4,
         # Token head for the dense loss: 0 builds none (a plain pooled-only model).
         "dense_dim": 128, "dense_hidden": 512,
-        # budgeted token refinement (brain.models.refine): a share of each crop's cells as 8 half-size tokens; 0 = off
-        "refine": {"groups": ["global"], "frac_max": 0.0, "random_frac": 0.5},
         # Prefix tokens: n_cls=1 adds a CLS that becomes the pooled (global) embedding; registers are extra
         # position-free tokens attention can use as scratch space. 0/0 = mean-pooled patch tokens.
         "n_cls": 0, "n_registers": 0,
@@ -57,11 +56,11 @@ LEJEPA3D: dict[str, Any] = {
     },
     # Intensity re-rendering, applied per crop. See brain/data/augment.py.
     "aug": {
-        # mode random / fixed: one asinh window; roles: the three role windows as channels (model.in_chans 3,
-        # windowing.ROLES), each jittered by ``jitter`` widths; roles with channels 1: the same pipeline with one
-        # role window per crop (model.in_chans 1), the matched control for the three-channel input
-        "window": {"mode": "random", "mix": "brain", "jitter": 0.0, "channels": 3},
-        # Monotone tissue-contrast curve on MRI rows: random knots over the window's output range, so soft tissue can
+        # mode fixed: the canonical asinh window (bias, through-plane, noise, blur, drift only); roles: the three role
+        # windows as channels (model.in_chans 3, windowing.ROLES), each jittered by ``jitter`` widths; roles with
+        # channels 1: the same pipeline with one role window per crop (model.in_chans 1; the v4 recipe)
+        "window": {"mode": "fixed", "jitter": 0.0, "channels": 3},
+        # (roles) Monotone tissue-contrast curve on MRI rows: random knots over the window's output range, so soft tissue can
         # be stretched, compressed or (with ``flip``) inverted, as T1 <-> T2 do. Never CT (HU are physical).
         "curve": {"p": 0.8, "knots": 5, "strength": 0.6, "flip": 0.3},
         # Smooth multiplicative bias field (MRI coil shading). Skipped for CT.
@@ -78,7 +77,7 @@ LEJEPA3D: dict[str, Any] = {
         "skull": {"p": 0.5, "per_view": False},
         # Per-view rotation / scale / left-right flip on the GPU (crops3d.draw_geometry); p 0 = off.
         "geometric": {"p": 0.0, "rot_deg": [10.0, 10.0, 15.0], "scale": [0.85, 1.15], "flip_lr": 0.5},
-        # MRI histogram matching to another volume of the same contrast group (augment.histogram_match); p 0 = off.
+        # (roles) MRI histogram matching to another volume of the same contrast group (augment.histogram_match); p 0 = off.
         "histmatch": {"p": 0.0, "alpha": [0.3, 0.7]},
         # one contrast draw per volume shared by all its views (roles mode; batch3d.prepare): the agreement terms then
         # teach invariance to crop and degradation, not to contrast (R15); False = an independent draw per view
@@ -87,18 +86,14 @@ LEJEPA3D: dict[str, Any] = {
     "loss": {
         "lamb": 0.02,
         "win_weight": 1.0,
-        "local_pooled": False,
         "n_proj": 256,
         "gather_ddp": True,
-        "dense": {"weight": 1.0, "tokens_per_view": 32, "fine_weight": 0.0, "stopgrad_mean": False},
+        "dense": {"weight": 1.0, "tokens_per_view": 32},
         # Masked prediction on the global crops (needs the dense term); weight 0 builds no predictor.
         # Hidden blocks: ``blocks`` cuboids with sides in ``block_tokens``. The predictor regresses each
         # hidden token's full-crop embedding and, with pixel_weight > 0, the voxel cell means of kept patches.
         "predict": {"weight": 0.0, "pixel_weight": 0.5, "pixel_cells": [2, 2, 2], "blocks": 3,
-                    "block_tokens": [3, 6], "depth": 4, "ramp_steps": 2000,
-                    "fine_weight": 0.0, "fine_blocks": 2, "fine_block_tokens": [2, 3],
-                    # MAE (mae3d): voxels | split target; lesion = {visible, weight} lesion-aware masking (None = off)
-                    "target": "voxels", "lesion": None},
+                    "block_tokens": [3, 6], "depth": 4, "ramp_steps": 2000},
     },
     # lr_floor: the schedule's final LR as a fraction of the peak (engine.lr_of)
     "optim": {"lr": 2.5e-4, "weight_decay": 0.05, "warmup_steps": 2000, "clip_grad": 1.0, "batch_size": 4,
@@ -106,29 +101,8 @@ LEJEPA3D: dict[str, Any] = {
     "train": {"max_steps": 45000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500, "keep_every": 5000,
               "stop_poll": 20, "best_metric": "loss"},
     # resume_from: checkpoint used only when <out_dir>/last.pt is absent (weights + optimizer + step).
-    # init_from: weights only, fresh optimizer and schedule (heads the source lacks, e.g. the predictor, start random).
-    "output": {"out_dir": "runs/lejepa3d", "resume_from": None, "init_from": None},
+    "output": {"out_dir": "runs/lejepa3d", "resume_from": None},
 }
-
-def _mae3d_defaults() -> dict[str, Any]:
-    """3D MAE: Primus-style ViT (SwiGLU, LayerScale, drop-path) on 8 x 8 x 4 mm tokens; 75% of each crop's foreground
-    tokens hidden; a narrow decoder reconstructs their voxels in windowed units (no per-patch normalisation)."""
-    c = deepcopy(LEJEPA3D)
-    c["model"].update(size="base", mlp="swiglu", layer_scale=0.1, drop_path=0.1, n_cls=0, n_registers=0, dense_dim=0,
-                      decoder={"dim": 384, "depth": 4, "heads": 6})
-    c["views"].update(patch_xyz=[8, 8, 4], nested=False, win=False,
-                      local={"n": 0, "size_xyz": [64, 64, 32]}, fine={"n": 0, "size_xyz": [32, 32, 16]})
-    c["aug"].update(curve={"p": 0.0}, skull={"p": 0.3, "per_view": True})
-    c["loss"] = {"predict": {"weight": 1.0, "mask_ratio": 0.75, "blocks": 0, "block_tokens": [3, 6],
-                             "target": "voxels", "lesion": None}}
-    c["optim"].update(lr=1.5e-4, weight_decay=0.05, warmup_steps=2000, batch_size=24)
-    c["train"].update(max_steps=30000, keep_every=3000)
-    c["output"]["out_dir"] = "runs/mae3d"
-    return c
-
-
-MAE3D: dict[str, Any] = _mae3d_defaults()
-
 
 def _multitask_defaults() -> dict[str, Any]:
     """Task-conditioned multitask post-training (brain.multitask): an SSL encoder on whole volumes, one learned task
@@ -156,8 +130,6 @@ def _multitask_defaults() -> dict[str, Any]:
                   "task_tokens": {"enabled": True, "write_bias": 10.0, "write_ramp_steps": 2000, "share": False},
                   # study-level input (R14-F): {after_block, heads}: a study's co-registered scans fused inside the encoder
                   "fusion": None,
-                  # MoE MLPs in the top ``blocks`` encoder blocks (0 = off; tried 2026-10-26, no clear gain over tokens)
-                  "moe": {"blocks": 0, "experts": 5, "top_k": 2, "aux_weight": 0.05},
                   # regression head: ``scalar`` (smooth L1) or ``hlgauss`` (bins over the standardised range, Gaussian
                   # targets of sigma_ratio bin widths; switching a resumed run adds the head and resets the optimizer)
                   "regression": {"kind": "scalar", "bins": 80, "range": [-5.0, 5.0], "sigma_ratio": 0.75},
@@ -171,14 +143,13 @@ def _multitask_defaults() -> dict[str, Any]:
                   # from-scratch ViT only: widths of a two-stage convolution stem before the token grid
                   # (patch_embed.ConvStemEmbed3D, e.g. [32, 64]); None = the plain linear patch embedding
                   "conv_stem": None,
-                  # ``dim``: the heads' width. layers / heads / cross_task: the slot readout of checkpoints before
-                  # task tokens (task_tokens.enabled: false)
-                  "slot": {"dim": 256, "layers": 3, "heads": 8, "cross_task": True},
-                  # shared: decode once per volume with a 1x1 output per task (SharedSegDecoder; tasks.all_seg asks
+                  # ``dim``: the heads' width. layers / heads: the slot readout (task_tokens.enabled: false)
+                  "slot": {"dim": 256, "layers": 3, "heads": 8},
+                  # shared: decode once per volume with a 1x1 output per task (SegDecoder unconditioned; tasks.all_seg asks
                   # every mask), instead of once per segmentation slot
                   # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout
                   "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0}},
-        # gate mode: "center" (a token's centre voxel), "max" or "frac" (>= min_frac of its voxels; data.gate.token_keep)
+        # gate mode: "center" (a token's centre voxel) or "frac" (>= min_frac of its voxels; data.gate.token_keep)
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
                                                      "min_frac": 0.25}},
         # groups: train only these task groups (None = every trained task; e.g. the no-human-label control)
@@ -216,11 +187,10 @@ def _multitask_defaults() -> dict[str, Any]:
         # sparse_pos_weight: target-voxel / target-cell weight of losses.sparse_seg_loss (registry ``sparse`` tasks).
         # token_weight / slice_weight (need model.token_map): token-map losses added to a slot's loss, on mask tasks'
         # token occupancy (losses.token_occupancy_loss) and on RSNA slice labels (losses.slab_mil_loss)
-        "loss": {"balance": "uncertainty", "ema_decay": 0.99, "seg_stride": 2, "sparse_pos_weight": 20.0,
+        "loss": {"seg_stride": 2, "sparse_pos_weight": 20.0,
                  "negative_tasks": [], "token_weight": 0.0, "slice_weight": 0.0, "box_weight": 0.0},
-        # freeze_steps: slot-readout runs only (the encoder trains from step 0 with task tokens inside it)
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
-                  "warmup_steps": 1000, "freeze_steps": 0, "clip_grad": 1.0, "batch_size": 8},
+                  "warmup_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
         # ema_decay: weight average (brain.train.engine.WeightEMA), evaluated beside the live weights; None = off
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
                   "keep_every": 5000, "stop_poll": 20, "best_metric": "score",   # validation skill (brain.eval.skill)
@@ -231,30 +201,21 @@ def _multitask_defaults() -> dict[str, Any]:
 
 MULTITASK: dict[str, Any] = _multitask_defaults()
 
-def _merge(a: dict, b: dict) -> dict:
-    """Deep merge, ``b`` over ``a``."""
-    out = deepcopy(a)
-    for k, v in b.items():
-        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else deepcopy(v)
-    return out
-
-
 def _joint_defaults() -> dict[str, Any]:
     """Joint SSL + multitask training from scratch (brain.train.joint): the 3D LeJEPA config plus the multitask
     sections (their keys do not collide: LeJEPA ``aug`` / ``loss`` / ``model`` keys and the multitask ones are disjoint),
     the encoder fixes as options and the curriculum under ``joint``."""
-    c = _merge(MULTITASK, LEJEPA3D)
+    c = deep_update(MULTITASK, LEJEPA3D)
     c["model"].update(init_from=None, n_cls=1, drop_path=0.0,
                       # RoPE frequencies from a 32 mm shortest period (None: the original 6.3 mm, ~38% aliased pairs)
                       rope_min_period_mm=None)
-    c["views"].setdefault("gate", {}).update(mode="center")        # "max": any voxel of the patch counts
+    c["views"].setdefault("gate", {}).update(mode="center")
     # the curriculum in fractions of max_steps, or in steps (warmup_steps / task_ramp_steps / taper_end_steps win when
     # set: a run that may be extended keeps its curriculum fixed instead of stretching it)
     # ssl_start: the SSL weight while it tapers from the start (1.0 = equal to the tasks' full weight); R15 4 -> floor 1
     c["joint"] = {"ssl_start": 1.0, "ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
                   "warmup_steps": None, "task_ramp_steps": None, "taper_end_steps": None,
-                  "ssl_batch_size": 4, "normalize": True,
-                  "task_batch_size": None, "task_workers": None}    # legacy (pre-2026-11-06 joint trainer): ignored
+                  "ssl_batch_size": 4, "normalize": True}
     # the task side is brain.train.multitask's trainer: optim.batch_size = task volumes per GPU; from scratch the encoder
     # trains at the full LR (no multitask post-training discount, no layer-wise decay)
     c["optim"].update(batch_size=4, enc_lr_mult=1.0, layer_decay=1.0)
@@ -265,8 +226,7 @@ def _joint_defaults() -> dict[str, Any]:
 
 JOINT: dict[str, Any] = _joint_defaults()
 
-_DEFAULTS = {"lejepa3d": LEJEPA3D, "mae3d": MAE3D, "multitask": MULTITASK,
-             "joint": JOINT}
+_DEFAULTS = {"lejepa3d": LEJEPA3D, "multitask": MULTITASK, "joint": JOINT}
 for _name, _c in _DEFAULTS.items():
     # optim.schedule: cosine | wsd (warmup-stable-decay; decay_steps = length of the final decay, None = 20% of the
     # run). train.keep_full: keep_every snapshots carry optimizer state too (to branch a WSD cooldown from them).
@@ -280,9 +240,6 @@ for _name, _c in _DEFAULTS.items():
     # inherits them from its init_from encoder.
     _c["model"].setdefault("rope_fp32", True)
     _c["model"].setdefault("fp32_residual", True)
-    if "gather_ddp" in _c["loss"]:
-        # None: gathered SSL terms get their full gradient; an int reproduces the old (1/W) weighting of that GPU count
-        _c["loss"].setdefault("gather_world_ref", None)
     # scan metadata (modality / contrast, brain.data.volumes.META) as an encoder input, replaced by "unknown" with
     # probability drop; checkpoints without the key have none. Off by default since 2026-10-28: the sequence label is a
     # shortcut against a modality-agnostic encoder (runs saved with it on keep it)

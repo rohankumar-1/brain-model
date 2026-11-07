@@ -112,7 +112,6 @@ class Trainer:
     """Interface between a method and the engine. Subclasses set ``unit`` and ``batch_units``."""
 
     unit = "samples"      # what throughput counts
-    synthetic_ok = False  # whether --synthetic is supported
 
     def __init__(self, rt: Runtime, cfg: dict, args: argparse.Namespace, ckpt: dict | None, step: int):
         self.rt, self.cfg, self.args = rt, cfg, args
@@ -146,9 +145,6 @@ class Trainer:
         """The validation log: the first line follows the ``[eval step/max]`` prefix, later ones stand alone."""
         return [" ".join(f"{k}={v:.4f}" for k, v in vals.items())]
 
-    def on_start(self, out_dir: Path, step: int) -> None:
-        """Rank-0 hook after the output directory exists (QC images, etc.)."""
-
 
 def _metric_table(prefix_w: int, log, every: int = 10):
     """Prints a label row every ``every`` lines; values sit in fixed columns under those labels."""
@@ -177,7 +173,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reset-schedule", action="store_true",
                    help="on resume, start the config's LR schedule (lr, warmup, max_steps) afresh at the resume step "
                         "instead of keeping the saved one")
-    p.add_argument("--synthetic", action="store_true", help="tiny phantom volumes, no store (lejepa3d only)")
+    p.add_argument("--synthetic", action="store_true", help="tiny phantom volumes, no store")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="dotted config override, repeatable (e.g. --set optim.lr=1e-4)")
     return p.parse_args(argv)
@@ -195,8 +191,6 @@ def run(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     cfg = build_config(args)
     mod = importlib.import_module(METHODS[args.method])
-    if args.synthetic and not mod.Trainer.synthetic_ok:
-        raise SystemExit(f"--synthetic is not supported by {args.method}")
     rt = init_runtime(int(cfg["seed"]))
     log = rt.log
     t_cfg, out_cfg = cfg["train"], cfg["output"]
@@ -208,8 +202,8 @@ def run(argv: list[str] | None = None) -> None:
 
     step, history, ckpt, resume_src, branched = 0, [], None, None, False
     best_val, best_step = float("-inf") if best_metric in HIGHER_IS_BETTER else float("inf"), 0
-    synthetic_persist = args.synthetic and os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"
-    if not (args.no_resume or (args.synthetic and not synthetic_persist)):
+    persist = not args.synthetic or os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"   # tests: resume on phantoms
+    if persist and not args.no_resume:
         resume_from = out_cfg.get("resume_from")
         resume_src = find_resume(out_dir, resolve(resume_from) if resume_from else None)
     if resume_src is not None:
@@ -260,7 +254,6 @@ def run(argv: list[str] | None = None) -> None:
     if rt.main:
         out_dir.mkdir(parents=True, exist_ok=True)
         save_config(cfg, out_dir / "config.yaml")
-        trainer.on_start(out_dir, step)
 
     # weight average (train.ema_decay): evaluated beside the live weights and written as <name>_ema.pt, an ordinary
     # checkpoint whose weights are the average, so the benchmark can score both
@@ -287,7 +280,12 @@ def run(argv: list[str] | None = None) -> None:
         with ema.swapped(trainer.module):
             save(path, model_only=True)
 
-    persist = not args.synthetic or os.environ.get("BRAIN_PERSIST_SYNTHETIC") == "1"   # tests: resume on phantoms
+    def log_eval(tag: str, vals: dict) -> None:
+        lines = trainer.eval_lines(vals)
+        log(f"[{tag} {step:>{step_w}}/{max_steps}] " + (lines[0] if lines else ""))
+        for line in lines[1:]:
+            log(line)
+
     stop = StopFlag()
     step_w, prefix_w = len(str(max_steps)), len(f"[step {max_steps}/{max_steps}]")
     put = _metric_table(prefix_w, log)
@@ -322,10 +320,7 @@ def run(argv: list[str] | None = None) -> None:
             vals = trainer.evaluate()
             if vals:
                 history.append({"step": step, **vals})
-                lines = trainer.eval_lines(vals)
-                log(f"[eval {step:>{step_w}}/{max_steps}] " + (lines[0] if lines else ""))
-                for line in lines[1:]:
-                    log(line)
+                log_eval("eval", vals)
                 new_best = is_new_best({k.removeprefix("val_"): v for k, v in vals.items()}, best_metric, best_val)
                 if new_best is not None:
                     best_val, best_step = new_best, step
@@ -336,10 +331,7 @@ def run(argv: list[str] | None = None) -> None:
                     with ema.swapped(trainer.module):
                         ev = trainer.evaluate()
                     history[-1]["ema"] = ev
-                    lines = trainer.eval_lines(ev)
-                    log(f"[eval-ema {step:>{step_w}}/{max_steps}] " + (lines[0] if lines else ""))
-                    for line in lines[1:]:
-                        log(line)
+                    log_eval("eval-ema", ev)
                     nb = is_new_best({k.removeprefix("val_"): v for k, v in ev.items()}, best_metric, best_ema)
                     if nb is not None:
                         best_ema = nb

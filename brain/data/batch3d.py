@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from brain.common.windowing import floors
 from brain.data.augment import appearance
 from brain.data.crops3d import raw_views
 
@@ -22,14 +23,6 @@ def length_plan(counts: torch.Tensor, buckets: int) -> tuple[torch.Tensor, list[
     sizes = [base + (1 if i < extra else 0) for i in range(n)]
     starts = [sum(sizes[:i]) for i in range(n)]
     return order, sizes, [int(ranked[s]) for s in starts]
-
-
-def random_mask(fg: torch.Tensor, ratio: float, gen: torch.Generator | None = None) -> torch.Tensor:
-    """(rows, N) bool, True on ``ratio`` of each row's foreground tokens chosen uniformly (MAE masking). CPU."""
-    score = torch.rand(fg.shape, generator=gen).masked_fill(~fg, 2.0)        # air sorts last, never hidden
-    n_hide = (fg.sum(1).float() * float(ratio)).floor().long()
-    rank = score.argsort(1).argsort(1)
-    return rank < n_hide[:, None]
 
 
 def block_mask(rows: int, grid_zyx: tuple[int, int, int], blocks: int, lo: int, hi: int) -> torch.Tensor:
@@ -50,7 +43,7 @@ def block_mask(rows: int, grid_zyx: tuple[int, int, int], blocks: int, lo: int, 
     return out.reshape(rows, -1)
 
 
-_ROW_KEYS = ("view", "coords", "fg", "patch_mm", "parent", "pos", "tok_pos")
+_ROW_KEYS = ("view", "coords", "fg", "patch_mm", "parent", "pos")
 
 
 def _warp(x: torch.Tensor, grid: torch.Tensor, mode: str) -> torch.Tensor:
@@ -71,7 +64,7 @@ def sample_views(chunks: list[dict], groups, device: torch.device) -> dict[str, 
     if device.type != "cuda":
         vol = vol.float()                                       # CPU grid_sample has no float16 kernel
     mod = torch.cat([c["modality"].to(device, non_blocking=True) for c in chunks])
-    floor = torch.where(mod == 0, -1024.0, -6.0).to(vol.dtype).view(-1, 1, 1, 1, 1)
+    floor = floors(mod).to(vol.dtype).view(-1, 1, 1, 1, 1)
     shifted = vol - floor                                       # zero padding outside the volume == air
     del vol                                                     # only the shifted copy is needed from here
     brain = torch.cat([c["brain_full"].to(device, non_blocking=True) for c in chunks]).to(shifted.dtype) \
@@ -124,7 +117,7 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
     if "volume_full" in first:
         d.update(sample_views(chunks, first["groups"], device))
     for g in first["groups"]:
-        for k in _ROW_KEYS + (("lesion",) if f"{g}_lesion" in first else ()):
+        for k in _ROW_KEYS:
             if k == "view" and f"{g}_view" in d:
                 continue
             d[f"{g}_{k}"] = torch.cat([c[f"{g}_{k}"].to(device, non_blocking=True) for c in chunks], dim=1)
@@ -149,24 +142,14 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
     pr = (cfg["loss"].get("predict") or {})
     if float(pr.get("weight", 0.0)) > 0:
         _mask_group(d, chunks, device, buckets, group="global", ctx_key="ctx_keep", tgt_key="tgt_mask",
-                    plan="ctx", blocks=int(pr.get("blocks", 3)), block_tokens=pr.get("block_tokens", (3, 6)),
-                    ratio=pr.get("mask_ratio", 0.0), lesion_visible=(pr.get("lesion") or {}).get("visible"))
-        if float(pr.get("fine_weight", 0.0)) > 0 and "fine" in d["groups"]:
-            _mask_group(d, chunks, device, buckets, group="fine", ctx_key="fine_ctx_keep",
-                        tgt_key="fine_tgt_mask", plan="fine_ctx",
-                        blocks=int(pr.get("fine_blocks", 2)),
-                        block_tokens=pr.get("fine_block_tokens", (2, 3)))
+                    plan="ctx", blocks=int(pr.get("blocks", 3)), block_tokens=pr.get("block_tokens", (3, 6)))
     return d
 
 
 def _mask_group(d: dict, chunks: list[dict], device: torch.device, buckets: int, *,
-                group: str, ctx_key: str, tgt_key: str, plan: str, blocks: int, block_tokens,
-                ratio=0.0, lesion_visible=None) -> None:
-    """Hide blocks of every crop in ``group`` (and, with ``ratio`` > 0, that share of the remaining foreground tokens
-    at random: MAE). ``ratio`` may be a ``[lo, hi]`` range, drawn per crop. With ``lesion_visible`` ``[lo, hi]``, a
-    share drawn in that range of each crop's lesion tokens (``<group>_lesion``) is forced visible, so a lesion is
-    rarely hidden whole and the model has to extend the part it sees. ``ctx_key`` is what the encoder sees,
-    ``tgt_key`` what is predicted."""
+                group: str, ctx_key: str, tgt_key: str, plan: str, blocks: int, block_tokens) -> None:
+    """Hide ``blocks`` random cuboids of every crop in ``group``. ``ctx_key`` is what the encoder sees, ``tgt_key``
+    what is predicted."""
     fg = torch.cat([c[f"{group}_fg"] for c in chunks], dim=1)  # (V, B, N) on the CPU
     v, b, n = fg.shape
     px, py, pz = (int(t) for t in chunks[0]["patch"][group])
@@ -176,25 +159,6 @@ def _mask_group(d: dict, chunks: list[dict], device: torch.device, buckets: int,
     hidden = block_mask(v * b, zyx, int(blocks), int(lo), int(hi)) if int(blocks) > 0 \
         else torch.zeros(v * b, n, dtype=torch.bool)
     flat = fg.reshape(v * b, n)
-    rows = v * b
-    if isinstance(ratio, (list, tuple)):
-        lo_r, hi_r = (float(x) for x in ratio)
-        r = lo_r + (hi_r - lo_r) * torch.rand(rows)
-    else:
-        r = torch.full((rows,), float(ratio))
-    if bool((r > 0).any()):                        # top the block mask up to ``ratio`` of the foreground
-        need = (flat.sum(1).float() * r).floor().long() - (flat & hidden).sum(1)
-        extra = random_mask(flat & ~hidden, 1.0)
-        rank = torch.where(extra, torch.rand(flat.shape), torch.full(flat.shape, 2.0)).argsort(1).argsort(1)
-        hidden |= extra & (rank < need.clamp_min(0)[:, None])
-    if lesion_visible and f"{group}_lesion" in chunks[0]:
-        les = torch.cat([c[f"{group}_lesion"] for c in chunks], dim=1).reshape(rows, n) & flat
-        lo_v, hi_v = (float(x) for x in lesion_visible)
-        share = lo_v + (hi_v - lo_v) * torch.rand(rows)
-        score = torch.where(les, torch.rand(rows, n), torch.full((rows, n), 2.0))
-        rank = score.argsort(1).argsort(1)
-        show = les & (rank < (les.sum(1).float() * share).ceil().long()[:, None])
-        hidden &= ~show
     ctx, tgt = flat & ~hidden, flat & hidden
     d[ctx_key], d[tgt_key] = (t.view(v, b, n).to(device, non_blocking=True) for t in (ctx, tgt))
     d["plans"][plan] = length_plan(ctx.sum(-1), buckets)

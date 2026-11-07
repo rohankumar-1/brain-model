@@ -53,7 +53,6 @@ class Task:
     classes: list[str] = field(default_factory=list)
     role: str = "train"
     analog: str | None = None
-    survival_bins: list[float] = field(default_factory=list)
     group: str = ""
     needs_skull: bool = False        # the target is about the skull / head outline: never asked of a skull-stripped scan
     token: str | None = None         # tasks naming the same token share one task token (each reads it its own way)
@@ -132,7 +131,6 @@ def load_registry(path: str | Path | None = None) -> Registry:
                     sources=list(t.get("sources") or []), classes=[str(c) for c in t.get("classes") or []],
                     token=t.get("token"), ssl=bool(t.get("ssl", False)),
                     role=str(t.get("role", "train")), analog=t.get("analog"),
-                    survival_bins=[float(b) for b in t.get("survival_bins") or []],
                     needs_skull=bool(t.get("needs_skull", False)), fine=bool(t.get("fine", False)),
                     sparse=bool(t.get("sparse", False)))
         task.group = str(t.get("group") or default_group(task.id, task.role))

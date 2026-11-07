@@ -4,11 +4,9 @@ Every slot with a label gets the loss of its task's type: binary cross-entropy, 
 cross-entropy over the task's classes, BCE + soft Dice for a segmentation slot (soft targets at the decoder's stride),
 voxel-weighted Huber for a dense slot (``dense_loss``; targets and weights from ``data.prepare``).
 Slots are averaged per task first (a task asked in many slots of the batch is still one task), each task's loss is
-then scaled by the balancing mode, averaged over the tasks of its group, and the groups present are averaged (with
-the group weights), so a group of many tasks (SynthSeg) weighs as one group:
-  uniform      the task loss as is
-  ema          each task's loss divided by a running mean of itself (every task contributes ~1, whatever its scale)
-  uncertainty  Kendall et al.: exp(-s_t) L_t + s_t with a learned log-variance s_t per task
+then weighted by uncertainty (Kendall et al.: exp(-s_t) L_t + s_t with a learned log-variance s_t per task), averaged
+over the tasks of its group, and the groups present are averaged (with the group weights), so a group of many tasks
+(SynthSeg) weighs as one group.
 """
 
 from __future__ import annotations
@@ -26,17 +24,34 @@ def seg_target(seg: torch.Tensor, stride: int = 2) -> torch.Tensor:
     return F.avg_pool3d(seg, stride) if stride > 1 else seg
 
 
+DIMS = (1, 2, 3, 4)
+
+
+def _with_validity(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """float logits, the target channel and its voxel weights: a 2-channel target is (target, validity)."""
+    logits, target = logits.float(), target.float()
+    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
+    return logits, target[:, :1], w
+
+
+def _bce_dice(logits: torch.Tensor, target: torch.Tensor, w: torch.Tensor | None = None,
+              pos_weight: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """(P,) voxel BCE (mean over the voxels weighted by ``w``; all voxels without it) and soft Dice (+1 smoothing) of
+    the (``w``-masked) prediction: the core every segmentation loss shares."""
+    pw = None if pos_weight is None else torch.tensor(float(pos_weight), device=logits.device)
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw)
+    if w is None:
+        bce, p = bce.mean(DIMS), logits.sigmoid()
+    else:
+        bce, p = (bce * w).sum(DIMS) / w.sum(DIMS).clamp_min(1.0), logits.sigmoid() * w
+    dice = 1 - (2 * (p * target).sum(DIMS) + 1) / (p.sum(DIMS) + target.sum(DIMS) + 1)
+    return bce, dice
+
+
 def seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """(P,) BCE + soft Dice per slot. An empty target scores Dice on the background-free prediction (+1 smoothing).
     A 2-channel target is (target, validity): voxels with validity 0 are left out of both terms."""
-    logits, target = logits.float(), target.float()
-    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
-    target = target[:, :1]
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-    bce = (bce * w).sum(dim=(1, 2, 3, 4)) / w.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
-    p = logits.sigmoid() * w
-    inter = (p * target).sum(dim=(1, 2, 3, 4))
-    dice = 1 - (2 * inter + 1) / (p.sum(dim=(1, 2, 3, 4)) + target.sum(dim=(1, 2, 3, 4)) + 1)
+    bce, dice = _bce_dice(*_with_validity(logits, target))
     return bce + dice
 
 
@@ -45,18 +60,12 @@ def negative_seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tenso
     all-zero mask, labels v11). Soft Dice on scans with a lesion only: on an empty one it only rewards predicting
     nothing, the collapse ``sparse_seg_loss`` was built against. BCE on every (valid) voxel, and a scan BCE on the
     map's peak logit against "this scan has a lesion", so a stray blob on a healthy scan costs more than its voxels."""
-    logits, target = logits.float(), target.float()
-    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
-    target = target[:, :1]
-    dims = (1, 2, 3, 4)
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-    bce = (bce * w).sum(dims) / w.sum(dims).clamp_min(1.0)
-    p = logits.sigmoid() * w
-    has = target.amax(dims) > 0
-    dice = (1 - (2 * (p * target).sum(dims) + 1) / (p.sum(dims) + target.sum(dims) + 1)) * has.float()
-    peak = logits.masked_fill(w < 0.5, -1e4).amax(dims)
+    logits, target, w = _with_validity(logits, target)
+    bce, dice = _bce_dice(logits, target, w)
+    has = target.amax(DIMS) > 0
+    peak = logits.masked_fill(w < 0.5, -1e4).amax(DIMS)
     scan = F.binary_cross_entropy_with_logits(peak, has.float(), reduction="none")
-    return bce + dice + scan
+    return bce + dice * has.float() + scan
 
 
 def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[int, int, int],
@@ -68,20 +77,17 @@ def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[
     * voxel BCE with ``pos_weight`` on target voxels;
     * soft Dice on scans that have a target only (on an empty one it rewards predicting nothing);
     * cell BCE: logits and target max-pooled to the encoder's token grid (``cell_zyx`` output voxels per token), i.e.
-      "is it in this 16 mm cell", the coarse finder signal a find -> refine pass would pick cells from;
+      "is it in this 16 mm cell", a coarse finder signal;
     * scan BCE: the map's peak logit against "this scan has a target", so the peak works as a detector."""
     logits, target = logits.float(), target[:, :1].float()
-    dims = (1, 2, 3, 4)
+    bce, dice = _bce_dice(logits, target, pos_weight=pos_weight)
+    has = target.amax(DIMS) > 0.5
     pw = torch.tensor(float(pos_weight), device=logits.device)
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw).mean(dims)
-    p = logits.sigmoid()
-    has = target.amax(dims) > 0.5
-    dice = (1 - (2 * (p * target).sum(dims) + 1) / (p.sum(dims) + target.sum(dims) + 1)) * has.float()
     lc = F.max_pool3d(logits, cell_zyx, ceil_mode=True)
     tc = F.max_pool3d(target, cell_zyx, ceil_mode=True)
-    cell = F.binary_cross_entropy_with_logits(lc, (tc > 0.5).float(), reduction="none", pos_weight=pw).mean(dims)
-    scan = F.binary_cross_entropy_with_logits(logits.amax(dims), has.float(), reduction="none")
-    return bce + dice + cell + scan
+    cell = F.binary_cross_entropy_with_logits(lc, (tc > 0.5).float(), reduction="none", pos_weight=pw).mean(DIMS)
+    scan = F.binary_cross_entropy_with_logits(logits.amax(DIMS), has.float(), reduction="none")
+    return bce + dice * has.float() + cell + scan
 
 
 def dense_loss(pred: torch.Tensor, target: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -203,21 +209,20 @@ def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch
 
 
 class Balancer(nn.Module):
-    """Per-task loss weighting, then a group-first average. ``ema``: each task's loss over its running mean;
-    ``uncertainty``: ``exp(-s) L + s`` with a learned log-variance ``s`` per task, soft-clamped to +-``clamp``
-    (unclamped, near-solved tasks reach e^2.5 = 12x the weight of hard ones); ``uniform``.
+    """Uncertainty weighting per task, then a group-first average: ``exp(-s) L + s`` with a learned log-variance ``s``
+    per task, soft-clamped to +-``clamp`` (unclamped, near-solved tasks reach e^2.5 = 12x the weight of hard ones).
 
-    Under DDP the ``ema`` statistics are all-reduced in ``forward`` and ``sync_grads`` averages the log-variance
-    gradients (call it after ``backward``): the balancer lives outside the DDP module, so without these every rank
-    learned its own task weights from its own few volumes. ``data_term`` (after ``forward``) is the balanced loss
-    without the ``+ s`` regulariser: its magnitude, unlike the total's, does not cross zero."""
+    Under DDP ``sync_grads`` averages the log-variance gradients (call it after ``backward``): the balancer lives
+    outside the DDP module, so without it every rank learned its own task weights from its own few volumes.
+    ``data_term`` (after ``forward``) is the balanced loss without the ``+ s`` regulariser: its magnitude, unlike the
+    total's, does not cross zero."""
 
-    def __init__(self, n_tasks: int, mode: str = "ema", decay: float = 0.99, group_of: list[int] | None = None,
-                 group_weight: list[float] | None = None, clamp: float | None = None):
+    def __init__(self, n_tasks: int, group_of: list[int] | None = None, group_weight: list[float] | None = None,
+                 clamp: float | None = None):
         super().__init__()
-        self.mode, self.decay = str(mode), float(decay)
         self.clamp = float(clamp) if clamp else None
         self.data_term: torch.Tensor | None = None
+        # the retired ``ema`` mode's running means: unused, kept so saved balancer states (R14 -> R14-F) load strictly
         self.register_buffer("ema", torch.zeros(n_tasks))
         g = torch.as_tensor(group_of if group_of is not None else range(n_tasks), dtype=torch.long)
         self.register_buffer("group_of", g, persistent=False)
@@ -225,9 +230,7 @@ class Balancer(nn.Module):
         self.register_buffer("group_weight", torch.as_tensor(group_weight if group_weight is not None
                                                              else [1.0] * n_g, dtype=torch.float32),
                              persistent=False)
-        self.log_var = nn.Parameter(torch.zeros(n_tasks)) if self.mode == "uncertainty" else None
-        if self.mode not in ("uniform", "ema", "uncertainty"):
-            raise ValueError(f"loss.balance {mode}")
+        self.log_var = nn.Parameter(torch.zeros(n_tasks))
 
     def forward(self, loss: torch.Tensor, has: torch.Tensor, task: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Balanced scalar loss and the per-task mean losses (n_tasks,), NaN-free (0 where absent)."""
@@ -237,34 +240,17 @@ class Balancer(nn.Module):
         cnt = torch.zeros(n, device=loss.device).index_add(0, t, torch.ones_like(loss[has]))
         present = cnt > 0
         per_task = sums / cnt.clamp_min(1)
-        if self.mode == "ema":                                  # before any early return: every rank must all-reduce
-            with torch.no_grad():
-                g_sums, g_cnt = sums.detach(), cnt
-                if _distributed():                              # every rank updates the same running means
-                    st = torch.stack([g_sums, g_cnt])
-                    dist.all_reduce(st)
-                    g_sums, g_cnt = st[0], st[1]
-                g_present = g_cnt > 0
-                cur = g_sums / g_cnt.clamp_min(1)
-                fresh = g_present & (self.ema == 0)
-                self.ema[fresh] = cur[fresh]
-                upd = g_present & ~fresh
-                self.ema[upd] = self.decay * self.ema[upd] + (1 - self.decay) * cur[upd]
         if not present.any():
             self.data_term = loss.sum().detach() * 0.0
             return loss.sum() * 0.0, per_task.detach()
-        data = None
-        if self.mode == "uniform":
-            scaled = per_task
-        elif self.mode == "ema":
-            scaled = per_task / self.ema.clamp_min(1e-3)
-        else:
-            s = self.log_var if self.clamp is None else self.clamp * torch.tanh(self.log_var / self.clamp)
-            data = torch.exp(-s) * per_task
-            scaled = data + s
-        total = self._group_mean(scaled, present)
-        self.data_term = total.detach() if data is None else self._group_mean(data, present).detach()
+        s = self._log_var()
+        data = torch.exp(-s) * per_task
+        total = self._group_mean(data + s, present)
+        self.data_term = self._group_mean(data, present).detach()
         return total, per_task.detach()
+
+    def _log_var(self) -> torch.Tensor:
+        return self.log_var if self.clamp is None else self.clamp * torch.tanh(self.log_var / self.clamp)
 
     def _group_mean(self, scaled: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
         """Mean over the present tasks of each group, then the weighted mean over present groups."""
@@ -276,16 +262,13 @@ class Balancer(nn.Module):
         w = self.group_weight[g_on]
         return (w * g_sum[g_on] / g_cnt[g_on]).sum() / w.sum()
 
-    def weights(self) -> torch.Tensor | None:
-        """The current per-task loss weights exp(-s) (uncertainty mode), for logging."""
-        if self.log_var is None:
-            return None
-        s = self.log_var if self.clamp is None else self.clamp * torch.tanh(self.log_var / self.clamp)
-        return torch.exp(-s.detach())
+    def weights(self) -> torch.Tensor:
+        """The current per-task loss weights exp(-s), for logging."""
+        return torch.exp(-self._log_var().detach())
 
     def sync_grads(self) -> None:
         """Average the log-variance gradients over DDP ranks (after ``backward``, before the optimizer step)."""
-        if self.log_var is not None and _distributed():          # every rank joins, with zeros if it had no task
+        if _distributed():                                       # every rank joins, with zeros if it had no task
             if self.log_var.grad is None:
                 self.log_var.grad = torch.zeros_like(self.log_var)
             dist.all_reduce(self.log_var.grad, op=dist.ReduceOp.AVG)

@@ -1,13 +1,12 @@
 """Task-conditioned multitask post-training of an SSL encoder (brain.multitask) on whole volumes.
 
-    python -m brain.train multitask --config configs/multitask/tokens.yaml
+    python -m brain.train multitask --config configs/multitask/r14.yaml
     python -m brain.train multitask --synthetic --max-steps 4          # CPU smoke run on phantoms
 
 The encoder starts from ``model.init_from`` (its architecture and token grid are copied into this run's config, so
 frozen evaluation loads these checkpoints like any 3D encoder: ``model`` is the encoder) and trains at ``enc_lr_mult``
 x the LR with layer-wise decay. The tasks enter as task tokens inside the encoder (``model.task_tokens``, the default);
-checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``tasks`` (registry order). Runs with the
-older slot readout (``task_tokens.enabled: false``) may freeze the encoder for ``optim.freeze_steps`` first.
+checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``tasks`` (registry order).
 """
 
 from __future__ import annotations
@@ -25,20 +24,20 @@ from brain.multitask.registry import load_registry
 from brain.train import engine
 
 # log column per task group: the raw (unbalanced) mean loss of the group's tasks, averaged over the steps of the
-# logging window in which the group was asked (the balanced ``loss`` sits near 1 by construction under ``ema``)
+# logging window in which the group was asked (the balanced ``loss`` is weighted by the learned uncertainties)
 GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich", "tumor": "tumor",
                  "derived": "derived", "anatomy_seg": "aseg", "anatomy_volume": "avol", "lesion": "lesion",
                  "ssl_recon": "recon", "synthesis": "synth"}
 # heads a resumed run may add (absent from its checkpoint): HL-Gauss bins, the token map
 NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.")
 TYPE_COLUMNS = {"binary": "t_bin", "regression": "t_reg", "multiclass": "t_cls", "segmentation": "t_seg",
-                "survival": "t_surv", "dense": "t_dense"}
+                "dense": "t_dense"}
 
 
 def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     """The SSL encoder, trainable. Copies its model / views config into ``cfg`` (what frozen evaluation reads)."""
     from brain.downstream.embed3d import load_brain3d
-    from brain.models.vit3d import BrainEncoder
+    from brain.train.lejepa3d import build_encoder
 
     m = cfg["model"]
     if m.get("arch") == "resnet3d":          # from-scratch convolutional baseline (brain.models.resnet3d)
@@ -53,11 +52,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         # the config records how the encoder was built (frozen evaluation rebuilds it from these, with other defaults)
         m.update(size=m.get("size") or "test", qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
                  conv_stem=list(m.get("conv_stem") or []))
-        enc = BrainEncoder(size=m["size"], patch_xyz=tuple(cfg["views"]["patch_xyz"]),
-                           in_chans=int(m.get("in_chans", 1)),
-                           qk_norm=True, n_cls=m["n_cls"], proj_dim=16, proj_hidden=32,
-                           rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
-                           n_meta=n_meta(m), conv_stem=m["conv_stem"] or None)
+        enc = build_encoder(cfg, torch.device("cpu"))       # no loss.dense / predict: no token head, no predictor
     else:
         src = torch.load(resolve(m["init_from"]), map_location="cpu", weights_only=False)
         enc = load_brain3d(src, torch.device("cpu")).model
@@ -86,7 +81,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
 
 def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
     """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``, the final
-    norm and heads at ``enc_mult``), the rest at 1 (also MoE routers, new in the encoder). Biases, norms, learned tokens
+    norm and heads at ``enc_mult``), the rest at 1. Biases, norms, learned tokens
     and the task tables get no weight decay."""
     depth = model.backbone.depth
     buckets: dict[tuple[float, float], list] = {}
@@ -96,9 +91,7 @@ def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, lay
             continue
         scale = 1.0
         if name.startswith("backbone."):
-            if ".mlp.router." in name:
-                pass                                                # new MoE router: no pretrained weights to keep
-            elif name.startswith("backbone.blocks."):
+            if name.startswith("backbone.blocks."):
                 scale = enc_mult * layer_decay ** (depth - 1 - int(name.split(".")[2]))
             elif name.startswith(tuple("backbone." + m for m in POST_BLOCKS)):
                 scale = enc_mult                                    # final norm / heads: the deepest block's LR
@@ -130,7 +123,6 @@ def remap_tasks(state: dict, old_ids: list[str], new_ids: list[str], template: d
 
 class Trainer(engine.Trainer):
     unit = "vol"
-    synthetic_ok = True
 
     def __init__(self, rt, cfg, args, ckpt, step):
         super().__init__(rt, cfg, args, ckpt, step)
@@ -138,7 +130,6 @@ class Trainer(engine.Trainer):
         o, d, tk = cfg["optim"], cfg["data"], cfg["tasks"]
         self.batch = int(o["batch_size"])
         self.batch_units = self.batch * rt.world
-        self.freeze_steps = int(o.get("freeze_steps", 0))
         self.clip = float(o.get("clip_grad", 1.0))
         self.stride = int(cfg["loss"].get("seg_stride", 2))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
@@ -150,15 +141,10 @@ class Trainer(engine.Trainer):
         enc = self.build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
         self.raw = BrainQuery(enc, self.reg, cfg["model"]).to(dev)
-        if self.raw.tokens and self.freeze_steps:
-            # task tokens live inside the encoder: a no-grad encoder (freeze) would leave them untrained
-            raise SystemExit("model.task_tokens needs optim.freeze_steps=0")
-        self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids], dev)
+        self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids])
         groups = self.reg.groups
         gw = tk.get("group_weights") or {}
-        self.balancer = Balancer(len(self.reg), cfg["loss"].get("balance", "ema"),
-                                 float(cfg["loss"].get("ema_decay", 0.99)),
-                                 group_of=[groups.index(t.group) for t in self.reg.tasks],
+        self.balancer = Balancer(len(self.reg), group_of=[groups.index(t.group) for t in self.reg.tasks],
                                  group_weight=[float(gw.get(g, 1.0)) for g in groups],
                                  clamp=cfg["loss"].get("uncertainty_clamp")).to(dev)
         self.module = self.raw
@@ -245,7 +231,7 @@ class Trainer(engine.Trainer):
         n_all = sum(p.numel() for p in self.raw.parameters())
         self._banner = (f"enc={enc.size} patch={self.patch} enc_params={n_enc:,} head_params={n_all - n_enc:,} "
                         f"tasks={len(self.train_ids)}/{len(self.reg)} batch={self.batch}x{rt.world} "
-                        f"freeze={self.freeze_steps} " + getattr(self, "_banner_extra", ""))
+                        + getattr(self, "_banner_extra", ""))
 
     def build_encoder(self, cfg: dict, device: torch.device, synthetic: bool):
         """The encoder (overridden by brain.train.joint, whose encoder also carries the SSL projector)."""
@@ -278,7 +264,6 @@ class Trainer(engine.Trainer):
         with torch.autocast(**self.amp):
             out = self.net(*args, **kw)
         total, per_task, has = self.task_loss(out, b, pairs)
-        total = total + self.tokens.moe_loss()
         self.apply(total, step)
         self.log_tasks(per_task, has, b)
         return {"loss": total.detach(), "k": (b["task"] >= 0).float().sum(1).mean()}
@@ -292,7 +277,7 @@ class Trainer(engine.Trainer):
         """(positional args, keyword args) of BrainQuery's forward, and the token-map pairs ``task_loss`` needs."""
         seg_tok, slab_pair = self._token_pairs(b)
         tok_pair = torch.cat([seg_tok, slab_pair]) if len(seg_tok) or len(slab_pair) else None
-        kw = dict(encoder_grad=step >= self.freeze_steps, meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
+        kw = dict(meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
                   study=b.get("study"))
         return (b["x"], b["keep"], b["task"], b["seg_pair"]), kw, (seg_tok, slab_pair)
 
@@ -385,7 +370,7 @@ class Trainer(engine.Trainer):
             self.aux_sum.zero_()
             self.aux_cnt.zero_()
             out.update({c: (f"{mean[i]:.4f}" if n[i] else "-") for i, c in enumerate(("tokmap", "slabmil"))})
-        return {**out, **self.tokens.log_extras()}
+        return out
 
     @torch.no_grad()
     def evaluate(self) -> dict[str, float]:

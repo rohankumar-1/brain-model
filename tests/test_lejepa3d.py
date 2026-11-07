@@ -1,14 +1,17 @@
-"""Unit tests for the 3D LeJEPA encoder. Run: python -m tests.test_brainmodel"""
+"""Unit tests for 3D LeJEPA: crops, windows, the encoder's bucketed runs, the dense and predictive terms, SIGReg."""
 
 from __future__ import annotations
 
 import torch
 
+from brain.common.optim import param_groups
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.data.volumes import make_synthetic_volume
-from brain.objectives.sigreg import SIGReg
 from brain.models.rope3d import RoPE3D
 from brain.models.vit3d import BrainEncoder
+from brain.objectives.dense import consensus
+from brain.objectives.sigreg import SIGReg, gather_batch, scale_grad
+from brain.train.defaults import default_config, smoke_config
 
 
 def test_crop_bbox_token_centers_roundtrip_anisotropic():
@@ -50,18 +53,12 @@ def test_rope_translation_preserves_relative_attention():
     assert torch.allclose(logits1, logits2, atol=1e-4, rtol=1e-4)
 
 
-def test_asinh_window_is_finite_and_independent_per_view():
+def test_asinh_window_is_finite():
     from brain.data.augment import window_view
 
     x = torch.linspace(-1024, 400, 8 * 8 * 4).reshape(1, 1, 8, 8, 4).expand(2, -1, -1, -1, -1).contiguous()
-    mod = torch.zeros(2, dtype=torch.long)
-    aug = {"window": {"mode": "random", "mix": "brain"}}
-    torch.manual_seed(0)
-    a = window_view(x, mod, aug)
-    torch.manual_seed(1)
-    b = window_view(x, mod, aug)
-    assert torch.isfinite(a).all() and torch.isfinite(b).all()
-    assert not torch.allclose(a, b, atol=1e-5)
+    a = window_view(x, torch.zeros(2, dtype=torch.long))
+    assert torch.isfinite(a).all()
     from brain.common.windowing import asinh_window
 
     floor = torch.full((1, 1, 8, 8, 4), -1024.0)
@@ -127,7 +124,7 @@ def test_crops_cut_the_voxels_their_positions_name():
     assert raw["groups"] == ["global", "local", "fine", "win"]
 
 
-def test_nested_crops_share_tokens_and_fine_tokens_point_at_their_position():
+def test_nested_crops_share_tokens_and_fine_tokens_average_into_their_position():
     cfg = _cfg()
     for seed in range(5):
         _, raw = _raw(cfg, seed=seed)
@@ -143,12 +140,6 @@ def test_nested_crops_share_tokens_and_fine_tokens_point_at_their_position():
         assert int(par.max()) == raw["n_par"]["fine"] - 1
         # eight fine tokens per coarse position when the ratio is 2 x 2 x 2
         assert torch.bincount(par[0, 0].long()).unique().tolist() == [8]
-        # native fine-grid index: one slot per token, eight distinct children under each parent
-        assert raw["n_pos_fine"] == 8 * 8 * 8
-        assert raw["fine_tok_pos"].shape[-1] == raw["fine_parent"].shape[-1]
-        assert torch.equal(raw["global_tok_pos"], raw["global_pos"])
-        children = raw["fine_tok_pos"][0, 0][raw["fine_parent"][0, 0] == 0]
-        assert children.unique().numel() == 8
     _, free = _raw(_cfg(nested=False), seed=1)
     assert free["global_view"].shape == raw["global_view"].shape
 
@@ -171,11 +162,6 @@ def test_consensus_is_zero_for_agreeing_views_and_ignores_unshared_positions():
     assert float(cov) < 1.0
     none, cov = consensus([emb, other], [ok, ok], [pos, pos + 5], 16)
     assert float(none) == 0.0 and float(cov) == 0.0
-    live = torch.randn(2, 5, 4, requires_grad=True)
-    tgt = live.detach() + 1.0
-    stopped, _ = consensus([live, tgt], [ok, ok], [pos, pos], 8, stopgrad_mean=True)
-    stopped.backward()
-    assert float(live.grad.abs().sum()) > 0
     # fine tokens average into their coarse position, and a dropped token does not count
     tok = torch.arange(8.0).view(1, 8, 1).expand(1, 8, 2).clone()
     keep = torch.ones(1, 8, dtype=torch.bool)
@@ -216,7 +202,7 @@ def test_dense_step_trains_encoder_and_token_head():
     views = lejepa_batch(_batch(), cfg, torch.device("cpu"), gen=torch.Generator().manual_seed(0))
     assert views["global_view"].shape[:2] == (2, 2) and views["win_view"].shape[:2] == (2, 2)
     assert not torch.equal(views["win_view"][0], views["win_view"][1])
-    out = ViewNet(enc, local_pooled=False, dense=True)(views)
+    out = ViewNet(enc, dense=True)(views)
     assert out["proj"].shape[:2] == (2, 2) and out["win"].shape[:2] == (2, 2)
     assert len(out["dense"]["emb"]) == 2 + 2 + 2 + 2
     meta = batch_meta(views)
@@ -238,8 +224,8 @@ def test_pooled_only_recipe_matches_the_2d_objective():
     from brain.models.viewnet3d import ViewNet, batch_meta
 
     views = lejepa_batch(_batch(), _cfg(), torch.device("cpu"), gen=torch.Generator().manual_seed(0))
-    out = ViewNet(_enc(dense=False), local_pooled=True, dense=False)(views)
-    assert out["dense"] is None and out["proj"].shape[:2] == (4, 2)  # 2 global + 2 local
+    out = ViewNet(_enc(dense=False), dense=False)(views)
+    assert out["dense"] is None and out["proj"].shape[:2] == (2, 2)  # the 2 global crops
     parts = lejepa_loss(out, batch_meta(views), SIGReg(n_proj=16, knots=9), lamb=0.02, win_weight=1.0, gather_ddp=False)
     assert set(parts) == {"loss", "inv", "win", "sigreg"}
     assert torch.allclose(parts["loss"], 0.98 * parts["inv"] + 0.02 * parts["sigreg"] + parts["win"], atol=1e-5)
@@ -341,40 +327,6 @@ def test_masked_prediction_partitions_the_crop_and_leaves_its_target_alone():
     assert float(enc.predictor.latent.weight.grad.abs().sum()) > 0 and float(enc.predictor.pixel.weight.grad.abs().sum()) > 0
     assert float(enc.patch_embed.proj.weight.grad.abs().sum()) > 0  # the encoder learns through the visible tokens
     assert enc.token_head.net[0].weight.grad is None  # the target is a constant for this term
-
-
-def test_multiscale_uses_native_fine_tokens_and_a_second_predict():
-    from brain.data.batch3d import lejepa_batch
-    from brain.objectives.lejepa3d import lejepa_loss
-    from brain.models.viewnet3d import ViewNet, batch_meta
-
-    cfg, enc = _predict_cfg(), _predict_enc()
-    cfg["loss"]["dense"]["fine_weight"] = 1.0
-    cfg["loss"]["predict"]["fine_weight"] = 1.0
-    cfg["loss"]["predict"]["fine_blocks"] = 1
-    cfg["loss"]["predict"]["fine_block_tokens"] = [1, 1]
-    torch.manual_seed(0)
-    views = lejepa_batch(_batch(), cfg, torch.device("cpu"), gen=torch.Generator().manual_seed(0))
-    ctx, tgt, fg = views["fine_ctx_keep"], views["fine_tgt_mask"], views["fine_fg"]
-    assert not bool((ctx & tgt).any()) and torch.equal(ctx | tgt, fg) and bool(tgt.any())
-    out = ViewNet(enc, dense=True, predict=True, predict_fine=True)(views)
-    assert out["dense_fine"] is not None and out["predict_fine"] is not None
-    assert out["dense_fine"]["emb"][0].shape[1] == views["fine_tok_pos"].shape[-1]
-    pf = out["predict_fine"]
-    assert pf["latent"].shape == pf["target"].shape and not pf["target"].requires_grad
-    parts = lejepa_loss(
-        out, batch_meta(views), SIGReg(n_proj=16, knots=9), lamb=0.02, win_weight=1.0, dense_weight=1.0,
-        tokens_per_view=3, predict_weight=1.0, pixel_weight=0.5, gather_ddp=False,
-        fine_weight=1.0, fine_predict_weight=1.0)
-    assert {"fine_inv", "fine_overlap", "fine_pred", "fine_pix"} <= set(parts)
-    expect = (0.98 * parts["inv"] + 0.02 * parts["sigreg"] + parts["win"] + 0.98 * parts["dense_inv"]
-              + 0.02 * parts["dense_sig"] + 0.98 * parts["fine_inv"] + parts["pred"] + 0.5 * parts["pix"]
-              + parts["fine_pred"] + 0.5 * parts["fine_pix"])
-    assert torch.allclose(parts["loss"], expect, rtol=1e-4, atol=1e-4)
-    enc.zero_grad()
-    (parts["fine_inv"] + parts["fine_pred"] + parts["fine_pix"]).backward()
-    assert float(enc.predictor.latent.weight.grad.abs().sum()) > 0
-    assert float(enc.token_head.net[0].weight.grad.abs().sum()) > 0
 
 
 def test_masked_prediction_is_independent_of_length_buckets():
@@ -520,3 +472,28 @@ def test_cls_model_trains_end_to_end_on_the_synthetic_recipe():
     vol = torch.randn(32, 32, 16) + 1.0
     seqs, _, _ = enc.embed_windows(vol, [(0.0, 1.0), (0.5, 2.0)], modality="mri")
     assert enc.last_cls is not None and enc.last_cls.shape == (2, enc.dim) and seqs.shape[0] == 2
+
+
+def test_scale_grad_keeps_the_value_and_scales_the_gradient():
+    z = torch.randn(3, requires_grad=True)
+    y = scale_grad(z, 4.0)
+    assert torch.equal(y, z)
+    y.sum().backward()
+    assert torch.allclose(z.grad, torch.full((3,), 4.0))
+    z2 = torch.randn(2, 3, 4, requires_grad=True)          # single process: the gathered batch is the local one
+    gather_batch(z2, True).sum().backward()
+    assert torch.allclose(z2.grad, torch.ones_like(z2))
+
+
+def test_dense_consensus_counts_views_not_tokens():
+    d = 4
+    one = torch.randn(1, 2, d)                               # view A puts both its tokens on position 0
+    a_pos, a_ok = torch.tensor([[0, 0]]), torch.ones(1, 2, dtype=torch.bool)
+    b_emb, b_pos, b_ok = torch.randn(1, 1, d), torch.tensor([[1]]), torch.ones(1, 1, dtype=torch.bool)
+    loss, cov = consensus([one, b_emb], [a_ok, b_ok], [a_pos, b_pos], n_pos=2)
+    assert float(cov) == 0.0 and float(loss) == 0.0          # no position has two views
+    b_pos2 = torch.tensor([[0]])                             # now view B covers position 0 too: mean over views
+    loss2, _ = consensus([one, b_emb], [a_ok, b_ok], [a_pos, b_pos2], n_pos=2)
+    mean = (one[0].mean(0) + b_emb[0, 0]) / 2
+    want = ((one[0] - mean).square().sum() + (b_emb[0, 0] - mean).square().sum()) / (3 * d)
+    assert torch.allclose(loss2, want)

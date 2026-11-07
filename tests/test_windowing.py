@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from brain.common.windowing import WINDOW_MIXES, asinh_window, floors, foreground_mask, sample_windows
-from brain.objectives.sigreg import pairwise_cosine, prediction_loss
+from brain.common.windowing import asinh_window, canonical_windows, foreground_mask
+from brain.objectives.sigreg import prediction_loss
 
 
 def test_asinh_is_monotone_and_finite():
@@ -32,36 +32,17 @@ def test_floor_maps_to_a_constant():
     assert torch.allclose(y_mri, y_mri.reshape(4, -1)[:, :1].view(4, 1, 1, 1))
 
 
-def test_sample_windows_shapes_and_positive_w():
-    mod = torch.tensor([0, 0, 1, 1])
-    c, w = sample_windows(mod, "random")
+def test_canonical_windows_by_modality():
+    c, w = canonical_windows(torch.tensor([0, 0, 1, 1]))
     assert c.shape == (4, 1, 1, 1) and w.shape == (4, 1, 1, 1)
-    assert (w > 0).all()
-    cf, wf = sample_windows(mod, "fixed")
-    assert torch.equal(cf.view(-1)[:2], torch.tensor([40.0, 40.0]))
-    assert torch.equal(wf.view(-1)[2:], torch.tensor([1.5, 1.5]))
-
-
-def test_tissue_mix_is_brain_heavy():
-    ct = sum(WINDOW_MIXES["tissue"]["ct_p"])
-    v4 = sum(WINDOW_MIXES["v4"]["ct_p"])
-    assert abs(ct - 1.0) < 1e-9 and abs(v4 - 1.0) < 1e-9
-    assert WINDOW_MIXES["tissue"]["ct_p"][0] > WINDOW_MIXES["v4"]["ct_p"][0]
-    assert WINDOW_MIXES["tissue"]["ct_p"][4] < WINDOW_MIXES["v4"]["ct_p"][4]
-    assert WINDOW_MIXES["tissue"]["mri_tissue_p"] > WINDOW_MIXES["v4"]["mri_tissue_p"]
-    assert WINDOW_MIXES["tissue"]["mri_tissue_w_log"][0] > WINDOW_MIXES["v4"]["mri_tissue_w_log"][0]
-    torch.manual_seed(0)
-    c, w = sample_windows(torch.zeros(8, dtype=torch.long), "random", mix="tissue")
-    assert (w > 0).all() and c.shape == (8, 1, 1, 1)
-
-
+    assert torch.equal(c.view(-1), torch.tensor([40.0, 40.0, 0.5, 0.5]))
+    assert torch.equal(w.view(-1), torch.tensor([40.0, 40.0, 1.5, 1.5]))
 
 
 def test_window_pair_loss_is_zero_when_views_match():
     z = torch.randn(2, 8, 16)
     z[1] = z[0]
     assert prediction_loss(z).item() < 1e-6
-    assert pairwise_cosine(z).item() > 0.999
 
 
 
