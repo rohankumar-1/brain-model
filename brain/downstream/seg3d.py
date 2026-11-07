@@ -335,7 +335,7 @@ def score_volumes(dec: nn.Module, cache: Cache, vols: np.ndarray, regions: dict,
                     if not tag:
                         row[f"has_{name}"] = bool(g.any())
                     # an absent region scores 1 when nothing is predicted and 0 otherwise (before 2026-10-25: NaN,
-                    # which never penalised a decoder that paints absent regions; as metrics.region_dice does)
+                    # which never penalised a decoder that paints absent regions)
                     row[f"{tag}{name}"] = (float(2 * (g & p).sum() / (g.sum() + p.sum())) if g.any()
                                            else (0.0 if p.any() else 1.0))
             rows.append(row)
