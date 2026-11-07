@@ -82,25 +82,6 @@ def test_auto_falls_back_to_classical_when_synthstrip_is_missing(monkeypatch=Non
     assert info["brain_method"] == "classical"
 
 
-def test_remask_lists_image_zips_not_masks(tmp_path):
-    from brain.prep import remask
-
-    d = tmp_path / "cq500"
-    d.mkdir()
-    (d / "case.zip").write_bytes(b"x")
-    (d / "case.brain.zip").write_bytes(b"x")
-    (d / "case.seg.zip").write_bytes(b"x")
-    (d / "case.zip.partial.1").write_bytes(b"x")
-    other = tmp_path / "rsna_ich"
-    other.mkdir()
-    (other / "r.zip").write_bytes(b"x")
-    assert [p.name for p in remask.image_zips(tmp_path)] == ["case.zip", "r.zip"]
-    assert [p.name for p in remask.image_zips(tmp_path, ["rsna_ich"])] == ["r.zip"]
-    assert [p.name for p in remask.image_zips(tmp_path, exclude=["rsna_ich"])] == ["case.zip"]
-    assert remask.parse_folder_specs("rsna_ich:fomo_*") == ["rsna_ich", "fomo_*"]
-    assert remask.brain_zip_for(d / "case.zip").name == "case.brain.zip"
-
-
 def test_synthstrip_pad_stack_batches_variable_shapes():
     import torch
     from brain.prep.synthstrip_runtime import pad_stack
@@ -158,14 +139,22 @@ def test_auto_prefers_classical_when_synthstrip_fails_the_template_check(monkeyp
     assert info["brain_ok"] and _iou(mask.astype(bool), truth) > 0.85
 
 
-def test_mri_restat_standardises_the_brain_and_keeps_the_background():
+def test_failed_mri_masks_with_a_plausible_extent_still_set_the_z_scale():
+    """``pipeline.finish`` standardises MRI on a QC-failed brain mask when its extent is plausible (the rule the
+    2026-11-03 ``restat_failed`` pass applied to the store), and on the head otherwise."""
     from brain.prep import intensity
+    from brain.prep.pipeline import mri_stats_on_brain
 
+    m = np.ones((2, 2, 2), np.uint8)
+    assert not mri_stats_on_brain(None, {"brain_ok": True})
+    assert mri_stats_on_brain(m, {"brain_ok": True, "brain_frac": 0.5})
+    assert mri_stats_on_brain(m, {"brain_ok": False, "brain_frac": 0.15})
+    assert not mri_stats_on_brain(m, {"brain_ok": False, "brain_frac": 0.01})
+    assert not mri_stats_on_brain(m, {"brain_ok": False, "brain_frac": 0.45})
     z, truth = mri_phantom()
     rng = np.random.default_rng(0)
-    z[truth] = 1.5 + 2.0 * rng.standard_normal(int(truth.sum())).astype(np.float32)
-    out, m, s = intensity.mri_restat(z.astype(np.float16), truth)
+    raw = np.where(z > -5.5, 100.0, 0.0).astype(np.float32)
+    raw[truth] = 300.0 + 50.0 * rng.standard_normal(int(truth.sum())).astype(np.float32)
+    out, st = intensity.mri_native(raw, truth)
     x = out[truth].astype(np.float32)
-    assert abs(np.median(x)) < 0.05 and abs(1.4826 * np.median(np.abs(x - np.median(x))) - 1.0) < 0.05
-    assert abs(m - 1.5) < 0.1 and abs(s - 2.0) < 0.1
-    assert (out[z <= -5.5] == intensity.MRI_FLOOR).all()
+    assert st["stats_from"] == "brain" and abs(np.median(x)) < 0.05

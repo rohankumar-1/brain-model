@@ -269,6 +269,24 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
     return Partial(case, raw, masks, info, t, prior, float(cover), debug)
 
 
+# MRI z-scores come from the brain mask when it passed QC, or when it failed QC with a plausible extent: most failures
+# are the template-Dice check on partial-coverage slabs and infant brains, whose masks are fine, while whole-head
+# statistics (scalp and skull included) put the brain off the store's scale (RSNA-ICA MRA: brain median 0.54, spread
+# 0.36 instead of 0 / 1). The 2026-11-03 store was corrected after prep (the former ``restat_failed`` step, stored as
+# ``stats_from = brain_restat``); this rule makes a rebuild produce that scale directly.
+BRAIN_STATS_FRAC = (0.02, 0.30)
+
+
+def mri_stats_on_brain(brain: np.ndarray | None, binfo: dict) -> bool:
+    """Whether MRI robust-z statistics come from ``brain`` (else from the head foreground)."""
+    if brain is None:
+        return False
+    if binfo.get("brain_ok", True):
+        return True
+    frac = binfo.get("brain_frac")
+    return frac is not None and BRAIN_STATS_FRAC[0] <= float(frac) <= BRAIN_STATS_FRAC[1]
+
+
 def finish(p: Partial, opts: Options | None = None, synth: np.ndarray | None = None,
            brain_method: str | None = None) -> Result:
     """Brain mask -> native units -> QC. ``synth`` is a SynthStrip mask computed elsewhere (a GPU batch);
@@ -305,8 +323,7 @@ def finish(p: Partial, opts: Options | None = None, synth: np.ndarray | None = N
                                                      case.stripped, intensity.MRI_FLOOR, prior=prior,
                                                      fg=None if prior is None else prov > intensity.MRI_LO - 0.5,
                                                      synth=synth)
-            use = brain if brain is not None and binfo.get("brain_ok", True) else None
-            vol, stats = intensity.mri_native(raw, use)
+            vol, stats = intensity.mri_native(raw, brain if mri_stats_on_brain(brain, binfo) else None)
 
     info = p.info | stats | binfo | {"brain_cover": p.cover}
     if brain is not None and stats.get("fg_frac"):        # ~1 for skull-stripped input, 0.45-0.7 with a skull
