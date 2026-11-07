@@ -1,23 +1,19 @@
-"""Build v4 index tables and leakage-safe splits from the processed store.
+"""Build the index tables and leakage-safe splits from the processed store.
 
-    python -m brain.prep.index --root STORE --workers 12
-    python -m brain.prep.index --root STORE --keep-ssl-index   # add held-out zips without re-slicing SSL
+    python -m brain.prep.index --root STORE --manifests "manifest_v6_*.jsonl" [--inherit-splits OLD/volumes.csv]
 
-Writes ``volumes.csv``, ``subjects.csv``, ``slices.parquet`` (pretraining index),
-``empty_slice_removals.csv``. BHSD RSNA studies and held-out datasets are never
-rows of ``slices.parquet``. Subject-level ``dedup_key`` is the split atom:
-OASIS-2 sessions, IXI T1/T2, BraTS year/timepoint, and co-registered sequences
-of one person always share a split. AISD keeps its official 52-case test split.
+Writes ``volumes.csv``, ``subjects.csv`` and ``labels/bhsd_studies.csv``. Splits are inherited from an existing
+``volumes.csv`` (``--inherit-splits``, else the store's own); only subjects new to it get a fresh stratified split.
+BHSD RSNA studies and held-out datasets never enter pretraining (``pretrain``). Subject-level ``dedup_key`` is the split
+atom: OASIS-2 sessions, IXI T1/T2, BraTS year/timepoint, and co-registered sequences of one person always share a
+split. AISD keeps its official 52-case test split.
 """
 
 from __future__ import annotations
 
 import argparse
 import functools
-import hashlib
 import json
-import multiprocessing as mp
-import os
 import random
 import zipfile
 from collections import defaultdict
@@ -26,21 +22,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from brain.common.paths import DATASETS, SCRATCH
+from brain.common.paths import DATASETS, PROCESSED_ROOT
 from brain.data.volumes import META, meta_id
 from brain.prep import store
 from brain.prep.fomo import CONTRAST_SUFFIXES, load_holdout_families, strip_contrast
-DEFAULT_STORE = SCRATCH / "data" / "processed" / "slices_zarr"
 SSL_QC_DROP_DATASETS = ("rsna_ich",)  # read from DICOM series by brain.prep.dicom
 # Whole datasets kept out of every training pool (SSL and multitask), stay in the store: HBN proton-density scans,
 # many of them noise / artefact with no brain contrast (SynthSeg QC passed 61%, vs 99% for HBN T1w), 2026-10-21.
 # SynthRAD cone-beam CTs (2026-10-30): artefact-heavy, not calibrated HU (CT density targets would be wrong); the CT
 # and MR of those patients stay.
 POOL_DROP_DATASETS = ("fomo_hbn_pd", "synthrad_cbct")
-V3_VOLUMES = SCRATCH / "data" / "processed" / "v3_index_backup" / "volumes.csv"
 BHSD_ZIP = DATASETS / "bhsd" / "label_192.zip"
 SEED, TRAIN_FRAC, VAL_FRAC, TEST_FRAC = 42, 0.75, 0.10, 0.15
-EMPTY_MIN, SLICE_SIGMA = 0.05, 50.0
 SPLIT_RANK = {"test": 0, "val": 1, "train": 2}  # lower wins when merging inherited splits
 
 # Entire families stay out of the pretraining index (brain.downstream still gets train/val/test).
@@ -384,93 +377,11 @@ def stratified_subjects(keys: list[str], strata: dict[str, tuple], seed: int = S
     return out
 
 
-def inherit_v3(path: Path) -> dict[str, set[str]]:
-    """Map our subject key → splits seen in v3 (may be several: OASIS-2 leakage we will collapse)."""
-    if not path.exists():
-        return {}
-    df = pd.read_csv(path, usecols=["dataset", "volume_id", "split", "modality"])
-    found: dict[str, set[str]] = defaultdict(set)
-    for r in df.itertuples(index=False):
-        case = str(r.volume_id).split(":", 1)[-1]
-        found[dedup_key(str(r.dataset), case)].add(str(r.split))
-    return found
-
-
-def gaussian_p(idx: np.ndarray, mu: float, sigma: float) -> np.ndarray:
-    z = (idx - mu) / sigma
-    pdf = np.exp(-0.5 * z * z)
-    return np.clip(pdf / float(np.exp(0.0)), 0.0, 1.0)
-
-
-def tissue_frac(slc: np.ndarray, modality: str) -> float:
-    a = np.asarray(slc, dtype=np.float32).reshape(-1)
-    return float((a > (-500 if modality == "ct" else -5.5)).mean())
-
-
-def _index_one(args):
-    """Read one volume, drop empty slices, Bernoulli mid-slab sample. Returns (kept, dropped, stats)."""
-    image_path, volume_id_, modality, split, extra = args
-    vol = store.read_image(Path(image_path))
-    z = vol.shape[0]
-    mu = 0.5 * (z - 1)
-    rows, empty = [], []
-    fracs = []
-    for i in range(z):
-        frac = tissue_frac(vol[i], modality)
-        fracs.append(frac)
-        rec = {"volume_id": volume_id_, "z": i, "slice_idx": i, "tissue_frac": frac,
-               "split": split, "modality": modality, **extra}
-        (empty if frac < EMPTY_MIN else rows).append(rec)
-    dropped = list(empty)
-    if rows:
-        idx = np.array([r["z"] for r in rows], dtype=np.float64)
-        p = gaussian_p(idx, mu, SLICE_SIGMA)
-        rng = np.random.default_rng(SEED ^ int(hashlib.md5(volume_id_.encode()).hexdigest()[:8], 16))
-        keep, gauss = [], []
-        for r, pi, u in zip(rows, p, rng.random(len(rows))):
-            r = {**r, "gauss_p": float(pi)}
-            (keep if u <= pi else gauss).append(r)
-        if not keep:
-            keep, gauss = [max(rows, key=lambda r: r.get("gauss_p", 0))], []
-        dropped.extend({**r, "drop_reason": "gaussian"} for r in gauss)
-        rows = keep
-        for r in empty:
-            r["drop_reason"] = "empty"
-    mid = z // 2
-    stats = {"n_slices_raw": z, "n_slices_kept": len(rows), "n_slices_empty_dropped": len(empty),
-             "n_slices_gauss_dropped": len(dropped) - len(empty),
-             "tissue_frac_mid": fracs[mid], "tissue_frac_lo": float(np.mean(fracs[: max(mid // 4, 1)])),
-             "tissue_frac_hi": float(np.mean(fracs[-max(mid // 4, 1) :]))}
-    return rows, dropped, stats
-
-
-def index_ssl_volumes(root: Path, ssl_vols: pd.DataFrame, workers: int) -> tuple[pd.DataFrame, list, pd.DataFrame]:
-    """Slice-index SSL volumes. Returns (kept train/val slices, dropped rows, per-volume stats)."""
-    jobs = [(root / r.image_path, r.volume_id, r.modality, r.split,
-             {"dataset": r.dataset, "dataset_family": r.dataset_family, "dedup_key": r.dedup_key,
-              "image_path": r.image_path, "vol_idx": i})
-            for i, r in enumerate(ssl_vols.itertuples(index=False))]
-    kept, dropped, stats_by = [], [], {}
-    if not jobs:
-        return pd.DataFrame(), [], pd.DataFrame()
-    with mp.Pool(workers, maxtasksperchild=32) as pool:
-        for k, (rows, drop, stats) in enumerate(pool.imap_unordered(_index_one, jobs), 1):
-            kept.extend(rows)
-            dropped.extend(drop)
-            stats_by[rows[0]["volume_id"] if rows else drop[0]["volume_id"]] = stats
-            if k % 500 == 0:
-                print(f"[ssl] indexed {k}/{len(jobs)}", flush=True)
-    slices = pd.DataFrame(kept)
-    slices["pretrain"] = True
-    slices = slices[slices["split"].isin(["train", "val"])].copy()
-    return slices, dropped, pd.DataFrame.from_dict(stats_by, orient="index")
-
-
 # Per-volume prep measurements carried from the manifests into volumes.csv. The 3D loader uses the native-geometry
 # columns for resolution-matching augmentation; the registration columns are for QC and for filtering analyses.
 NATIVE_COLS = ("src_dx", "src_dy", "src_dz", "src_nx", "src_ny", "src_nz", "thick_mm", "thick_axis", "aniso",
                "reg_method", "reg_ok", "reg_rot_deg", "reg_scale", "reg_aniso", "reg_mi", "brain_method", "brain_frac",
-               "brain_cover", "stripped_input", "brain_ok", "brain_dice_tpl", "reg_template", "brain_head_ratio", "reg_mi", "reg_backend")
+               "brain_cover", "stripped_input", "brain_ok", "brain_dice_tpl", "reg_template", "brain_head_ratio", "reg_backend")
 
 
 def _recency(r: dict) -> tuple:
@@ -511,23 +422,6 @@ def folder_of(dataset: str) -> str:
         if ds.endswith("_" + c):
             return ds[: -len(c) - 1]
     return ds
-
-
-def assign_splits(vols: pd.DataFrame, v3: dict[str, set[str]]) -> pd.DataFrame:
-    strata = {k: (m, f) for k, m, f in vols[["dedup_key", "modality", "dataset_family"]].itertuples(index=False, name=None)}
-    inherited, fresh = {}, []
-    for k in vols["dedup_key"].unique():
-        if k in v3:
-            inherited[k] = merge_split(v3[k])
-        else:
-            fresh.append(k)
-    inherited_n = len(inherited)
-    assigned = stratified_subjects(fresh, strata) if fresh else {}
-    assigned.update(inherited)
-    vols = vols.copy()
-    vols["split"] = vols["dedup_key"].map(assigned)
-    print(f"[split] inherited v3 subjects={inherited_n} newly assigned={len(fresh)}", flush=True)
-    return pin_official_splits(vols)
 
 
 def inherit_current_splits(vols: pd.DataFrame, old_vols: pd.DataFrame) -> pd.DataFrame:
@@ -576,9 +470,9 @@ def pin_official_splits(vols: pd.DataFrame) -> pd.DataFrame:
     return vols
 
 
-def assert_no_leak(vols: pd.DataFrame, slices: pd.DataFrame, bhsd: set[str]) -> None:
-    """Hard stop if a subject crosses SSL splits or a BHSD/held-out study is in the SSL index."""
-    ssl = slices.copy()
+def assert_no_leak(vols: pd.DataFrame, ssl: pd.DataFrame, bhsd: set[str]) -> None:
+    """Hard stop if a subject crosses SSL splits or a BHSD/held-out study is among the SSL rows (``ssl``: the
+    train / val volumes of the pretraining pool)."""
     for a, b in (("train", "val"), ("train", "test"), ("val", "test")):
         sa, sb = set(ssl.loc[ssl.split == a, "dedup_key"]), set(ssl.loc[ssl.split == b, "dedup_key"])
         leak = sa & sb
@@ -597,14 +491,14 @@ def assert_no_leak(vols: pd.DataFrame, slices: pd.DataFrame, bhsd: set[str]) -> 
         sub = vols[vols.dataset_family == fam]
         bad = sub.groupby("dedup_key")["split"].nunique()
         assert (bad == 1).all(), f"{fam} split conflict: {list(bad[bad > 1].index)[:5]}"
-    print("[leak] ok: no subject in two SSL splits; BHSD and held-out families absent from slices.parquet", flush=True)
+    print("[leak] ok: no subject in two SSL splits; BHSD and held-out families absent from SSL", flush=True)
 
 
-def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
-          manifests: str = "manifest_*.jsonl", inherit_splits: Path | None = None, slice_table: bool = True,
+def build(root: Path, manifests: str = "manifest_*.jsonl", inherit_splits: Path | None = None,
           out_dir: Path | None = None) -> None:
-    """``out_dir``: write volumes.csv / subjects.csv / bhsd_studies.csv there instead of into the store (a candidate
-    index built beside the live one, e.g. jobs/index_append.sbatch); the SSL slice tables still go to ``root``."""
+    """``inherit_splits``: the volumes.csv whose subject splits are kept (default: ``root/volumes.csv``; with neither,
+    every subject gets a fresh stratified split). ``out_dir``: write volumes.csv / subjects.csv / bhsd_studies.csv there
+    instead of into the store (a candidate index built beside the live one, e.g. jobs/index_append.sbatch)."""
     bhsd = bhsd_case_ids()
     print(f"[bhsd] {len(bhsd)} RSNA studies with hemorrhage masks", flush=True)
     load_rsna_patients(root)
@@ -647,12 +541,12 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
             "mask_cow": mask_rel(root, folder, cid, "cow"),
         })
     vols = pd.DataFrame(recs)
-    old_path = Path(inherit_splits) if inherit_splits else (root / "volumes.csv" if keep_ssl_index else None)
-    old_vols = pd.read_csv(old_path, low_memory=False) if old_path is not None and old_path.exists() else None
-    if old_vols is not None:
-        vols = inherit_current_splits(vols, old_vols)
-    else:
-        vols = assign_splits(vols, inherit_v3(v3_path))
+    old_path = Path(inherit_splits) if inherit_splits else root / "volumes.csv"
+    if inherit_splits and not old_path.exists():
+        raise SystemExit(f"--inherit-splits {old_path} does not exist")
+    old_vols = pd.read_csv(old_path, low_memory=False) if old_path.exists() else \
+        pd.DataFrame(columns=["dedup_key", "volume_id", "split"])
+    vols = inherit_current_splits(vols, old_vols)
     # one SSL volume per (subject, contrast): 2024 GLI beats 2023; OASIS-2 MR1 beats later visits
     vols = vols.sort_values(["dedup_key", "contrast", "priority", "case_id"], ascending=[True, True, False, True])
     ssl_keep = ~vols.duplicated(["dedup_key", "contrast", "modality"], keep="first")
@@ -694,55 +588,11 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
     ssl_vols = vols[vols.pretrain & vols.ssl_keep].copy()
     print(f"[ssl] volumes eligible={len(ssl_vols)} / {len(vols)} (BHSD {int(vols.bhsd.sum())}, held-out {int(vols.held_out.sum())})", flush=True)
 
-    dropped = None
-    write_ssl = not keep_ssl_index and slice_table
-    if not slice_table:
-        # 3D pretraining and the downstream suite read volumes.csv only; the per-slice table (which reads every SSL
-        # volume) is for the 2D trainers. The leak check runs on the SSL volume rows instead.
-        slices = ssl_vols.loc[ssl_vols["split"].isin(["train", "val"]), ["volume_id", "dedup_key", "split", "modality"]]
-        for stale in ("slices.parquet", "slices.csv", "manifest.csv", "empty_slice_removals.csv"):
-            if ((out_dir or root) / stale).exists():                 # a candidate build leaves the store alone
-                ((out_dir or root) / stale).unlink()
-                print(f"[ssl] removed stale {stale} (no slice table this build)", flush=True)
-    elif keep_ssl_index:
-        old_vols_path, old_slices_path = root / "volumes.csv", root / "slices.parquet"
-        if not old_vols_path.exists() or not old_slices_path.exists():
-            raise SystemExit("--keep-ssl-index needs existing volumes.csv and slices.parquet")
-        old_vols = pd.read_csv(old_vols_path, low_memory=False)
-        for c in ("pretrain", "ssl_keep"):
-            if c in old_vols.columns:
-                old_vols[c] = old_vols[c].map(lambda x: str(x).lower() in ("true", "1"))
-        old_ssl = set(old_vols.loc[old_vols["pretrain"] & old_vols["ssl_keep"], "volume_id"].astype(str))
-        new_ssl = set(ssl_vols["volume_id"].astype(str))
-        missing, extra = old_ssl - new_ssl, new_ssl - old_ssl
-        if missing:
-            raise SystemExit(
-                f"--keep-ssl-index: existing SSL volumes disappeared (missing={len(missing)}); "
-                "re-run without the flag")
-        stat_cols = [c for c in old_vols.columns if c.startswith("n_slices") or c.startswith("tissue_frac")]
-        vols = vols.merge(old_vols[["volume_id", *stat_cols]].drop_duplicates("volume_id"), on="volume_id", how="left")
-        slices = pd.read_parquet(old_slices_path)
-        print(f"[ssl] reused {old_slices_path} rows={len(slices)} extra={len(extra)}", flush=True)
-        if extra:
-            add = ssl_vols[ssl_vols["volume_id"].astype(str).isin(extra)]
-            extra_slices, extra_drop, extra_stats = index_ssl_volumes(root, add, workers)
-            vols = vols.merge(extra_stats, left_on="volume_id", right_index=True, how="left", suffixes=("", "_new"))
-            for c in extra_stats.columns:
-                neu = f"{c}_new"
-                if neu in vols.columns:
-                    vols[c] = vols[neu].combine_first(vols[c]) if c in vols.columns else vols[neu]
-                    vols = vols.drop(columns=[neu])
-            slices = pd.concat([slices, extra_slices], ignore_index=True)
-            dropped = extra_drop
-            write_ssl = True
-            print(f"[ssl] indexed {len(extra)} new SSL volumes, slices now {len(slices)}", flush=True)
-    else:
-        slices, dropped, st = index_ssl_volumes(root, ssl_vols, workers)
-        vols = vols.merge(st, left_on="volume_id", right_index=True, how="left")
-
+    # the leak check runs on the SSL volume rows (train / val)
+    ssl_rows = ssl_vols.loc[ssl_vols["split"].isin(["train", "val"]), ["volume_id", "dedup_key", "split", "modality"]]
     vols["vol_idx"] = np.arange(len(vols))
     vols["status"] = "ok"
-    assert_no_leak(vols, slices, bhsd)
+    assert_no_leak(vols, ssl_rows, bhsd)
 
     subj = (vols.groupby("dedup_key", as_index=False)
             .agg(split=("split", "first"), modality=("modality", "first"),
@@ -756,41 +606,23 @@ def build(root: Path, v3_path: Path, workers: int, keep_ssl_index: bool = False,
     pd.Series(sorted(bhsd), name="case_id").to_csv(out / "labels" / "bhsd_studies.csv", index=False)
     vols.to_csv(out / "volumes.csv", index=False)
     subj.to_csv(out / "subjects.csv", index=False)
-    if write_ssl:
-        slices.to_parquet(root / "slices.parquet", index=False)
-        slices.to_csv(root / "slices.csv", index=False)
-        slices.to_csv(root / "manifest.csv", index=False)
-        if dropped is not None:
-            drop_path = root / "empty_slice_removals.csv"
-            extra_drop = pd.DataFrame(dropped)
-            if keep_ssl_index and drop_path.exists() and len(extra_drop):
-                extra_drop = pd.concat([pd.read_csv(drop_path), extra_drop], ignore_index=True)
-            extra_drop.to_csv(drop_path, index=False)
-
     print("\n[volumes] by family × split:")
     print(vols.groupby(["dataset_family", "split"]).size().unstack(fill_value=0).to_string())
-    print("\n[ssl slices] by split × modality:" if slice_table else "\n[ssl volumes] by split × modality:")
-    print(slices.groupby(["split", "modality"]).size().to_string())
-    print(f"\n[ok] volumes={len(vols)} subjects={len(subj)} ssl_slices={len(slices)}", flush=True)
+    print("\n[ssl volumes] by split × modality:")
+    print(ssl_rows.groupby(["split", "modality"]).size().to_string())
+    print(f"\n[ok] volumes={len(vols)} subjects={len(subj)} ssl_volumes={len(ssl_rows)}", flush=True)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--root", type=Path, default=DEFAULT_STORE)
-    ap.add_argument("--v3-volumes", type=Path, default=V3_VOLUMES)
-    ap.add_argument("--workers", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 8)))
-    ap.add_argument("--keep-ssl-index", action="store_true",
-                    help="keep existing SSL slices; index only newly added SSL volumes")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--root", type=Path, default=PROCESSED_ROOT)
     ap.add_argument("--manifests", default="manifest_*.jsonl", help="manifest glob under --root (e.g. manifest_v6_*)")
     ap.add_argument("--inherit-splits", type=Path, default=None,
-                    help="volumes.csv whose subject splits are kept (new subjects are assigned fresh)")
-    ap.add_argument("--no-slices", action="store_true",
-                    help="skip the 2D slice table (reads every SSL volume); volumes.csv is all the 3D code needs")
+                    help="volumes.csv whose subject splits are kept (default: --root/volumes.csv)")
     ap.add_argument("--out-dir", type=Path, default=None,
                     help="write volumes.csv / subjects.csv here instead of --root (leave the live index untouched)")
     a = ap.parse_args()
-    build(a.root, a.v3_volumes, a.workers, keep_ssl_index=a.keep_ssl_index, manifests=a.manifests,
-          inherit_splits=a.inherit_splits, slice_table=not a.no_slices, out_dir=a.out_dir)
+    build(a.root, manifests=a.manifests, inherit_splits=a.inherit_splits, out_dir=a.out_dir)
 
 
 if __name__ == "__main__":

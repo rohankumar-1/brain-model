@@ -155,3 +155,27 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print("ok", name)
+
+
+def test_build_writes_volumes_and_keeps_its_splits_on_a_rebuild(tmp_path):
+    import json
+
+    import pandas as pd
+    from brain.prep.index import build
+
+    rows = []
+    for i in range(12):
+        for ds, suf in (("ixi_t1", "T1"), ("ixi_t2", "T2")):
+            cid = f"IXI{i:03d}-Guys-0{i}-{suf}"
+            (tmp_path / ds).mkdir(exist_ok=True)
+            (tmp_path / ds / f"{cid}.zip").write_bytes(b"x")
+            rows.append({"dataset": ds, "case_id": cid, "modality": "mri", "status": "ok",
+                         "brain_method": "synthstrip", "brain_ok": True, "reg_mi": 0.5})
+    (tmp_path / "manifest_v6_a.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    build(tmp_path, manifests="manifest_v6_*.jsonl")
+    first = (tmp_path / "volumes.csv").read_bytes()
+    v = pd.read_csv(tmp_path / "volumes.csv")
+    assert len(v) == 24 and v.groupby("dedup_key")["split"].nunique().eq(1).all()
+    assert list(v.columns).count("reg_mi") == 1 and not (tmp_path / "slices.parquet").exists()
+    build(tmp_path, manifests="manifest_v6_*.jsonl", out_dir=tmp_path / "again")     # inherits the store's splits
+    assert (tmp_path / "again" / "volumes.csv").read_bytes() == first

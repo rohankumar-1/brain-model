@@ -8,6 +8,9 @@
 # the old or the new index, never a partial or full rebuild). On any failure the live index is left as it was.
 #   sbatch --dependency=afterany:<benchmark jobs> jobs/index_append.sbatch
 #   sbatch --export=ALL,ONLY=pedi_cranial_ct jobs/index_append.sbatch   # append only these datasets (comma prefixes)
+# FULL=1 installs the full rebuild instead (after a re-prep: every row refreshed from the manifests, splits still
+# inherited from the backup, or from INHERIT=<volumes csv in the store>), with the same backup and atomic install:
+#   sbatch --export=ALL,FULL=1 jobs/index_append.sbatch
 #SBATCH -p mit_normal
 #SBATCH --job-name=index-append
 #SBATCH -N 1
@@ -34,8 +37,21 @@ cp -p "$STORE/volumes.csv" "$PRE"
 cp -p "$STORE/subjects.csv" "$SPRE"
 PRE_SHA=$(sha1sum "$PRE" | cut -d' ' -f1)
 echo "[index-append] $(date -Is) backup $PRE ($PRE_SHA), $SPRE"
-"$PY" -u -m brain.prep.index --root "$STORE" --workers "${SLURM_CPUS_PER_TASK:-4}" \
-  --manifests "manifest_v6_*.jsonl" --inherit-splits "$PRE" --no-slices --out-dir "$WORK"
+SPLITS="$PRE"
+[[ -n "${INHERIT:-}" ]] && SPLITS="$STORE/$INHERIT"
+"$PY" -u -m brain.prep.index --root "$STORE" --manifests "manifest_v6_*.jsonl" --inherit-splits "$SPLITS" --out-dir "$WORK"
+if [[ "${FULL:-0}" == 1 ]]; then
+  [ "$(sha1sum "$STORE/volumes.csv" | cut -d' ' -f1)" = "$PRE_SHA" ] \
+    || { echo "[index-append] volumes.csv changed while this job ran: live index untouched"; exit 1; }
+  cp "$WORK/volumes.csv" "$STORE/.volumes.append.partial.csv"
+  cp "$WORK/subjects.csv" "$STORE/.subjects.append.partial.csv"
+  cp "$WORK/labels/bhsd_studies.csv" "$STORE/labels/bhsd_studies.csv"
+  mv "$STORE/.subjects.append.partial.csv" "$STORE/subjects.csv"
+  mv "$STORE/.volumes.append.partial.csv" "$STORE/volumes.csv"
+  echo "[index-append] FULL rebuild installed: volumes.csv sha1 $(sha1sum "$STORE/volumes.csv" | cut -d' ' -f1)" \
+    "(was $PRE_SHA; backup $PRE)"
+  exit 0
+fi
 # keep every old row exactly as it was and append only volumes the old index lacks (a full rebuild may also refresh
 # old rows, e.g. recomputed stats or masks written since: reported here, not applied)
 "$PY" - "$PRE" "$WORK/volumes.csv" "$STORE/.volumes.append.partial.csv" "${ONLY:-}" \
