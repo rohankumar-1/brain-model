@@ -38,7 +38,7 @@ model:
   init_from: runs/v4/scratch_s42/last.pt
   checkpoint: true
   taps: [3, 7]
-  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  slot: {dim: 256, layers: 3, heads: 8}
   seg:
     widths: [128, 64, 32, 16]
   rope_fp32: false
@@ -100,7 +100,7 @@ aug:
   skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
   synth_contrast: {p: 0.1}
   task_aware: true
-loss: {balance: uncertainty, ema_decay: 0.99, seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+loss: {seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
   negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
 optim:
   lr: 0.0003
@@ -108,7 +108,6 @@ optim:
   layer_decay: 0.75
   weight_decay: 0.05
   warmup_steps: 500
-  freeze_steps: 0
   clip_grad: 1.0
   batch_size: 6                    # anchors per GPU; with partners up to 12 scans (4 L40S, global 16)
   schedule: wsd
