@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from brain.downstream.run_suite import linear_head, octant_embedding, pooled_heads
 from brain.downstream.tasks import (
@@ -21,6 +21,7 @@ from brain.downstream.tasks import (
     RSNA_LABELS,
     SEGMENTATION_TASKS,
     TASK_NAMES,
+    LOADERS,
     TaskBundle,
     load_msd_task,
     load_rsna_task,
@@ -86,11 +87,19 @@ TASK_DATASETS = {
     **{t: {"upenn_gbm_t1c"} for t in ("upenn_survival_12m", "upenn_mgmt")},
     "rsna_ica_cta_aneurysm": {"rsna_ica_cta"},
     "rsna_ica_mr_aneurysm": {"rsna_ica_mra", "rsna_ica_t2w"},
+    **{t: {"adni_t1w"} for t in ("adni_dx3", "adni_cn_ad", "adni_cn_mci", "adni_mmse")},
+    "ppmi_pd": {"ppmi_t1w"},
 }
 
+
+@pytest.fixture(autouse=True)
+def _no_bench_exclusions(monkeypatch):
+    """The fixtures' fake volumes are not in the benchmark's decontamination lists; keep the loaders' own output."""
+    monkeypatch.setenv("BRAIN_BENCH_EXCLUDE", "none")
+
 TASK_TYPES = {
-    **{n: "multilabel" for n in ("cq500", "rsna_ich")},
-    **{n: "binary" for n in CLASSIFICATION_TASKS if n not in ("cq500", "rsna_ich")},
+    **{n: "multilabel" for n in ("cq500", "rsna_ich", "adni_dx3")},
+    **{n: "binary" for n in CLASSIFICATION_TASKS if n not in ("cq500", "rsna_ich", "adni_dx3")},
     **{n: "regression" for n in REGRESSION_TASKS},
     **{n: "segmentation" for n in SEGMENTATION_TASKS},
 }
@@ -116,9 +125,7 @@ SEG_MASK = {
 def test_task_catalog_is_complete():
     assert set(TASK_DATASETS) == set(TASK_NAMES)
     assert set(TASK_TYPES) == set(TASK_NAMES)
-    src = inspect.getsource(load_task)
-    for name in TASK_NAMES:
-        assert name in src, name
+    assert set(LOADERS) == set(TASK_NAMES)
 
 
 def _row(dataset: str, vid: str, **extra) -> dict:
@@ -162,6 +169,9 @@ def _volumes() -> pd.DataFrame:
         _row("rsna_ica_cta", "rsna_ica_cta:1.2.1", modality="ct"),
         _row("rsna_ica_mra", "rsna_ica_mra:1.2.2"),
         _row("rsna_ica_t2w", "rsna_ica_t2w:1.2.3"),
+        # ADNI / PPMI: invented image ids (the real ones may not be published)
+        *[_row("adni_t1w", f"adni_t1w:I90000{i}", case_id=f"I90000{i}") for i in (1, 2, 3, 4)],
+        *[_row("ppmi_t1w", f"ppmi_t1w:I80000{i}", case_id=f"I80000{i}") for i in (1, 2)],
     ]
     for name, (col, path) in SEG_MASK.items():
         ds = next(iter(TASK_DATASETS[name]))
@@ -264,6 +274,15 @@ def _write_clinical(root: Path) -> Path:
     ica.loc[0, "Right Middle Cerebral Artery"] = 1
     ica.loc[2, "Anterior Communicating Artery"] = 1
     ica.to_csv(root / "rsna_ica" / "train.csv", index=False)
+    (root / "adni" / "tables").mkdir(parents=True)          # fake subjects: 4 is an excluded duplicate
+    pd.DataFrame({"subject": ["fake_1", "fake_2", "fake_3", "fake_4"], "t1_image_id": [900001, 900002, 900003, 900004],
+                  "dx3": ["CN", "MCI", "AD", "AD"], "mmse": [29.0, 26.0, 21.0, 20.0]}).to_csv(
+        root / "adni" / "tables" / "adni_labels.csv", index=False)
+    pd.DataFrame({"subject": ["fake_4"]}).to_csv(root / "adni" / "tables" / "adni_exclude.csv", index=False)
+    (root / "ppmi" / "tables").mkdir(parents=True)
+    pd.DataFrame({"Image ID": [800001, 800002, 800003], "kind": ["t1", "t1", "t2"],
+                  "Research Group": ["PD", "Control", "PD"]}).to_csv(
+        root / "ppmi" / "tables" / "ppmi_baseline_pick.csv", index=False)
     msd = root / "msd_volume_labels.csv"
     pd.DataFrame({"volume_id": ["msd:1"], "enhancing_high": [1]}).to_csv(msd, index=False)
     return msd
@@ -339,6 +358,19 @@ def test_rsna_ica_aneurysm_tasks_split_cta_from_mr_and_merge_sides(tmp_path):
     assert cta.volume_ids == ["rsna_ica_cta:1.2.1"] and cta.y.tolist() == [1]
     assert mr.volume_ids == ["rsna_ica_mra:1.2.2", "rsna_ica_t2w:1.2.3"] and mr.y.tolist() == [0, 1]
     assert lab.loc["1.2.1", "mca"] == 1 and lab.loc["1.2.3", "acom"] == 1 and lab.loc["1.2.2", "mca"] == 0
+
+
+def test_adni_and_ppmi_tasks(tmp_path):
+    msd = _write_clinical(tmp_path)
+    with (patch("brain.downstream.tasks.DATASETS", tmp_path),
+          patch("brain.downstream.tasks.LABEL_SOURCES", tmp_path / "_not_synced")):
+        dx3 = load_task("adni_dx3", _volumes(), msd_labels=msd)
+        ad = load_task("adni_cn_ad", _volumes(), msd_labels=msd)
+        pd_ = load_task("ppmi_pd", _volumes(), msd_labels=msd)
+    assert dx3.volume_ids == [f"adni_t1w:I90000{i}" for i in (1, 2, 3)]          # the excluded subject is gone
+    assert dx3.y.tolist() == [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    assert ad.volume_ids == ["adni_t1w:I900001", "adni_t1w:I900003"] and ad.y.tolist() == [0, 1]
+    assert pd_.volume_ids == ["ppmi_t1w:I800001", "ppmi_t1w:I800002"] and pd_.y.tolist() == [1, 0]
 
 
 def test_rsna_is_one_task_named_rsna_ich():

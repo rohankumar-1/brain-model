@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import replace, dataclass, field
 from pathlib import Path
 
@@ -266,36 +267,32 @@ def sync_label_files(dest: Path = LABEL_SOURCES) -> list[Path]:
     return out
 
 
-def cq500_majority(reads_csv: Path | None = None, threshold: float = 0.5) -> pd.DataFrame:
-    """Reader vote from Qure.ai reads.csv (0/1 per finding): positive when at least ``threshold`` of the three
-    readers marked it (0.5 = majority). EDH is omitted."""
-    reads_csv = reads_csv or (label_file("cq500_meta", "reads.csv"))
-    df = pd.read_csv(reads_csv)
-    out = pd.DataFrame({"name": df["name"].astype(str)})
-    for lab in CQ500_LABELS:
-        cols = [c for c in df.columns if c.endswith(":" + lab)]
+def cq500_majority(threshold: float = 0.5, findings: list[str] | None = None) -> pd.DataFrame:
+    """Reader vote from Qure.ai reads.csv (0/1 per finding; default the multilabel task's ``CQ500_LABELS``): positive
+    when at least ``threshold`` of the three readers marked it (0.5 = majority)."""
+    reads = pd.read_csv(label_file("cq500_meta", "reads.csv"))
+    out = pd.DataFrame({"name": reads["name"].astype(str)})
+    for lab in findings or CQ500_LABELS:
+        cols = [c for c in reads.columns if c.endswith(":" + lab)]
         if not cols:
-            raise ValueError(f"{reads_csv} has no reader columns for {lab}")
-        votes = df[cols].apply(pd.to_numeric, errors="coerce")
-        out[lab] = (votes.mean(axis=1) >= threshold).astype(np.int64)
+            raise ValueError(f"CQ500 reads.csv has no reader columns for {lab}")
+        out[lab] = (reads[cols].apply(pd.to_numeric, errors="coerce").mean(axis=1) >= threshold).astype(np.int64)
     return out
 
 
 def _cq500_frame(volumes: pd.DataFrame, findings: list[str], threshold: float = 0.5) -> pd.DataFrame:
-    """CQ500 / Seg-CQ500 volumes (one per study, as ``load_cq500_task``) with 3-reader majority ``findings``."""
-    reads = pd.read_csv(label_file("cq500_meta", "reads.csv"))
-    labels = pd.DataFrame({"name": reads["name"].astype(str)})
-    for lab in findings:
-        cols = [c for c in reads.columns if c.endswith(":" + lab)]
-        labels[lab] = (reads[cols].apply(pd.to_numeric, errors="coerce").mean(axis=1) >= threshold).astype(np.int64)
+    """CQ500 and Seg-CQ500 volumes with 3-reader majority ``findings``, one volume per study: Seg-CQ500 re-releases
+    some CQ500 studies, and a study present in both is kept once (the ``cq500`` copy) so it does not count twice in
+    train or test."""
     ct = volumes[volumes["dataset"].isin(["cq500", "seg_cq500"])].copy()
     ct["name"] = ct["volume_id"].map(_case_name)
-    ct = ct.sort_values("dataset").drop_duplicates("name", keep="first")
-    return ct.merge(labels, on="name", how="inner")
+    ct = ct.sort_values("dataset").drop_duplicates("name", keep="first")   # "cq500" sorts before "seg_cq500"
+    return ct.merge(cq500_majority(threshold, findings), on="name", how="inner")
 
 
-def load_cq500_finding_task(volumes: pd.DataFrame, name: str, finding: str) -> TaskBundle:
-    """One CQ500 reader finding the main multilabel task leaves out (rare: cross-validate)."""
+def load_cq500_finding_task(volumes: pd.DataFrame, name: str) -> TaskBundle:
+    """One CQ500 reader finding the main multilabel task leaves out (``CQ500_FINDING_TASKS``; rare: cross-validate)."""
+    finding = CQ500_FINDING_TASKS[name]
     m = _cq500_frame(volumes, [finding])
     return _bundle_from_frame(name, "binary", m, m[finding].to_numpy(np.int64), [finding], modality="ct",
                               cohort_col="dataset")
@@ -309,32 +306,12 @@ def load_cq500_bleed_side_task(volumes: pd.DataFrame) -> TaskBundle:
                               modality="ct", cohort_col="dataset")
 
 
-def load_cq500_task(
-    volumes: pd.DataFrame,
-    info_csv: Path | None = None,
-    seg_info_csv: Path | None = None,
-    threshold: float = 0.5,
-    reads_csv: Path | None = None,
-) -> TaskBundle:
-    """CQ500 and Seg-CQ500 together. Labels are 3-reader majority; ``cohort`` is the dataset folder.
-
-    Seg-CQ500 re-releases some CQ500 studies; a study present in both is kept once (the ``cq500`` copy) so it does
-    not count twice in train or test. ``threshold`` is the reader-agreement fraction for a positive label."""
-    labels = cq500_majority(reads_csv, threshold)
-    ct = volumes[volumes["dataset"].isin(["cq500", "seg_cq500"])].copy()
-    ct["name"] = ct["volume_id"].map(_case_name)
-    ct = ct.sort_values("dataset").drop_duplicates("name", keep="first")   # "cq500" sorts before "seg_cq500"
-    merged = ct.merge(labels[["name"] + CQ500_LABELS], on="name", how="inner")
-    y = merged[CQ500_LABELS].to_numpy(dtype=np.int64)
-    return _bundle_from_frame(
-        "cq500",
-        "multilabel",
-        merged,
-        y,
-        CQ500_LABELS,
-        modality="ct",
-        cohort_col="dataset",
-    )
+def load_cq500_task(volumes: pd.DataFrame, threshold: float = 0.5) -> TaskBundle:
+    """CQ500 and Seg-CQ500 together, multilabel ``CQ500_LABELS``; ``cohort`` is the dataset folder. ``threshold`` is
+    the reader-agreement fraction for a positive label."""
+    m = _cq500_frame(volumes, CQ500_LABELS, threshold)
+    return _bundle_from_frame("cq500", "multilabel", m, m[CQ500_LABELS].to_numpy(np.int64), CQ500_LABELS,
+                              modality="ct", cohort_col="dataset")
 
 
 def _rsna_cache_path() -> Path:
@@ -1124,8 +1101,6 @@ BENCH_EXCLUDE = Path(__file__).resolve().parents[2] / "configs" / "bench" / "exc
 
 
 def bench_exclusions() -> set[str]:
-    import os
-
     path = os.environ.get("BRAIN_BENCH_EXCLUDE", str(BENCH_EXCLUDE))
     if path == "none":
         return set()
@@ -1158,133 +1133,84 @@ def load_task(name: str, volumes: pd.DataFrame, **kw) -> TaskBundle:
     return out
 
 
-def _load_task(
-    name: str,
-    volumes: pd.DataFrame,
-    *,
-    threshold: float = 0.5,
-    msd_labels: Path | None = None,
-    msd_target: str = "enhancing_high",
-) -> TaskBundle:
-    if name == "cq500":
-        return load_cq500_task(volumes, threshold=threshold)
-    if name == "rsna_ich":
-        return load_rsna_task(volumes, name=name)
-    if name == "oasis1_age":
-        return load_oasis1_age_task(volumes)
-    if name == "oasis1_cdr":
-        return load_oasis1_cdr_task(volumes)
-    if name == "oasis2_cdr":
-        return load_oasis2_cdr_task(volumes)
-    if name == "oasis2_conversion":
-        return load_oasis2_conversion_task(volumes)
-    if name == "abide_asd":
-        return load_abide_asd_task(volumes)
-    if name == "ixi_age":
-        return load_ixi_age_task(volumes)
-    if name == "pixar_age":
-        return load_bids_age_task(volumes, "pixar", label_file("pixar", "participants.tsv"))
-    if name == "piop1_age":
-        return load_bids_age_task(volumes, "piop1", label_file("piop1", "participants.tsv"))
-    if name == "piop2_age":
-        return load_bids_age_task(volumes, "piop2", label_file("piop2", "participants.tsv"))
-    if name == "id1000_age":
-        return load_bids_age_task(volumes, "id1000", label_file("id1000", "participants.tsv"))
-    if name == "seg_cq500":
-        return load_seg_cq500_task(volumes)
-    if name == "brats2023_gli":
-        return load_brats2023_gli_task(volumes)
-    if name == "brats2023_men":
-        return load_brats2023_men_task(volumes)
-    if name == "brats2024_gli":
-        return load_brats2024_gli_task(volumes)
-    if name == "brats2023_ped":
-        return load_brats2023_ped_task(volumes)
-    if name == "atlas":
-        return load_atlas_task(volumes)
-    if name == "isles22":
-        return load_isles22_task(volumes)
-    if name == "wmh":
-        return load_wmh_task(volumes)
-    if name == "isles24":
-        return load_isles24_task(volumes)
-    if name == "aisd":
-        return load_aisd_task(volumes)
-    if name == "instance":
-        return load_instance_task(volumes)
-    if name == "ms3seg":
-        return load_ms3seg_task(volumes)
-    if name == "valdo_cmb":
-        return load_valdo_cmb_task(volumes)
-    if name == "valdo_lacunes":
-        return load_valdo_lacunes_task(volumes)
-    if name == "ms3seg_age":
-        return load_ms3seg_age_task(volumes)
-    if name == "valdo_epvs":
-        return load_valdo_epvs_task(volumes)
-    if name == "isles24_mrs_discharge":
-        return load_isles24_mrs_discharge_task(volumes)
-    if name == "isles24_nihss_discharge":
-        return load_isles24_nihss_discharge_task(volumes)
-    if name == "isles24_lvo_side":
-        return load_isles24_lvo_side_task(volumes)
-    if name == "isles24_cow":
-        return load_isles24_cow_task(volumes)
-    if name == "cq500_bleed_side":
-        return load_cq500_bleed_side_task(volumes)
-    if name in ("cq500_chronic_bleed", "cq500_edh", "cq500_other_fracture"):
-        return load_cq500_finding_task(volumes, name, CQ500_FINDING_TASKS[name])
-    if name == "aisd_remote_infarct":
-        return load_aisd_remote_infarct_task(volumes)
-    if name in ("oasis1_mmse", "oasis2_mmse"):
-        return load_oasis_mmse_task(volumes, name.removesuffix("_mmse"))
-    if name == "abide_ados":
-        return load_abide_ados_task(volumes)
-    if name == "atlas_lesion_volume":
-        return load_atlas_lesion_volume_task(volumes)
-    if name == "atlas_lesion_side":
-        return load_atlas_lesion_side_task(volumes)
-    if name in ("instance_large_ich", "instance_ivh", "instance_infratentorial", "instance_side"):
-        return load_instance_ich_task(volumes, name)
-    if name == "atlas_days_post_stroke":
-        return load_atlas_days_post_stroke_task(volumes)
-    if name == "ms3seg_lesion_load":
-        return load_ms3seg_lesion_load_task(volumes)
-    if name == "gli_survival_12m":
-        return load_gli_survival_task(volumes)
-    if name == "gli_lgg":
-        return load_gli_lgg_task(volumes)
-    if name == "gli_idh":
-        return load_gli_idh_task(volumes)
-    if name == "ucsf_survival_12m":
-        return load_ucsf_survival_task(volumes)
-    if name == "ucsf_lgg":
-        return load_ucsf_lgg_task(volumes)
-    if name == "ucsf_idh":
-        return load_ucsf_idh_task(volumes)
-    if name == "ucsf_mgmt":
-        return load_ucsf_mgmt_task(volumes)
-    if name == "upenn_survival_12m":
-        return load_upenn_survival_task(volumes)
-    if name == "upenn_mgmt":
-        return load_upenn_mgmt_task(volumes)
-    if name in ("rsna_ica_cta_aneurysm", "rsna_ica_mr_aneurysm"):
-        return load_rsna_ica_aneurysm_task(volumes, name.removeprefix("rsna_ica_").removesuffix("_aneurysm"))
-    if name == "adni_dx3":
-        return load_adni_dx3_task(volumes)
-    if name in ("adni_cn_ad", "adni_cn_mci"):
-        return load_adni_pair_task(volumes, name.rsplit("_", 1)[1].upper())
-    if name == "adni_mmse":
-        return load_adni_mmse_task(volumes)
-    if name == "ppmi_pd":
-        return load_ppmi_pd_task(volumes)
-    if name == "isles24_mrs":
-        return load_isles24_mrs_task(volumes)
-    if name == "isles24_nihss":
-        return load_isles24_nihss_task(volumes)
-    if name == "msd":
-        return load_msd_task(volumes, labels_csv=msd_labels, target=msd_target)
-    raise KeyError(f"Unknown task {name}. Choices: {', '.join(TASK_NAMES)}")
+# task name -> loader of its TaskBundle from the volume table (cq500 and msd take options: ``_load_task``)
+LOADERS: dict[str, Callable[..., TaskBundle]] = {
+    "cq500": load_cq500_task,
+    "msd": load_msd_task,
+    "rsna_ich": load_rsna_task,
+    "oasis1_age": load_oasis1_age_task,
+    "oasis1_cdr": load_oasis1_cdr_task,
+    "oasis2_cdr": load_oasis2_cdr_task,
+    "oasis2_conversion": load_oasis2_conversion_task,
+    "abide_asd": load_abide_asd_task,
+    "ixi_age": load_ixi_age_task,
+    "pixar_age": lambda v: load_bids_age_task(v, "pixar", label_file("pixar", "participants.tsv")),
+    "piop1_age": lambda v: load_bids_age_task(v, "piop1", label_file("piop1", "participants.tsv")),
+    "piop2_age": lambda v: load_bids_age_task(v, "piop2", label_file("piop2", "participants.tsv")),
+    "id1000_age": lambda v: load_bids_age_task(v, "id1000", label_file("id1000", "participants.tsv")),
+    "seg_cq500": load_seg_cq500_task,
+    "brats2023_gli": load_brats2023_gli_task,
+    "brats2023_men": load_brats2023_men_task,
+    "brats2024_gli": load_brats2024_gli_task,
+    "brats2023_ped": load_brats2023_ped_task,
+    "atlas": load_atlas_task,
+    "isles22": load_isles22_task,
+    "wmh": load_wmh_task,
+    "isles24": load_isles24_task,
+    "aisd": load_aisd_task,
+    "instance": load_instance_task,
+    "ms3seg": load_ms3seg_task,
+    "valdo_cmb": load_valdo_cmb_task,
+    "valdo_lacunes": load_valdo_lacunes_task,
+    "ms3seg_age": load_ms3seg_age_task,
+    "valdo_epvs": load_valdo_epvs_task,
+    "isles24_mrs_discharge": load_isles24_mrs_discharge_task,
+    "isles24_nihss_discharge": load_isles24_nihss_discharge_task,
+    "isles24_lvo_side": load_isles24_lvo_side_task,
+    "isles24_cow": load_isles24_cow_task,
+    "cq500_bleed_side": load_cq500_bleed_side_task,
+    "aisd_remote_infarct": load_aisd_remote_infarct_task,
+    "abide_ados": load_abide_ados_task,
+    "atlas_lesion_volume": load_atlas_lesion_volume_task,
+    "atlas_lesion_side": load_atlas_lesion_side_task,
+    "atlas_days_post_stroke": load_atlas_days_post_stroke_task,
+    "ms3seg_lesion_load": load_ms3seg_lesion_load_task,
+    "gli_survival_12m": load_gli_survival_task,
+    "gli_lgg": load_gli_lgg_task,
+    "gli_idh": load_gli_idh_task,
+    "ucsf_survival_12m": load_ucsf_survival_task,
+    "ucsf_lgg": load_ucsf_lgg_task,
+    "ucsf_idh": load_ucsf_idh_task,
+    "ucsf_mgmt": load_ucsf_mgmt_task,
+    "upenn_survival_12m": load_upenn_survival_task,
+    "upenn_mgmt": load_upenn_mgmt_task,
+    "adni_dx3": load_adni_dx3_task,
+    "adni_mmse": load_adni_mmse_task,
+    "ppmi_pd": load_ppmi_pd_task,
+    "isles24_mrs": load_isles24_mrs_task,
+    "isles24_nihss": load_isles24_nihss_task,
+    "cq500_chronic_bleed": lambda v: load_cq500_finding_task(v, "cq500_chronic_bleed"),
+    "cq500_edh": lambda v: load_cq500_finding_task(v, "cq500_edh"),
+    "cq500_other_fracture": lambda v: load_cq500_finding_task(v, "cq500_other_fracture"),
+    "oasis1_mmse": lambda v: load_oasis_mmse_task(v, "oasis1"),
+    "oasis2_mmse": lambda v: load_oasis_mmse_task(v, "oasis2"),
+    "instance_large_ich": lambda v: load_instance_ich_task(v, "instance_large_ich"),
+    "instance_ivh": lambda v: load_instance_ich_task(v, "instance_ivh"),
+    "instance_infratentorial": lambda v: load_instance_ich_task(v, "instance_infratentorial"),
+    "instance_side": lambda v: load_instance_ich_task(v, "instance_side"),
+    "rsna_ica_cta_aneurysm": lambda v: load_rsna_ica_aneurysm_task(v, "cta"),
+    "rsna_ica_mr_aneurysm": lambda v: load_rsna_ica_aneurysm_task(v, "mr"),
+    "adni_cn_ad": lambda v: load_adni_pair_task(v, "AD"),
+    "adni_cn_mci": lambda v: load_adni_pair_task(v, "MCI"),
+}
+
+
+def _load_task(name: str, volumes: pd.DataFrame, *, threshold: float = 0.5, msd_labels: Path | None = None,
+               msd_target: str = "enhancing_high") -> TaskBundle:
+    if name not in LOADERS:
+        raise KeyError(f"Unknown task {name}. Choices: {', '.join(TASK_NAMES)}")
+    opts = {"cq500": {"threshold": threshold}, "msd": {"labels_csv": msd_labels, "target": msd_target}}
+    return LOADERS[name](volumes, **opts.get(name, {}))
 
 
 def split_xy(task: TaskBundle, emb: dict) -> dict:
