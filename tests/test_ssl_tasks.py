@@ -125,19 +125,6 @@ def test_forward_and_loss_with_dense_slots():
     assert model.seg.dense_head.weight.grad is not None
 
 
-def test_old_checkpoints_load_into_a_model_with_dense_tasks():
-    cfg = _cfg()
-    old_reg = REG.subset(REG.train_ids({}))
-    torch.manual_seed(0)
-    old = BrainQuery(build_encoder(cfg, CPU, synthetic=True), old_reg, cfg["model"])
-    state = old.state_dict()
-    state["type_emb.weight"] = state["type_emb.weight"][:5]          # a checkpoint from before the dense type
-    old2 = BrainQuery(build_encoder(cfg, CPU, synthetic=True), old_reg, cfg["model"])
-    old2.load_state_dict(state)                                       # strict: no dense head, padded type table
-    assert old2.seg.dense_head is None
-    assert torch.equal(old2.type_emb.weight[:5], state["type_emb.weight"])
-
-
 def test_synthesis_pairs_share_a_grid_and_cbct_asks_for_its_ct(tmp_path):
     from brain.multitask import labels
 

@@ -28,7 +28,7 @@ model:
   init_from: runs/v4/scratch_s42/last.pt
   checkpoint: true
   taps: [3, 7]
-  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  slot: {dim: 256, layers: 3, heads: 8}
   seg:
     widths: [128, 64, 32, 16]
   rope_fp32: false

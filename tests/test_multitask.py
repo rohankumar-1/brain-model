@@ -28,11 +28,10 @@ def _cfg(**aug):
     return cfg
 
 
-def _model(tokens: bool = True, **slot):
-    """The default (task-token) model, or with ``tokens=False`` the slot readout older checkpoints use."""
+def _model(tokens: bool = True):
+    """The default (task-token) model, or with ``tokens=False`` the slot readout (the ResNet specialists')."""
     torch.manual_seed(0)
     cfg = _cfg()
-    cfg["model"]["slot"].update(slot)
     cfg["model"]["task_tokens"]["enabled"] = tokens
     model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), REG, cfg["model"]).eval()
     if tokens:
@@ -98,14 +97,6 @@ def test_slots_are_permutation_equivariant():
 
 
 @torch.no_grad()
-def test_cross_task_off_makes_slots_independent():
-    cfg, model = _model(tokens=False, cross_task=False)
-    b = _prepared(cfg)
-    n = b["x"].shape[0]
-    alone, both = (model(b["x"], b["keep"], torch.tensor([t] * n), NO_SEG)["binary"][:, 0] for t in ([1], [1, 4, 5]))
-    assert torch.allclose(alone, both, atol=1e-5)
-
-
 @torch.no_grad()
 def test_multiclass_logits_cover_only_the_tasks_classes():
     cfg, model = _model()

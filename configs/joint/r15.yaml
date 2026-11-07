@@ -60,7 +60,7 @@ model:
   checkpoint: true
   init_from: null
   taps: [3, 7]
-  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  slot: {dim: 256, layers: 3, heads: 8}
   seg:
     widths: [128, 96, 64, 64]
     shared: true

@@ -141,9 +141,8 @@ def _multitask_defaults() -> dict[str, Any]:
                   # from-scratch ViT only: widths of a two-stage convolution stem before the token grid
                   # (patch_embed.ConvStemEmbed3D, e.g. [32, 64]); None = the plain linear patch embedding
                   "conv_stem": None,
-                  # ``dim``: the heads' width. layers / heads / cross_task: the slot readout of checkpoints before
-                  # task tokens (task_tokens.enabled: false)
-                  "slot": {"dim": 256, "layers": 3, "heads": 8, "cross_task": True},
+                  # ``dim``: the heads' width. layers / heads: the slot readout (task_tokens.enabled: false)
+                  "slot": {"dim": 256, "layers": 3, "heads": 8},
                   # shared: decode once per volume with a 1x1 output per task (SharedSegDecoder; tasks.all_seg asks
                   # every mask), instead of once per segmentation slot
                   # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout

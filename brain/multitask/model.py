@@ -1,27 +1,27 @@
 """BrainQuery (BQ): the project's model, a 3D BrainEncoder that answers task queries.
 
-Named checkpoints (``configs/bench/models.yaml``): BQ-v3 is the self-supervised encoder alone; BQ-R6 / BQ-A1 the slot
-readout runs; BQ-T1 / BQ-A2 the task-token runs. The pieces:
+Named checkpoints (``configs/bench/models.yaml``): BQ-v3 / BQ-v4 are the self-supervised encoders alone; BQ-R7 ..
+BQ-R14 (and R14-F) the task-token runs. The pieces:
 
     token_t = task_emb[t] + type_emb[type_t]                  one token per trained task, in the encoder's sequence
     tokens  = encoder([CLS | task tokens | patches])          task tokens see the patches and themselves, never each
                                                               other; patches read them (OMNI, arXiv 2610.12574)
     output  = typed head(proj(token_t))                       shared per output type, conditioned only by the token
 
-Heads are shared by every task of a type (binary logit, standardised regression value, survival hazards, the
-segmentation decoder via FiLM, whose ``dense_head`` answers the dense (self-supervised intensity) tasks; multiclass
+Heads are shared by every task of a type (binary logit, standardised regression value, the segmentation decoder via
+FiLM, whose ``dense_head`` answers the dense (self-supervised intensity) tasks; multiclass
 scores the token against learned per-(task, class) vectors). Every trained
 task's token is always in the sequence, so an answer never depends on which other tasks were asked; a held-out task
 gets a read-only token (it reads the scan, nothing reads it), so few-shot fits only its embedding row.
 
-``task_tokens.enabled: false`` is the earlier readout (runs up to 2026-10-26, e.g. run 6 and A1), kept so those
-checkpoints load: slot queries cross-attend to the finished encoding through ``slot.layers`` slot layers.
+``task_tokens.enabled: false`` is the slot readout (the from-scratch specialists in ``configs/single``, whose ResNet
+encoders have no sequence for task tokens): slot queries cross-attend to the finished encoding through ``slot.layers``
+slot layers.
 """
 
 from __future__ import annotations
 
 import math
-import re
 
 import torch
 import torch.nn as nn
@@ -40,24 +40,20 @@ def mlp(cin: int, hidden: int, cout: int) -> nn.Sequential:
 
 
 class SlotLayer(nn.Module):
-    def __init__(self, dim: int, heads: int, cross_task: bool = True):
+    """A slot query reads the encoding (cross-attention), then the other slots of its scan (self-attention)."""
+
+    def __init__(self, dim: int, heads: int):
         super().__init__()
         self.n1, self.n2, self.n3 = nn.LayerNorm(dim), nn.LayerNorm(dim), nn.LayerNorm(dim)
         self.cross = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.self_attn = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.mlp = mlp(dim, 4 * dim, dim)
-        self.cross_task = bool(cross_task)
 
     def forward(self, q, slot_pad, kv, kv_pad):
         h = self.n1(q)
         q = q + self.cross(h, kv, kv, key_padding_mask=kv_pad, need_weights=False)[0]
         h = self.n2(q)
-        mask = None
-        if not self.cross_task:                       # each slot sees only itself
-            k = q.shape[1]
-            mask = ~torch.eye(k, dtype=torch.bool, device=q.device)
-        q = q + self.self_attn(h, h, h, key_padding_mask=None if mask is not None else slot_pad, attn_mask=mask,
-                               need_weights=False)[0]
+        q = q + self.self_attn(h, h, h, key_padding_mask=slot_pad, need_weights=False)[0]
         return q + self.mlp(self.n3(q))
 
 
@@ -100,15 +96,6 @@ class SegDecoder(nn.Module):
         # dense (intensity) slots: their own 1x1 output; only built for a registry with dense tasks, so earlier
         # checkpoints load unchanged
         self.dense_head = nn.Conv3d(widths[-1], 1, 1) if dense else None
-        self._register_load_state_dict_pre_hook(self._legacy_keys)
-
-    @staticmethod
-    def _legacy_keys(state, prefix, *_):
-        """Checkpoints from before the shared ``conv3d.Res`` named its two convolutions ``a`` / ``b``."""
-        for k in [k for k in state if k.startswith(prefix)]:
-            new = re.sub(r"\.a\.(\d)", r".block.0.\1", re.sub(r"\.b\.(\d)", r".block.1.\1", k[len(prefix):]))
-            if new != k[len(prefix):]:
-                state[prefix + new] = state.pop(k)
 
     @staticmethod
     def _mod(x, film, cond):
@@ -204,12 +191,6 @@ class BrainQuery(nn.Module):
         self.backbone = backbone
         self.reg = reg
         d_enc, dim = backbone.embed_dim, int(s.get("dim", 256))
-        for key, plain in (("mode", "slots"), ("embedding", "learned")):
-            if str(s.get(key, plain)) != plain:          # ablations retired on 2026-10-27 (text / shared readouts)
-                raise ValueError(f"slot.{key}={s[key]} is no longer supported")
-        if s.get("width") or (cfg.get("general") or {}).get("enabled"):
-            raise ValueError("slot.width and model.general are no longer supported")
-        self.mode = "slots"
         self.taps = tuple(int(t) for t in cfg.get("taps", (3, 7)) if int(t) < backbone.depth - 1)
         n_tasks, n_cls = len(reg), reg.max_classes()
         # ``task_tokens.enabled``: OMNI-style (arXiv 2610.12574) task tokens inside the encoder instead of slot layers
@@ -218,7 +199,6 @@ class BrainQuery(nn.Module):
         # encoder's width then.
         self.tokens = bool((cfg.get("task_tokens") or {}).get("enabled", False))
         if self.tokens:
-            self.mode = "tokens"
             self.register_buffer("tt_write", torch.zeros(n_tasks, dtype=torch.bool))
         qdim = d_enc if self.tokens else dim
         # task identity
@@ -238,16 +218,14 @@ class BrainQuery(nn.Module):
                              persistent=False)
         if self.tokens:
             self.tt_proj = nn.Linear(d_enc, dim)                # a task token's output -> the heads' input
-            self._register_load_state_dict_pre_hook(self._unused_slot_keys)
         else:
-            # slot readout (checkpoints before task tokens): tokens -> keys / values with an absolute position code
+            # slot readout: tokens -> keys / values with an absolute position code
             # (RoPE leaves tokens position-relative), then the slot layers
             self.kv_norm = nn.LayerNorm(d_enc)
             self.kv = nn.Linear(d_enc, dim)
             self.pos = mlp(3, dim, dim)
             self.cls_pos = nn.Parameter(torch.zeros(1, 1, dim))
-            self.layers = nn.ModuleList(SlotLayer(dim, int(s.get("heads", 8)), bool(s.get("cross_task", True)))
-                                        for _ in range(int(s.get("layers", 3))))
+            self.layers = nn.ModuleList(SlotLayer(dim, int(s.get("heads", 8))) for _ in range(int(s.get("layers", 3))))
         self.out_norm = nn.LayerNorm(dim)
         # typed heads, shared across tasks
         self.binary = mlp(dim, dim, 1)
@@ -277,8 +255,7 @@ class BrainQuery(nn.Module):
             self.tok_bias = nn.Parameter(torch.tensor(-3.0))          # prior ~5% of tokens on
         self.cls_query = nn.Linear(dim, dim)
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
-        n_bins = max([len(t.survival_bins) for t in reg.tasks] + [1])
-        self.survival = mlp(dim, dim, n_bins)
+        self.survival = mlp(dim, dim, 1)        # no survival task is trained or asked: kept so checkpoints load
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
         # ``seg.shared``: decode once per volume, a 1x1 output per task (SharedSegDecoder); else once per slot
@@ -288,21 +265,6 @@ class BrainQuery(nn.Module):
             in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
             dense=any(t.type == "dense" for t in reg.tasks),
             **({"n_tasks": n_tasks, "head_hidden": int(seg_cfg.get("head_hidden", 0))} if self.seg_shared else {}))
-        self._register_load_state_dict_pre_hook(self._pad_type_emb)
-
-    @staticmethod
-    def _unused_slot_keys(state, prefix, *_):
-        """Task-token checkpoints from 2026-10-26 also carry the slot readout's (never used) key / value projection."""
-        for k in [k for k in state if k.startswith(prefix) and
-                  k[len(prefix):].startswith(("kv_norm.", "kv.", "pos.", "cls_pos"))]:
-            state.pop(k)
-
-    def _pad_type_emb(self, state, prefix, *_):
-        """Checkpoints from before the ``dense`` type have one ``type_emb`` row fewer: keep this model's extra rows."""
-        k = prefix + "type_emb.weight"
-        if k in state and state[k].shape[0] < self.type_emb.weight.shape[0]:
-            extra = self.type_emb.weight.detach()[state[k].shape[0]:].to(state[k].device, state[k].dtype)
-            state[k] = torch.cat([state[k], extra])
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):
@@ -433,8 +395,7 @@ class BrainQuery(nn.Module):
         t = task.clamp_min(0)
         logits = torch.einsum("bkd,bkcd->bkc", self.cls_query(z), self.cls_emb[t]) / math.sqrt(self.cls_emb.shape[-1])
         valid = torch.arange(logits.shape[-1], device=z.device) < self.n_classes[t].unsqueeze(-1)
-        out = {"binary": self.binary(z)[..., 0], "multiclass": logits.masked_fill(~valid, float("-inf")),
-               "survival": self.survival(z)}
+        out = {"binary": self.binary(z)[..., 0], "multiclass": logits.masked_fill(~valid, float("-inf"))}
         if self.regress_bins is None:
             out["regression"] = self.regress(z)[..., 0]
         else:

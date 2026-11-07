@@ -41,7 +41,6 @@ model:
     dim: 256
     layers: 3
     heads: 8
-    cross_task: true
   seg:
     widths:
     - 128

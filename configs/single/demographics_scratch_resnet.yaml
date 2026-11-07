@@ -28,7 +28,7 @@ model:
   resnet: {widths: [64, 128, 240, 384], blocks: [2, 2, 2, 2]}
   checkpoint: true
   taps: [3, 7]
-  slot: {dim: 256, layers: 3, heads: 8, cross_task: true}
+  slot: {dim: 256, layers: 3, heads: 8}
   seg:
     widths: [128, 64, 32, 16]
   rope_fp32: true
