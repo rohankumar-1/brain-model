@@ -189,6 +189,22 @@ def scatter_kept(packed: torch.Tensor, keep: torch.Tensor) -> torch.Tensor:
     return torch.where(keep.unsqueeze(-1), gathered, torch.zeros_like(gathered))
 
 
+def bucket_rows(plan: tuple[torch.Tensor, list[int], list[int]], device) -> tuple[torch.Tensor, list]:
+    """A length plan (``batch3d.length_plan``: row order, bucket sizes, longest row per bucket) as the order on
+    ``device`` and one (row indices, longest) pair per bucket."""
+    order, sizes, longest = plan
+    order = order.to(device, non_blocking=True)
+    starts = [sum(sizes[:i]) for i in range(len(sizes))]
+    return order, [(order[s:s + n], m) for s, n, m in zip(starts, sizes, longest)]
+
+
+def in_input_order(parts: list[torch.Tensor], order: torch.Tensor) -> torch.Tensor:
+    """Per-bucket outputs (rows in ``order``) joined back into input row order."""
+    inverse = torch.empty_like(order)
+    inverse[order] = torch.arange(order.numel(), device=order.device)
+    return torch.cat(parts)[inverse]
+
+
 class Predictor(nn.Module):
     """Fills in the masked tokens of a crop from the visible ones.
 
@@ -215,20 +231,15 @@ class Predictor(nn.Module):
         """``ctx_tokens`` (R, N, D) is zero off ``ctx_keep``; ``keep`` (R, N) is every kept position and
         ``plan`` its length plan. Returns (R, N, latent_dim) and (R, N, pixel_dim) or None."""
         x = torch.where(ctx_keep.unsqueeze(-1), self.norm_in(ctx_tokens), self.mask_token.to(ctx_tokens.dtype))
-        order, sizes, longest = plan
-        order = order.to(x.device, non_blocking=True)
-        out, start = [], 0
-        for size, m in zip(sizes, longest):
-            idx = order[start:start + size]
-            start += size
+        order, buckets = bucket_rows(plan, x.device)
+        out = []
+        for idx, m in buckets:
             seq, seq_coords, pad, _ = pack_kept(x[idx], coords_mm[idx], keep[idx], max_keep=m)
             mask = None if seq.size(0) == 1 else _key_mask(pad, seq.dtype)
             for block in self.blocks:
                 seq = block(seq, seq_coords, mask)
             out.append(scatter_kept(self.norm(seq), keep[idx]))
-        inverse = torch.empty_like(order)
-        inverse[order] = torch.arange(order.numel(), device=order.device)
-        h = torch.cat(out)[inverse]
+        h = in_input_order(out, order)
         return self.latent(h), (self.pixel(h) if self.pixel is not None else None)
 
 
@@ -519,20 +530,15 @@ class BrainEncoder(nn.Module):
         never interact, so this changes cost, not values. ``longest`` comes from the CPU: no GPU sync.
         """
         emb, _ = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True, meta=meta)
-        order, sizes, longest = plan
-        order = order.to(emb.device, non_blocking=True)
-        pooled, dense, start = [], [], 0
-        for size, m in zip(sizes, longest):
-            idx = order[start:start + size]
-            start += size
+        order, buckets = bucket_rows(plan, emb.device)
+        pooled, dense = [], []
+        for idx, m in buckets:
             seq, seq_coords, pad, _ = pack_kept(emb[idx], coords_mm[idx], keep[idx], max_keep=m)
             prefix, x, _, _ = self._run(seq, seq_coords, pad)
             pooled.append(self._pool(prefix, x, pad))
             if tokens:
                 dense.append(scatter_kept(x, keep[idx]))
-        inverse = torch.empty_like(order)
-        inverse[order] = torch.arange(order.numel(), device=order.device)
-        return torch.cat(pooled)[inverse], (torch.cat(dense)[inverse] if tokens else None)
+        return in_input_order(pooled, order), (in_input_order(dense, order) if tokens else None)
 
     def count_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
