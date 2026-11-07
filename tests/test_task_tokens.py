@@ -103,7 +103,7 @@ def test_trainer_runs_task_tokens_on_phantoms(tmp_path):
     from brain.train import engine
 
     engine.run(["multitask", "--synthetic", "--max-steps", "2", "--log-every", "1", "--out-dir", str(tmp_path),
-                "--set", "optim.freeze_steps=0", "--set", "model.task_tokens.enabled=true"])
+                "--set", "model.task_tokens.enabled=true"])
 
 
 @torch.no_grad()

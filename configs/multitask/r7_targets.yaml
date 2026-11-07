@@ -87,14 +87,13 @@ aug:
     p: 0.2
     mm: [10, 40]
   skull_strip: {p: 0.3}
-loss: {balance: uncertainty, ema_decay: 0.99, seg_stride: 2, uncertainty_clamp: 1.0}
+loss: {seg_stride: 2, uncertainty_clamp: 1.0}
 optim:
   lr: 0.0003
   enc_lr_mult: 1.0
   layer_decay: 0.75
   weight_decay: 0.05
   warmup_steps: 1000
-  freeze_steps: 0
   clip_grad: 1.0
   batch_size: 8
   schedule: cosine

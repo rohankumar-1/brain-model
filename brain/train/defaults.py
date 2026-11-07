@@ -185,11 +185,10 @@ def _multitask_defaults() -> dict[str, Any]:
         # sparse_pos_weight: target-voxel / target-cell weight of losses.sparse_seg_loss (registry ``sparse`` tasks).
         # token_weight / slice_weight (need model.token_map): token-map losses added to a slot's loss, on mask tasks'
         # token occupancy (losses.token_occupancy_loss) and on RSNA slice labels (losses.slab_mil_loss)
-        "loss": {"balance": "uncertainty", "ema_decay": 0.99, "seg_stride": 2, "sparse_pos_weight": 20.0,
+        "loss": {"seg_stride": 2, "sparse_pos_weight": 20.0,
                  "negative_tasks": [], "token_weight": 0.0, "slice_weight": 0.0, "box_weight": 0.0},
-        # freeze_steps: slot-readout runs only (the encoder trains from step 0 with task tokens inside it)
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
-                  "warmup_steps": 1000, "freeze_steps": 0, "clip_grad": 1.0, "batch_size": 8},
+                  "warmup_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
         # ema_decay: weight average (brain.train.engine.WeightEMA), evaluated beside the live weights; None = off
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
                   "keep_every": 5000, "stop_poll": 20, "best_metric": "score",   # validation skill (brain.eval.skill)

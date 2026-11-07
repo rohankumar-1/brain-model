@@ -89,7 +89,7 @@ def test_dense_consensus_counts_views_not_tokens():
 
 
 def test_uncertainty_weights_are_clamped_and_the_data_term_stays_positive():
-    bal = Balancer(3, "uncertainty", clamp=1.0)
+    bal = Balancer(3, clamp=1.0)
     with torch.no_grad():
         bal.log_var.copy_(torch.tensor([-5.0, 0.0, 5.0]))
     w = bal.weights()

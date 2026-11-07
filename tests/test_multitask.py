@@ -114,19 +114,18 @@ def test_losses_are_masked_per_slot_and_balanced_per_task():
     out = model(b["x"], b["keep"], b["task"], b["seg_pair"])
     loss, has = slot_losses(out, b["task"], b["y"], model.task_type, b["seg"], b["seg_pair"])
     assert not has[b["task"] < 0].any() and (loss[~has] == 0).all()
-    for mode in ("uniform", "ema", "uncertainty"):
-        total, per_task = Balancer(len(REG), mode)(loss, has, b["task"])
-        assert torch.isfinite(total) and (per_task >= 0).all()
+    total, per_task = Balancer(len(REG))(loss, has, b["task"])
+    assert torch.isfinite(total) and (per_task >= 0).all()
     total.backward()
     assert model.task_emb.weight.grad is not None
 
 
 def test_balancer_weighs_groups_not_task_counts():
-    bal = Balancer(len(REG), "uniform", group_of=[REG.groups.index(t.group) for t in REG.tasks])
+    bal = Balancer(len(REG), group_of=[REG.groups.index(t.group) for t in REG.tasks])
     many = [REG.index[t.id] for t in REG.trained if t.group == "anatomy_volume"][:10]
     task = torch.tensor([many + [REG.index["age"]]])
     total, _ = bal(torch.tensor([[1.0] * len(many) + [3.0]]), torch.ones_like(task, dtype=torch.bool), task)
-    assert abs(float(total) - 2.0) < 1e-5            # (group means 1 and 3) / 2, not (10 + 3) / 11
+    assert abs(float(total) - 2.0) < 1e-5            # (group means 1 and 3) / 2, not (10 + 3) / 11 (s = 0)
 
 
 def test_seg_loss_prefers_the_right_mask():
@@ -209,12 +208,12 @@ def test_fewshot_fits_only_the_held_out_row():
 
 
 def test_trainer_runs_on_phantoms(tmp_path):
-    """Three steps of the slot readout across its encoder-freeze boundary, on phantoms (raises on any failure); the
-    task-token trainer has its own test (test_task_tokens)."""
+    """Three steps of the slot readout on phantoms (raises on any failure); the task-token trainer has its own test
+    (test_task_tokens)."""
     from brain.train import engine
 
     engine.run(["multitask", "--synthetic", "--max-steps", "3", "--log-every", "1", "--out-dir", str(tmp_path),
-                "--set", "optim.freeze_steps=1", "--set", "model.task_tokens.enabled=false"])
+                "--set", "model.task_tokens.enabled=false"])
 
 
 def test_weight_average_is_saved_evaluated_and_resumed(tmp_path, monkeypatch):

@@ -6,8 +6,7 @@
 The encoder starts from ``model.init_from`` (its architecture and token grid are copied into this run's config, so
 frozen evaluation loads these checkpoints like any 3D encoder: ``model`` is the encoder) and trains at ``enc_lr_mult``
 x the LR with layer-wise decay. The tasks enter as task tokens inside the encoder (``model.task_tokens``, the default);
-checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``tasks`` (registry order). Runs with the
-older slot readout (``task_tokens.enabled: false``) may freeze the encoder for ``optim.freeze_steps`` first.
+checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``tasks`` (registry order).
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from brain.multitask.registry import load_registry
 from brain.train import engine
 
 # log column per task group: the raw (unbalanced) mean loss of the group's tasks, averaged over the steps of the
-# logging window in which the group was asked (the balanced ``loss`` sits near 1 by construction under ``ema``)
+# logging window in which the group was asked (the balanced ``loss`` is weighted by the learned uncertainties)
 GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich", "tumor": "tumor",
                  "derived": "derived", "anatomy_seg": "aseg", "anatomy_volume": "avol", "lesion": "lesion",
                  "ssl_recon": "recon", "synthesis": "synth"}
@@ -132,7 +131,6 @@ class Trainer(engine.Trainer):
         o, d, tk = cfg["optim"], cfg["data"], cfg["tasks"]
         self.batch = int(o["batch_size"])
         self.batch_units = self.batch * rt.world
-        self.freeze_steps = int(o.get("freeze_steps", 0))
         self.clip = float(o.get("clip_grad", 1.0))
         self.stride = int(cfg["loss"].get("seg_stride", 2))
         self.amp = dict(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda")
@@ -144,15 +142,10 @@ class Trainer(engine.Trainer):
         enc = self.build_encoder(cfg, dev, args.synthetic)
         self.patch = tuple(enc.patch_xyz)
         self.raw = BrainQuery(enc, self.reg, cfg["model"]).to(dev)
-        if self.raw.tokens and self.freeze_steps:
-            # task tokens live inside the encoder: a no-grad encoder (freeze) would leave them untrained
-            raise SystemExit("model.task_tokens needs optim.freeze_steps=0")
         self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids])
         groups = self.reg.groups
         gw = tk.get("group_weights") or {}
-        self.balancer = Balancer(len(self.reg), cfg["loss"].get("balance", "ema"),
-                                 float(cfg["loss"].get("ema_decay", 0.99)),
-                                 group_of=[groups.index(t.group) for t in self.reg.tasks],
+        self.balancer = Balancer(len(self.reg), group_of=[groups.index(t.group) for t in self.reg.tasks],
                                  group_weight=[float(gw.get(g, 1.0)) for g in groups],
                                  clamp=cfg["loss"].get("uncertainty_clamp")).to(dev)
         self.module = self.raw
@@ -239,7 +232,7 @@ class Trainer(engine.Trainer):
         n_all = sum(p.numel() for p in self.raw.parameters())
         self._banner = (f"enc={enc.size} patch={self.patch} enc_params={n_enc:,} head_params={n_all - n_enc:,} "
                         f"tasks={len(self.train_ids)}/{len(self.reg)} batch={self.batch}x{rt.world} "
-                        f"freeze={self.freeze_steps} " + getattr(self, "_banner_extra", ""))
+                        + getattr(self, "_banner_extra", ""))
 
     def build_encoder(self, cfg: dict, device: torch.device, synthetic: bool):
         """The encoder (overridden by brain.train.joint, whose encoder also carries the SSL projector)."""
@@ -285,7 +278,7 @@ class Trainer(engine.Trainer):
         """(positional args, keyword args) of BrainQuery's forward, and the token-map pairs ``task_loss`` needs."""
         seg_tok, slab_pair = self._token_pairs(b)
         tok_pair = torch.cat([seg_tok, slab_pair]) if len(seg_tok) or len(slab_pair) else None
-        kw = dict(encoder_grad=step >= self.freeze_steps, meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
+        kw = dict(meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
                   study=b.get("study"))
         return (b["x"], b["keep"], b["task"], b["seg_pair"]), kw, (seg_tok, slab_pair)
 
