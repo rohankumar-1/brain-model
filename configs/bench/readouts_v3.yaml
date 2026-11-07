@@ -1,7 +1,7 @@
 # The pinned readout per benchmark task (python -m brain.bench pin): the head with the best mean validation
 # score over the models listed, never chosen on test. Re-pin only with a new benchmark version.
 version: 3
-pinned_utc: '2026-11-06T15:06:50+00:00'
+pinned_utc: '2026-11-06T16:37:57+00:00'
 from_models:
 - BQ-random
 - BQ-R10
@@ -10,15 +10,17 @@ from_models:
 - BQ-R13
 - BQ-R13-EMA
 - BQ-R14
+- BQ-R14-EMA
 - brainiac
 - ct_fm
+- ct_fm_triage
 index_sha1: 1ab77c50b4f5b42c40110f742e644bc5755484f4
 readouts:
-  rsna_ich: linear
+  rsna_ich: spatial
   cq500: tok_conv
   cq500_edh: spatial
   cq500_other_fracture: spatial
-  cq500_bleed_side: tok_conv
+  cq500_bleed_side: spatial
   aisd_remote_infarct: tok_conv
   isles24_lvo_side: tok_conv
   isles24_mrs: spatial
@@ -42,7 +44,7 @@ readouts:
   ucsf_survival_12m: tok_conv
   upenn_survival_12m: mlp
   upenn_mgmt: tok_conv
-  rsna_ica_cta_aneurysm: spatial
+  rsna_ica_cta_aneurysm: linear
   rsna_ica_mr_aneurysm: tok_conv
   adni_dx3: tok_conv
   adni_cn_ad: tok_conv

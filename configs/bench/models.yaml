@@ -41,6 +41,7 @@ models:
   BQ-R13-EMA:     {ckpt: runs/multitask/r13/last_ema.pt, note: "R13's weight average (decay 0.999) at step 75k"}
   BQ-R14:         {ckpt: runs/multitask/r14/last.pt, note: "R13 + 25k steps: true negatives (labels v11 empty masks, 3,006 RSNA bleed pseudo-masks), negative_seg_loss, skull-strip matching, synthetic contrast, gantry shear, audit fixes (configs/multitask/r14.yaml)"}
   BQ-R14-EMA:     {ckpt: runs/multitask/r14/last_ema.pt, note: "R14's weight average (decay 0.999) at step 100k"}
+  BQ-R14F:        {ckpt: runs/multitask/r14f/last.pt, note: "R14 + 15k steps with study-level input: a study's co-registered sequences fused inside the encoder after block 8 (configs/multitask/r14f.yaml); scored on single scans here"}
   BQ-R13-centergate: {ckpt: runs/multitask/r13/last_centergate.pt, note: "R13's weights read out with the centre-voxel token gate instead of its 25% gate (gate test)"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
