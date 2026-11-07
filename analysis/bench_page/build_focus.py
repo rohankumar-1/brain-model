@@ -133,7 +133,6 @@ page = f'''<title>BrainQuery Headline Scores</title>
   {trained()}
 
   <ol class="notes">
-    <li>Provisional (6 November): R14’s ATLAS, aneurysm, ADNI and PPMI cells (9 tasks) lack the 3D-conv probe until their re-run finishes, so they show R14’s best other readout and R14’s mean skill is understated; R14 avg’s CTA aneurysm cell is being re-run.</li>
     <li>AUC: AUROC, 0.5 = chance. R²: variance explained. Skill rescales each metric so 0 = chance, 1 = perfect.
       n (pos): test scans (positives).</li>
     <li>Random init: the BrainQuery encoder untrained, the floor for frozen transfer.</li>
