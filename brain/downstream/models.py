@@ -17,7 +17,7 @@ single-task, random init; shown by its registry name when it has one, else as ``
 Every encoder the suite uses has ``encode_volume(path, volume_id, modality, window) -> VolumeEmbedding``: patch tokens
 (T, D) with normalised positions and a foreground mask, plus optional global vectors (CLS, registers). Our 3D encoder
 (``embed3d.FrozenEncoder3D``) returns its 20 x 16 x 16 token grid; an encoder with only a global embedding returns it
-as one token and as ``cls``, so the suite reads it out with its global heads. Published encoders subclass
+as one token and as ``cls``, so the suite reads it out with its pooled heads. Published encoders subclass
 ``ExternalEncoder`` and implement ``encode`` on the stored volume (1 mm MNI grid, 256 x 256 x 160; CT in HU, MRI as a
 robust z-score), doing their own resampling and intensity normalisation there.
 """
@@ -37,7 +37,7 @@ from brain.common.paths import REPO_ROOT, resolve
 MODELS_YAML = REPO_ROOT / "configs" / "bench" / "models.yaml"
 
 # What a model learned from. Comparisons are made within a class, or across classes with the label overlap removed:
-#   ssl          images only (our LeJEPA / MAE encoders, BrainIAC, Brain2Vec, CT-FM, ...)
+#   ssl          images only (our LeJEPA encoders, BrainIAC, Brain2Vec, CT-FM, ...)
 #   supervised   labels of other tasks in pretraining (our multitask / joint models, SFCN, BrainFM, ...)
 #   specialist   trained end to end on the evaluated task itself (single-task models, nnU-Net): a per-task ceiling
 #   baseline     no learning or no pretraining (random init, hand-crafted features): the floor
@@ -81,7 +81,7 @@ class ModelRef:
             ck = torch.load(self.ckpt, map_location=device, weights_only=False)
             state = {str(k).removeprefix("_orig_mod."): v for k, v in ck["model"].items()}
             if not is_brain3d_state(state):
-                raise SystemExit(f"{self.ckpt}: not a 3D BrainEncoder checkpoint (the 2D slice ViT was retired)")
+                raise SystemExit(f"{self.ckpt}: not one of our 3D encoder checkpoints")
             return load_brain3d(ck, device)
         mod, _, cls = str(self.spec["adapter"]).partition(":")
         return getattr(importlib.import_module(mod), cls)(self.spec, device)
@@ -247,7 +247,7 @@ class ExternalEncoder:
     def to_token_grid(self, fmap: torch.Tensor, affine: np.ndarray, vol_xyz: np.ndarray, modality: str,
                       attrs: dict) -> dict:
         """A model's feature map ``fmap`` (C, A0, A1, A2; voxel index -> RAS mm by ``affine``) sampled at our token
-        centres, so its tokens take the same readouts as ours (``tok_conv``, plane / grid / global PCA): ``tokens``
+        centres, so its tokens take the same readouts as ours (``spatial``, ``tok_conv``): ``tokens``
         (5120, C) in our (Z, Y, X) order, ``xyz`` as our encoder gives them, ``keep`` = our foreground gate and inside
         the model's field of view."""
         from brain.common.grid import GRID_XYZ, PATCH_XYZ

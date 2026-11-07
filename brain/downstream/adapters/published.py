@@ -3,7 +3,7 @@
 Each adapter rebuilds the model's own input from the stored volume: its orientation, grid, field of view and intensity
 scaling, resampled from the store's 1 mm MNI152 grid (``ExternalEncoder.resample``), never from our encoder's windows.
 Its global feature is the one the authors publish; its spatial features are sampled at our token centres
-(``ExternalEncoder.to_token_grid``), so the same readouts (``tok_conv``, plane / grid PCA) apply to every model.
+(``ExternalEncoder.to_token_grid``), so the same readouts (``spatial``, ``tok_conv``) apply to every model.
 Weights are loaded from safetensors only (no pickles from third parties). Both need MONAI (``pip install --user
 --no-deps monai``; the jobs' user site has 1.5.1).
 
