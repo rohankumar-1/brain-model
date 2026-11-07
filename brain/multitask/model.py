@@ -57,16 +57,32 @@ class SlotLayer(nn.Module):
         return q + self.mlp(self.n3(q))
 
 
+def _mlp_heads(f, hw, hb, w, b):
+    """Per-voxel task MLPs: ``f`` (C, Z, Y, X) shared features -> (K, Z, Y, X) logits through (K, C, H) / (K, H) weights."""
+    g = F.gelu(torch.einsum("czyx,kch->khzyx", f, hw) + hb.view(*hb.shape, 1, 1, 1))
+    return torch.einsum("khzyx,kh->kzyx", g, w) + b.view(-1, 1, 1, 1)
+
+
 class SegDecoder(nn.Module):
     """Token grid (+ earlier-block taps) -> one logit map at ``out_stride`` per segmentation slot.
 
     The slot-independent parts (token projection, an image pyramid for detail the 16 mm tokens lack) run once per
-    volume; the upsampling stages run once per segmentation slot, each stage FiLM-modulated by the slot
-    (x * (1 + gamma) + beta, zero-initialised so training starts from the unconditioned decoder).
+    volume. ``conditioned`` (the default): the upsampling stages run once per segmentation slot, each stage
+    FiLM-modulated by the slot (x * (1 + gamma) + beta, zero-initialised so training starts from the unconditioned
+    decoder); ``dense`` adds a 1x1 output for dense (intensity) slots, built only for a registry with dense tasks.
+
+    ``conditioned=False`` (2026-11-04, ``model.seg.shared``): decoded once per volume, no FiLM, and a 1x1 output per
+    registry task (``chan``: the slot's task index) read from the shared top features. The per-slot decoder runs every
+    upsampling stage once per segmentation slot (a third of a ViT-B training step at 3 slots per scan); this one's cost
+    does not grow with the slots, so a scan can be asked all its masks every step (``tasks.all_seg``). Gives up
+    query-conditioned decoding of tasks the registry lacks. ``head_hidden`` > 0 (v2, 2026-11-05): each task reads the
+    shared features through its own small per-voxel MLP (C -> head_hidden -> 1, GELU) instead of a 1x1 linear map;
+    with 16 shared channels the linear readout starved the ~25 spatial tasks (decoder pilot: anatomy Dice 0.42 vs 0.63
+    per slot, tumour collapsed), so v2 also widens the shared stages (``model.seg.widths``, e.g. 128 / 96 / 64 / 64).
     """
 
     def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
-                 dense: bool = False):
+                 dense: bool = False, conditioned: bool = True, n_tasks: int = 1, head_hidden: int = 0):
         super().__init__()
         pz, py, px = patch_zyx
         n_z, n_xy = int(math.log2(pz)) - 1, int(math.log2(py)) - 1  # upsamplings to stride 2 per axis
@@ -74,6 +90,7 @@ class SegDecoder(nn.Module):
             raise ValueError(f"patch {patch_zyx} needs {n_xy} upsamplings, decoder has {len(widths) - 1}")
         widths = tuple(widths[len(widths) - 1 - n_xy:])                # the finest n_xy + 1 widths
         n_up = n_xy
+        self.conditioned = bool(conditioned)
         self.steps = [(2 if i < n_z else 1, 2, 2) for i in range(n_up)]
         self.stem = nn.Sequential(nn.Conv3d(in_dim, widths[0], 1, bias=False), group_norm(widths[0]), nn.GELU(),
                                   Res(widths[0], widths[0]))
@@ -88,62 +105,14 @@ class SegDecoder(nn.Module):
             nn.Sequential(nn.ConvTranspose3d(widths[i], widths[i + 1], s, stride=s, bias=False), group_norm(widths[i + 1]),
                           nn.GELU()) for i, s in enumerate(self.steps))
         self.fuse = nn.ModuleList(Res(2 * widths[i + 1], widths[i + 1]) for i in range(n_up))
-        self.film = nn.ModuleList(nn.Linear(cond_dim, 2 * w) for w in widths)
-        for f in self.film:
-            nn.init.zeros_(f.weight)
-            nn.init.zeros_(f.bias)
-        self.head = nn.Conv3d(widths[-1], 1, 1)
-        # dense (intensity) slots: their own 1x1 output; only built for a registry with dense tasks, so earlier
-        # checkpoints load unchanged
-        self.dense_head = nn.Conv3d(widths[-1], 1, 1) if dense else None
-
-    @staticmethod
-    def _mod(x, film, cond):
-        g, b = film(cond).chunk(2, dim=-1)
-        return x * (1 + g.view(*g.shape, 1, 1, 1)) + b.view(*b.shape, 1, 1, 1)
-
-    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
-                dense: torch.Tensor | None = None):
-        """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, in_chans, Z, Y, X); ``rows`` (P,) the volume of each
-        spatial slot, ``cond`` (P, cond_dim) its slot, ``dense`` (P,) bool: the slot is a dense task (``dense_head``).
-        Returns (P, 1, Z/2, Y/2, X/2) logits / intensities."""
-        x = self.stem(grid)
-        feats, h = [], image
-        for p in self.pyramid:
-            h = p(h)
-            feats.append(h)
-        feats = feats[::-1]                                   # coarse to fine, one per decoder stage
-        x = self._mod(x[rows], self.film[0], cond)
-        for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
-            x = fuse(torch.cat([up(x), feats[i][rows]], dim=1))
-            x = self._mod(x, self.film[i + 1], cond)
-        if dense is None or self.dense_head is None or not bool(dense.any()):
-            return self.head(x)
-        return torch.where(dense.view(-1, 1, 1, 1, 1), self.dense_head(x), self.head(x))
-
-
-def _mlp_heads(f, hw, hb, w, b):
-    """Per-voxel task MLPs: ``f`` (C, Z, Y, X) shared features -> (K, Z, Y, X) logits through (K, C, H) / (K, H) weights."""
-    g = F.gelu(torch.einsum("czyx,kch->khzyx", f, hw) + hb.view(*hb.shape, 1, 1, 1))
-    return torch.einsum("khzyx,kh->kzyx", g, w) + b.view(-1, 1, 1, 1)
-
-
-class SharedSegDecoder(SegDecoder):
-    """``SegDecoder`` decoded once per volume (2026-11-04, ``model.seg.shared``): no per-slot FiLM, and a 1x1 output per
-    registry task (``chan``: the slot's task index) read from the shared top features. The per-slot decoder runs every
-    upsampling stage once per segmentation slot (a third of a ViT-B training step at 3 slots per scan); this one's cost
-    does not grow with the slots, so a scan can be asked all its masks every step (``tasks.all_seg``). Gives up
-    query-conditioned decoding of tasks the registry lacks.
-
-    ``head_hidden`` > 0 (v2, 2026-11-05): each task reads the shared features through its own small per-voxel MLP
-    (C -> head_hidden -> 1, GELU) instead of a 1x1 linear map; with 16 shared channels the linear readout starved the
-    ~25 spatial tasks (decoder pilot: anatomy Dice 0.42 vs 0.63 per slot, tumour collapsed), so v2 also widens the
-    shared stages (``model.seg.widths``, e.g. 128 / 96 / 64 / 64)."""
-
-    def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
-                 dense: bool = False, n_tasks: int = 1, head_hidden: int = 0):
-        super().__init__(in_dim, cond_dim, patch_zyx, widths, in_chans, dense=False)
-        del self.film, self.head
+        if self.conditioned:
+            self.film = nn.ModuleList(nn.Linear(cond_dim, 2 * w) for w in widths)
+            for f in self.film:
+                nn.init.zeros_(f.weight)
+                nn.init.zeros_(f.bias)
+            self.head = nn.Conv3d(widths[-1], 1, 1)
+            self.dense_head = nn.Conv3d(widths[-1], 1, 1) if dense else None
+            return
         c, h, t = int(widths[-1]), int(head_hidden), int(n_tasks)                     # the finest decoder width
         self.head_hidden = h
         if h:
@@ -152,17 +121,43 @@ class SharedSegDecoder(SegDecoder):
         self.out_w = nn.Parameter(torch.randn(t, h or c) * 0.02)
         self.out_b = nn.Parameter(torch.zeros(t))
 
-    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
-                dense: torch.Tensor | None = None, chan: torch.Tensor | None = None):
-        if chan is None:
-            raise ValueError("SharedSegDecoder needs the task index of every slot (chan)")
-        uniq, inv = torch.unique(rows, return_inverse=True)
-        x = self.stem(grid[uniq])
-        feats, h = [], image[uniq]
+    @staticmethod
+    def _mod(x, film, cond):
+        g, b = film(cond).chunk(2, dim=-1)
+        return x * (1 + g.view(*g.shape, 1, 1, 1)) + b.view(*b.shape, 1, 1, 1)
+
+    def _pyramid(self, image: torch.Tensor) -> list[torch.Tensor]:
+        """Image features, coarse to fine: one per decoder stage."""
+        feats, h = [], image
         for p in self.pyramid:
             h = p(h)
             feats.append(h)
-        feats = feats[::-1]
+        return feats[::-1]
+
+    def forward(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
+                dense: torch.Tensor | None = None, chan: torch.Tensor | None = None):
+        """``grid`` (B, C, nz, ny, nx) token features, ``image`` (B, in_chans, Z, Y, X); ``rows`` (P,) the volume of each
+        spatial slot, ``cond`` (P, cond_dim) its slot, ``dense`` (P,) bool: the slot is a dense task (``dense_head``),
+        ``chan`` (P,) its task index (unconditioned decoder). Returns (P, 1, Z/2, Y/2, X/2) logits / intensities."""
+        if not self.conditioned:
+            return self._forward_shared(grid, image, rows, chan)
+        x = self.stem(grid)
+        feats = self._pyramid(image)
+        x = self._mod(x[rows], self.film[0], cond)
+        for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
+            x = fuse(torch.cat([up(x), feats[i][rows]], dim=1))
+            x = self._mod(x, self.film[i + 1], cond)
+        if dense is None or self.dense_head is None or not bool(dense.any()):
+            return self.head(x)
+        return torch.where(dense.view(-1, 1, 1, 1, 1), self.dense_head(x), self.head(x))
+
+    def _forward_shared(self, grid: torch.Tensor, image: torch.Tensor, rows: torch.Tensor,
+                        chan: torch.Tensor | None) -> torch.Tensor:
+        if chan is None:
+            raise ValueError("the unconditioned decoder needs the task index of every slot (chan)")
+        uniq, inv = torch.unique(rows, return_inverse=True)
+        x = self.stem(grid[uniq])
+        feats = self._pyramid(image[uniq])
         for i, (up, fuse) in enumerate(zip(self.ups, self.fuse)):
             x = fuse(torch.cat([up(x), feats[i]], dim=1))
         w, b = self.out_w[chan].to(x.dtype), self.out_b[chan].to(x.dtype)               # (P, C or H), (P,)
@@ -258,13 +253,13 @@ class BrainQuery(nn.Module):
         self.survival = mlp(dim, dim, 1)        # no survival task is trained or asked: kept so checkpoints load
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
-        # ``seg.shared``: decode once per volume, a 1x1 output per task (SharedSegDecoder); else once per slot
+        # ``seg.shared``: decode once per volume, an output per task (SegDecoder unconditioned); else once per slot
         self.seg_shared = bool(seg_cfg.get("shared", False))
-        self.seg = (SharedSegDecoder if self.seg_shared else SegDecoder)(
+        self.seg = SegDecoder(
             d_enc * (len(self.taps) + 1), dim, patch_zyx, tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
             in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
-            dense=any(t.type == "dense" for t in reg.tasks),
-            **({"n_tasks": n_tasks, "head_hidden": int(seg_cfg.get("head_hidden", 0))} if self.seg_shared else {}))
+            dense=any(t.type == "dense" for t in reg.tasks), conditioned=not self.seg_shared, n_tasks=n_tasks,
+            head_hidden=int(seg_cfg.get("head_hidden", 0)))
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):

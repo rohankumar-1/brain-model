@@ -4,11 +4,9 @@ Every slot with a label gets the loss of its task's type: binary cross-entropy, 
 cross-entropy over the task's classes, BCE + soft Dice for a segmentation slot (soft targets at the decoder's stride),
 voxel-weighted Huber for a dense slot (``dense_loss``; targets and weights from ``data.prepare``).
 Slots are averaged per task first (a task asked in many slots of the batch is still one task), each task's loss is
-then scaled by the balancing mode, averaged over the tasks of its group, and the groups present are averaged (with
-the group weights), so a group of many tasks (SynthSeg) weighs as one group:
-  uniform      the task loss as is
-  ema          each task's loss divided by a running mean of itself (every task contributes ~1, whatever its scale)
-  uncertainty  Kendall et al.: exp(-s_t) L_t + s_t with a learned log-variance s_t per task
+then weighted by uncertainty (Kendall et al.: exp(-s_t) L_t + s_t with a learned log-variance s_t per task), averaged
+over the tasks of its group, and the groups present are averaged (with the group weights), so a group of many tasks
+(SynthSeg) weighs as one group.
 """
 
 from __future__ import annotations
@@ -26,17 +24,34 @@ def seg_target(seg: torch.Tensor, stride: int = 2) -> torch.Tensor:
     return F.avg_pool3d(seg, stride) if stride > 1 else seg
 
 
+DIMS = (1, 2, 3, 4)
+
+
+def _with_validity(logits: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """float logits, the target channel and its voxel weights: a 2-channel target is (target, validity)."""
+    logits, target = logits.float(), target.float()
+    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
+    return logits, target[:, :1], w
+
+
+def _bce_dice(logits: torch.Tensor, target: torch.Tensor, w: torch.Tensor | None = None,
+              pos_weight: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """(P,) voxel BCE (mean over the voxels weighted by ``w``; all voxels without it) and soft Dice (+1 smoothing) of
+    the (``w``-masked) prediction: the core every segmentation loss shares."""
+    pw = None if pos_weight is None else torch.tensor(float(pos_weight), device=logits.device)
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw)
+    if w is None:
+        bce, p = bce.mean(DIMS), logits.sigmoid()
+    else:
+        bce, p = (bce * w).sum(DIMS) / w.sum(DIMS).clamp_min(1.0), logits.sigmoid() * w
+    dice = 1 - (2 * (p * target).sum(DIMS) + 1) / (p.sum(DIMS) + target.sum(DIMS) + 1)
+    return bce, dice
+
+
 def seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """(P,) BCE + soft Dice per slot. An empty target scores Dice on the background-free prediction (+1 smoothing).
     A 2-channel target is (target, validity): voxels with validity 0 are left out of both terms."""
-    logits, target = logits.float(), target.float()
-    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
-    target = target[:, :1]
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-    bce = (bce * w).sum(dim=(1, 2, 3, 4)) / w.sum(dim=(1, 2, 3, 4)).clamp_min(1.0)
-    p = logits.sigmoid() * w
-    inter = (p * target).sum(dim=(1, 2, 3, 4))
-    dice = 1 - (2 * inter + 1) / (p.sum(dim=(1, 2, 3, 4)) + target.sum(dim=(1, 2, 3, 4)) + 1)
+    bce, dice = _bce_dice(*_with_validity(logits, target))
     return bce + dice
 
 
@@ -45,18 +60,12 @@ def negative_seg_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tenso
     all-zero mask, labels v11). Soft Dice on scans with a lesion only: on an empty one it only rewards predicting
     nothing, the collapse ``sparse_seg_loss`` was built against. BCE on every (valid) voxel, and a scan BCE on the
     map's peak logit against "this scan has a lesion", so a stray blob on a healthy scan costs more than its voxels."""
-    logits, target = logits.float(), target.float()
-    w = target[:, 1:] if target.shape[1] == 2 else torch.ones_like(target)
-    target = target[:, :1]
-    dims = (1, 2, 3, 4)
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-    bce = (bce * w).sum(dims) / w.sum(dims).clamp_min(1.0)
-    p = logits.sigmoid() * w
-    has = target.amax(dims) > 0
-    dice = (1 - (2 * (p * target).sum(dims) + 1) / (p.sum(dims) + target.sum(dims) + 1)) * has.float()
-    peak = logits.masked_fill(w < 0.5, -1e4).amax(dims)
+    logits, target, w = _with_validity(logits, target)
+    bce, dice = _bce_dice(logits, target, w)
+    has = target.amax(DIMS) > 0
+    peak = logits.masked_fill(w < 0.5, -1e4).amax(DIMS)
     scan = F.binary_cross_entropy_with_logits(peak, has.float(), reduction="none")
-    return bce + dice + scan
+    return bce + dice * has.float() + scan
 
 
 def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[int, int, int],
@@ -68,20 +77,17 @@ def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[
     * voxel BCE with ``pos_weight`` on target voxels;
     * soft Dice on scans that have a target only (on an empty one it rewards predicting nothing);
     * cell BCE: logits and target max-pooled to the encoder's token grid (``cell_zyx`` output voxels per token), i.e.
-      "is it in this 16 mm cell", the coarse finder signal a find -> refine pass would pick cells from;
+      "is it in this 16 mm cell", a coarse finder signal;
     * scan BCE: the map's peak logit against "this scan has a target", so the peak works as a detector."""
     logits, target = logits.float(), target[:, :1].float()
-    dims = (1, 2, 3, 4)
+    bce, dice = _bce_dice(logits, target, pos_weight=pos_weight)
+    has = target.amax(DIMS) > 0.5
     pw = torch.tensor(float(pos_weight), device=logits.device)
-    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none", pos_weight=pw).mean(dims)
-    p = logits.sigmoid()
-    has = target.amax(dims) > 0.5
-    dice = (1 - (2 * (p * target).sum(dims) + 1) / (p.sum(dims) + target.sum(dims) + 1)) * has.float()
     lc = F.max_pool3d(logits, cell_zyx, ceil_mode=True)
     tc = F.max_pool3d(target, cell_zyx, ceil_mode=True)
-    cell = F.binary_cross_entropy_with_logits(lc, (tc > 0.5).float(), reduction="none", pos_weight=pw).mean(dims)
-    scan = F.binary_cross_entropy_with_logits(logits.amax(dims), has.float(), reduction="none")
-    return bce + dice + cell + scan
+    cell = F.binary_cross_entropy_with_logits(lc, (tc > 0.5).float(), reduction="none", pos_weight=pw).mean(DIMS)
+    scan = F.binary_cross_entropy_with_logits(logits.amax(DIMS), has.float(), reduction="none")
+    return bce + dice * has.float() + cell + scan
 
 
 def dense_loss(pred: torch.Tensor, target: torch.Tensor, w: torch.Tensor) -> torch.Tensor:

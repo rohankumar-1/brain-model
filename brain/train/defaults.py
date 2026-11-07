@@ -145,7 +145,7 @@ def _multitask_defaults() -> dict[str, Any]:
                   "conv_stem": None,
                   # ``dim``: the heads' width. layers / heads: the slot readout (task_tokens.enabled: false)
                   "slot": {"dim": 256, "layers": 3, "heads": 8},
-                  # shared: decode once per volume with a 1x1 output per task (SharedSegDecoder; tasks.all_seg asks
+                  # shared: decode once per volume with a 1x1 output per task (SegDecoder unconditioned; tasks.all_seg asks
                   # every mask), instead of once per segmentation slot
                   # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout
                   "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0}},

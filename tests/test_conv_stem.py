@@ -37,10 +37,10 @@ def test_stem_adds_little_to_vit_small():
 def test_shared_decoder_matches_slots_to_task_channels(tmp_path, monkeypatch):
     """model.seg.shared: one decode per volume, each slot reads its task's channel; trains and reloads."""
     from brain.multitask.fewshot import load_model
-    from brain.multitask.model import SharedSegDecoder
+    from brain.multitask.model import SegDecoder
     from brain.train import engine
 
-    dec = SharedSegDecoder(24, 8, (8, 16, 16), (32, 16, 8, 4), in_chans=1, n_tasks=5)
+    dec = SegDecoder(24, 8, (8, 16, 16), (32, 16, 8, 4), in_chans=1, conditioned=False, n_tasks=5)
     grid, img = torch.randn(2, 24, 2, 2, 2), torch.randn(2, 1, 16, 32, 32)
     rows, chan = torch.tensor([1, 0, 1]), torch.tensor([4, 2, 2])
     out = dec(grid, img, rows, torch.zeros(3, 8), chan=chan)
@@ -53,13 +53,14 @@ def test_shared_decoder_matches_slots_to_task_channels(tmp_path, monkeypatch):
                 "--set", "model.seg.shared=true", "--set", "tasks.all_seg=true",
                 "--set", "train.eval_every=100", "--set", "train.ckpt_every=2"])
     model, _, _ = load_model(tmp_path / "last.pt", torch.device("cpu"))
-    assert isinstance(model.seg, SharedSegDecoder)
+    assert not model.seg.conditioned
 
 
 def test_shared_decoder_v2_per_task_heads():
-    from brain.multitask.model import SharedSegDecoder
+    from brain.multitask.model import SegDecoder
 
-    dec = SharedSegDecoder(24, 8, (8, 16, 16), (32, 24, 16, 16), in_chans=1, n_tasks=5, head_hidden=4)
+    dec = SegDecoder(24, 8, (8, 16, 16), (32, 24, 16, 16), in_chans=1, conditioned=False, n_tasks=5,
+                     head_hidden=4)
     grid, img = torch.randn(2, 24, 2, 2, 2), torch.randn(2, 1, 16, 32, 32)
     out = dec(grid, img, torch.tensor([1, 0, 1]), torch.zeros(3, 8), chan=torch.tensor([4, 2, 2]))
     alone = dec(grid[1:], img[1:], torch.tensor([0, 0]), torch.zeros(2, 8), chan=torch.tensor([4, 2]))
