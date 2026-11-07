@@ -142,18 +142,6 @@ class VolumeDataset(Dataset):
         ax = int(row["thick_axis"]) if "thick_axis" in self.df.columns and pd.notna(row["thick_axis"]) else -1
         return torch.tensor([mm], dtype=torch.float32), torch.tensor([ax], dtype=torch.long)
 
-    def _lesion_path(self, row) -> Path | None:
-        """Lesion label zip for this volume: ``mask_seg`` / ``mask_lesion`` / ``mask_ich``, or for a BraTS sequence the
-        subject's segmentation (all four sequences share the t1n grid it was drawn on)."""
-        for col in ("mask_seg", "mask_lesion", "mask_ich"):
-            if col in self.df.columns and pd.notna(row.get(col)) and str(row[col]) not in ("", "nan"):
-                return self.store_root / str(row[col])
-        case = str(row.get("case_id", ""))
-        if str(row.get("dataset", "")).startswith("brats") and "-" in case:
-            p = self.store_root / str(row["folder"]) / f"{case.rsplit('-', 1)[0]}.seg.zip"
-            return p if p.exists() else None
-        return None
-
     def _skull_mask_ok(self, row) -> bool:
         """A brain mask exists and passed QC (a failed mask would cut real anatomy or leave scalp)."""
         rel = str(row["mask_brain"]) if "mask_brain" in self.df.columns and pd.notna(row["mask_brain"]) else ""
@@ -200,14 +188,6 @@ class VolumeDataset(Dataset):
             extra["brain"] = torch.from_numpy(np.ascontiguousarray(arrays["brain"])).bool().unsqueeze(0).unsqueeze(0)
         extra["contrast_id"] = torch.tensor([contrast_group(row.get("contrast"), modality)])
         extra["meta_id"] = torch.tensor([meta_id(row.get("contrast"), modality, row.get("dataset", ""))])
-        if ((self.crop_cfg or {}).get("loss") or {}).get("predict", {}).get("lesion"):
-            # lesion-aware MAE masking: per-token lesion flags are derived from this in the worker (not shipped)
-            les, path = None, self._lesion_path(row)
-            if path is not None and path.exists():
-                m = store.read_image(path, "mask")
-                if m.shape == tuple(volume.shape):
-                    les = torch.from_numpy(np.ascontiguousarray(m > 0))
-            extra["lesion"] = (les if les is not None else torch.zeros(volume.shape, dtype=torch.bool))[None, None]
         extra["tissue_q"] = tissue_quantiles(volume, modality)[None]
         return raw_views({
             **extra,

@@ -187,7 +187,7 @@ def _lookup(src: torch.Tensor, cell_zyx: Sequence[int], grid: torch.Tensor):
 
 def _group_from_boxes(
     volume, origins_tok, size_coarse, patch, coarse_patch, grid_zyx, keep, spacing, origin_mm,
-    stripped=None, drop=None, keep_stripped=None, geo=None, vol_zyx=None, coarse_keep=None, lesion_grid=None,
+    stripped=None, drop=None, keep_stripped=None, geo=None, vol_zyx=None, coarse_keep=None,
 ) -> dict:
     """Stack the views of one group. ``origins_tok`` are coarse (z, y, x) token origins, one (B, 3) per view.
 
@@ -200,7 +200,6 @@ def _group_from_boxes(
     size_tok = (size_coarse[0] * ratio[2], size_coarse[1] * ratio[1], size_coarse[2] * ratio[0])
     cpx, cpy, cpz = coarse_patch
     views, coords, fg, pmm, parent, pos, tok_pos = [], [], [], [], [], [], []
-    lesion = []
     n_coarse = size_coarse[0] * size_coarse[1] * size_coarse[2]
     native_grid = tuple(keep.shape[1:])
     zz, yy, xx = torch.meshgrid(*(torch.arange(n) for n in size_tok), indexing="ij")
@@ -219,8 +218,6 @@ def _group_from_boxes(
             src_tok = _map_tokens(m, center, size_vox, (patch[2], patch[1], patch[0]), size_tok)
             gate = keep_stripped if dropped and keep_stripped is not None else keep
             nat, _, f = _lookup(src_tok, (patch[2], patch[1], patch[0]), gate)
-            if lesion_grid is not None:
-                lesion.append(_lookup(src_tok, (patch[2], patch[1], patch[0]), lesion_grid)[2])
             slot_src = _map_tokens(m, center, size_vox, (cpz, cpy, cpx), size_coarse)
             cpos, cin, _ = _lookup(slot_src, (cpz, cpy, cpx), coarse_keep)
             # a token whose slot center left the volume has no partner position: drop it from every term
@@ -235,8 +232,6 @@ def _group_from_boxes(
             continue
         src = stripped if (stripped is not None and drop is not None and drop[len(views)]) else volume
         views.append(_gather(src, o_vox, size_vox))
-        if lesion_grid is not None:
-            lesion.append(_crop_fg(lesion_grid, o_native, size_tok))
         c, p = _coords(o_vox, size_tok, patch, spacing, origin_mm)
         coords.append(c)
         pmm.append(p)
@@ -248,8 +243,6 @@ def _group_from_boxes(
     out = {"coords": torch.stack(coords), "patch_mm": torch.stack(pmm),
            "parent": torch.stack(parent).to(torch.int32), "pos": torch.stack(pos).to(torch.int32),
            "tok_pos": torch.stack(tok_pos).to(torch.int32), "fg": torch.stack(fg), "n_par": n_coarse}
-    if lesion:
-        out["lesion"] = torch.stack(lesion)
     if geo is not None:
         out["theta"] = torch.stack(thetas)
         out["drop"] = torch.tensor([bool(drop is not None and drop[k]) for k in range(len(thetas))])[:, None] \
@@ -266,16 +259,6 @@ def _crop_fg(keep: torch.Tensor, o: torch.Tensor, size: Sequence[int]) -> torch.
     zz, yy, xx = torch.meshgrid(*(torch.arange(n) for n in size), indexing="ij")
     z, y, x = o[:, 0, None] + zz.reshape(-1), o[:, 1, None] + yy.reshape(-1), o[:, 2, None] + xx.reshape(-1)
     return keep[torch.arange(b)[:, None], z, y, x]
-
-
-def token_lesion(lesion: torch.Tensor, patch_xyz, min_frac: float = 0.01) -> torch.Tensor:
-    """(B, Z', Y', X') bool: tokens of ``patch_xyz`` whose voxels are at least ``min_frac`` lesion. ``lesion`` is
-    (B, 1, Z, Y, X) bool on the volume grid."""
-    px, py, pz = (int(p) for p in patch_xyz)
-    b, _, z, y, x = lesion.shape
-    z, y, x = z - z % pz, y - y % py, x - x % px
-    pooled = torch.nn.functional.avg_pool3d(lesion[:, :, :z, :y, :x].float(), (pz, py, px))
-    return pooled[:, 0] >= min_frac
 
 
 def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dict:
@@ -325,9 +308,8 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
                 origins[name].append(_sample(grid, sat, size, parent, parent, **kw))
             else:
                 origins[name].append(_sample(grid, sat, size, whole, whole, **kw))
-    if bool(v.get("win", True)):                  # the window-pair crop (LeJEPA); MAE does not use it
-        first = _box(origins["global"][0], size_g) if nested else whole
-        origins["win"].append(_sample(grid, sat, size_g, first, whole, **kw))
+    first = _box(origins["global"][0], size_g) if nested else whole           # the window-pair crop
+    origins["win"].append(_sample(grid, sat, size_g, first, whole, **kw))
 
     # Per-view skull dropout (``aug.skull.per_view``): each view independently is cut to the brain mask, so views of
     # one scan with and without skull meet in the invariance terms. A skull-free view gates its tokens on the cut
@@ -370,12 +352,8 @@ def raw_views(batch: dict, cfg: dict, gen: torch.Generator | None = None) -> dic
         if geo_on:
             m = draw_geometry(geo_cfg, b, gen)
             geo = [m] * n_views if name == "win" else [draw_geometry(geo_cfg, b, gen) for _ in range(n_views)]
-        les_grid = None
-        if batch.get("lesion") is not None:     # token holds lesion if >= 1% of its voxels are lesion
-            les_grid = token_lesion(batch["lesion"], gp)
         g = _group_from_boxes(volume, origins[name], size, gp, patch, grid_zyx, keep, spacing, origin_mm,
-                              stripped, drops(n_views), keep_s, geo=geo, vol_zyx=(nz, ny, nx), coarse_keep=grid,
-                              lesion_grid=les_grid)
+                              stripped, drops(n_views), keep_s, geo=geo, vol_zyx=(nz, ny, nx), coarse_keep=grid)
         out["groups"].append(name)
         out["patch"][name] = gp
         out["n_par"][name] = g.pop("n_par")
