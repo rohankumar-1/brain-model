@@ -31,10 +31,10 @@ import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 
-from brain.common.paths import DATASETS, SCRATCH
+from brain.common.paths import DATASETS, PROCESSED_ROOT
 
 POOL = DATASETS / "fastmri_brain"
-STORE = SCRATCH / "data" / "processed" / "slices_zarr"
+STORE = PROCESSED_ROOT
 # file name contrast -> store dataset
 DATASETS_OF = {"AXFLAIR": "fastmri_flair", "AXT1": "fastmri_t1w", "AXT1POST": "fastmri_t1c", "AXT2": "fastmri_t2w"}
 

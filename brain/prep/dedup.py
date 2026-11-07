@@ -37,10 +37,10 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
-from brain.downstream.tasks import DEFAULT_VOLUMES
+from brain.common.paths import PROCESSED_ROOT
 from brain.prep import store
 
-ROOT = DEFAULT_VOLUMES.parent
+ROOT = PROCESSED_ROOT
 OUT = ROOT / "labels" / "dedup"
 DROP = ROOT / "labels" / "pool_drop" / "duplicates.csv"
 GRID = ["src_nx", "src_ny", "src_nz", "src_dx", "src_dy", "src_dz"]
@@ -233,7 +233,7 @@ def main() -> None:
     ap.add_argument("--query", default="all", help="--content: 'all' or a comma list of dataset_family to look up")
     a = ap.parse_args()
     if a.content:
-        v = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
+        v = pd.read_csv(ROOT / "volumes.csv", low_memory=False)
         v = v[[(ROOT / p).exists() for p in v["image_path"].astype(str)]]
         dup = content_duplicates(v, None if a.query == "all" else a.query.split(","), a.workers)
         print(f"[dedup] confirmed duplicates (corr >= {DUP_CORR}): {len(dup)}", flush=True)
@@ -245,7 +245,7 @@ def main() -> None:
             print(f"[dedup] listed in {DROP.name}; deleted {n} store files ({gb:.1f} GiB)", flush=True)
         return
     fams = new_families(a.new_families)
-    v = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
+    v = pd.read_csv(ROOT / "volumes.csv", low_memory=False)
     pairs = shortlist(v, fams)
     print(f"[dedup] {int(v['dataset_family'].isin(fams).sum())} volumes in {len(fams)} new families; "
           f"{len(pairs)} shortlisted pairs (fingerprint distance <= {MAX_DIST})", flush=True)

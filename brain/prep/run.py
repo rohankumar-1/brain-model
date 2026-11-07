@@ -48,7 +48,6 @@ def read_manifests(root: Path) -> pd.DataFrame:
 
 
 def discover(names: list[str]) -> list[sources.Case]:
-    d = sources.DATASETS
     found = {"cq500": sources.cq500_dicom, "seg_cq500": sources.seg_cq500,
              "oasis": sources.oasis, "brats": sources.brats, "rsna": sources.rsna,
              "abide": sources.abide1, "ixi": sources.ixi, "isles": sources.isles22, "atlas": sources.atlas,

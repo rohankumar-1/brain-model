@@ -178,16 +178,6 @@ def read_mapping(path: Path) -> pd.DataFrame:
     return df
 
 
-def mapping_paths(root: Path = FOMO_ROOT) -> list[Path]:
-    found = []
-    top = root / "mapping.tsv"
-    if top.exists():
-        found.append(top)
-    for p in sorted(root.glob("PT*/mapping.tsv")):
-        found.append(p)
-    return found
-
-
 def load_mappings(root: Path = FOMO_ROOT) -> pd.DataFrame:
     top = root / "mapping.tsv"
     if top.exists() and top.stat().st_size > 0:
@@ -232,10 +222,6 @@ def family_for_row(row) -> str:
     if pt:
         return "fomo_" + short_of(pt)
     return "fomo_unknown"
-
-
-def blob_of(row) -> str:
-    return " ".join(_get(row, c) for c in ("old_path", "old_filename", "new_path", "new_filename"))
 
 
 def match_hold_family(blob: str) -> str | None:
@@ -328,10 +314,6 @@ def brats_stem(old_filename: str) -> str:
         if name.endswith(suf):
             return name[: -len(suf)]
     return name
-
-
-def session_zip(root: Path, pt: str, participant: str, session: str) -> Path:
-    return root / pt / participant / f"{session}.zip"
 
 
 def extracted_path(root: Path, pt: str, participant: str, session: str, filename: str) -> Path:

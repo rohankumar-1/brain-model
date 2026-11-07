@@ -33,9 +33,9 @@ import SimpleITK as sitk
 
 from brain.prep import geometry, native, store
 from brain.prep.dicom import _read_member
-from brain.prep.sources import DATASETS, SCRATCH
+from brain.common.paths import DATASETS, PROCESSED_ROOT, SCRATCH
 
-STORE = SCRATCH / "data" / "processed" / "slices_zarr"
+STORE = PROCESSED_ROOT
 ZIP = DATASETS / "rsna_ica" / "rsna-intracranial-aneurysm-detection.zip"
 WORK = SCRATCH / "work" / "rsna_ica"
 QC_OUT = Path(__file__).resolve().parents[2] / "runs" / "diagnostics" / "rsna_ica_vessels_qc.csv"

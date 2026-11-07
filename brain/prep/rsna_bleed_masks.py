@@ -36,17 +36,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from brain.common.paths import PROCESSED_ROOT
 from brain.prep import store
 
-ROOT = Path("/home/roku/orcd/scratch/brain-model/data/processed/slices_zarr")
+ROOT = PROCESSED_ROOT
 TS_MODEL = Path.home() / ".totalsegmentator/nnunet/results/Dataset150_icb_v0/nnUNetTrainer__nnUNetPlans__3d_fullres"
 OUT = ROOT / "labels" / "rsna_bleed"
 MARGIN = 20      # voxels around the brain mask kept in the crop: extra-axial blood (subdural, epidural) lies outside
                  # it (6 cut a 45 ml bleed to 33 ml against the tool's own crop, 2026-11-03)
-
-
-def _yes(s: pd.Series) -> pd.Series:
-    return s.astype(str).str.lower().isin(["true", "1", "1.0"])
 
 
 def targets(which: str) -> pd.DataFrame:

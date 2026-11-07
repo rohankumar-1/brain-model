@@ -25,7 +25,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-TOOLS = Path(os.environ.get("BRAIN_SYNTHSEG", "/home/roku/orcd/scratch/brain-model/tools/synthseg"))
+from brain.common.paths import SCRATCH
+
+TOOLS = Path(os.environ.get("BRAIN_SYNTHSEG", SCRATCH / "tools" / "synthseg"))
 WEIGHTS = TOOLS / "synthseg_robust_2.0.h5"
 # output channel order: sorted unique labels of synthseg_segmentation_labels_2.0.npy (robust: no flip reordering)
 LABELS = np.array([0, 2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 24, 26, 28,

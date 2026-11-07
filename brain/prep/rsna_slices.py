@@ -33,13 +33,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from brain.common.paths import DATASETS, SCRATCH
+from brain.common.paths import DATASETS, PROCESSED_ROOT, SCRATCH
 from brain.downstream.tasks import RSNA_LABELS
 from brain.prep import native, store
 
 ZIP = DATASETS / "rsna" / "rsna-ihd-dataset.zip"
 OFFSETS = SCRATCH / "work" / "rsna_ingest" / "member_offsets.json"
-STORE = SCRATCH / "data" / "processed" / "slices_zarr"
+STORE = PROCESSED_ROOT
 OUT = STORE / "labels" / "rsna_slices"
 LABEL_CSV = "rsna-intracranial-hemorrhage-detection/stage_2_train.csv"
 HEAD = 16384          # compressed bytes read per member: the header inflates from well inside this

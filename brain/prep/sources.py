@@ -634,9 +634,8 @@ RSNA_ICA_DATASET = {"CTA": ("rsna_ica_cta", "ct"), "MRA": ("rsna_ica_mra", "mri"
 def rsna_ica(rsna_zip: Path = DATASETS / "rsna_ica" / "rsna-intracranial-aneurysm-detection.zip") -> list[Case]:
     """RSNA Intracranial Aneurysm Detection (2025; MIRA dataset 7, non-commercial): 4,348 series (CTA, TOF MRA,
     T2, post-contrast T1) read straight from the pool zip by byte offsets (``series/<SeriesUID>/<SOP>.dcm``; some MR
-    series are one enhanced multi-frame file, so prep runs with ``BRAIN_DICOM_READER=dcm2niix``). The member index
+    series are one enhanced multi-frame file, so these cases read through dcm2niix). The member index
     and ``train.csv`` are cached under ``work/rsna_ica``."""
-    import io
     import json
     import zipfile
 
@@ -679,7 +678,7 @@ def ida_pick(project: str) -> pd.DataFrame:
 def ida(project: str) -> list[Case]:
     """ADNI / PPMI baseline scans (held out; data use agreements forbid redistribution, so pool, store and work dirs
     stay owner-only) read straight from the IDA Advanced Download zips by byte offsets
-    (``<PROJECT>/<subject>/<description>/<date>/I<image id>/*.dcm``; prep runs with ``BRAIN_DICOM_READER=dcm2niix``).
+    (``<PROJECT>/<subject>/<description>/<date>/I<image id>/*.dcm``; read through dcm2niix).
     case_id = IDA image ID; the subject comes from the pick table (``index.ida_subjects``). The member index is
     cached under ``work/<project>``."""
     import json
