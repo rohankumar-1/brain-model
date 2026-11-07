@@ -9,22 +9,23 @@ from __future__ import annotations
 
 import torch
 
-from brain.common.checkpoint import load_ckpt, strip_module_prefix
 from brain.common.metrics import embedding_health
 from brain.common.optim import param_groups
 from brain.common.paths import resolve
 from brain.data.batch3d import prepare
 from brain.data.crops3d import raw_views
 from brain.data.volumes import collate_volumes, crop_microbatch, make_loader, make_synthetic_volume
-from brain.models.viewnet3d import ViewNet, batch_meta
 from brain.data.volumes import n_meta
-from brain.models.vit3d import BrainEncoder, widen_patch_embed
+from brain.models.viewnet3d import ViewNet, batch_meta
+from brain.models.vit3d import BrainEncoder
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
 from brain.train import engine
 
 
 def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
+    """The ViT a config describes (``model`` / ``views``), with the token head and predictor its SSL loss uses (none
+    without ``loss.dense`` / ``loss.predict``): lejepa3d, joint and from-scratch multitask runs."""
     m = cfg["model"]
     dense = float(cfg["loss"].get("dense", {}).get("weight", 0.0)) > 0
     pr = cfg["loss"].get("predict") or {}
@@ -185,8 +186,6 @@ class Trainer(engine.Trainer):
         if ckpt is not None:
             raw.load_state_dict(ckpt["model"])
             self.opt.load_state_dict(ckpt["optimizer"])
-        elif cfg["output"].get("init_from") and not synthetic:
-            self._init_from(resolve(cfg["output"]["init_from"]))
         self.net = torch.nn.parallel.DistributedDataParallel(self.core, device_ids=[rt.local]) \
             if rt.world > 1 else self.core
 
@@ -197,15 +196,6 @@ class Trainer(engine.Trainer):
         self.core.train()
         self._banner = (f"brain-{raw.size} params={raw.count_parameters():,} batch={self.batch}x{rt.world} "
                         f"dense={self.dense_on} predict={predict_on} proj_norm={raw.projector.norm}")
-
-    def _init_from(self, path) -> None:
-        """Weights only: a fresh optimizer and schedule. Heads the source never had (the predictor) start random."""
-        src = load_ckpt(path, self.rt.device)
-        state = widen_patch_embed(strip_module_prefix(src["model"]), self.raw.patch_embed.proj.in_channels)
-        res = self.raw.load_state_dict(state, strict=False)
-        if res.unexpected_keys or any(not k.startswith("predictor.") for k in res.missing_keys):
-            raise SystemExit(f"[init_from] mismatch: missing={res.missing_keys[:4]} unexpected={res.unexpected_keys[:4]}")
-        self.rt.log(f"[init] weights from {path} (step {src.get('step')}); new: {len(res.missing_keys)} tensors")
 
     def banner(self) -> str:
         return self._banner

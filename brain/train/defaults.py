@@ -99,8 +99,7 @@ LEJEPA3D: dict[str, Any] = {
     "train": {"max_steps": 45000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500, "keep_every": 5000,
               "stop_poll": 20, "best_metric": "loss"},
     # resume_from: checkpoint used only when <out_dir>/last.pt is absent (weights + optimizer + step).
-    # init_from: weights only, fresh optimizer and schedule (heads the source lacks, e.g. the predictor, start random).
-    "output": {"out_dir": "runs/lejepa3d", "resume_from": None, "init_from": None},
+    "output": {"out_dir": "runs/lejepa3d", "resume_from": None},
 }
 
 def _multitask_defaults() -> dict[str, Any]:

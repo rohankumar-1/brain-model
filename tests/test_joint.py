@@ -60,28 +60,6 @@ def test_schedule_in_steps_does_not_stretch_when_the_run_is_extended():
     assert schedule(400, 4000, j) == (0.5, 1.0)
 
 
-def test_warm_start_loads_a_matching_encoder_and_refuses_a_different_rope(tmp_path):
-    from brain.train.defaults import default_config, smoke_config
-    from brain.train.joint import init_encoder
-    from brain.train.lejepa3d import build_encoder
-
-    cfg = smoke_config(default_config("joint"))
-    torch.manual_seed(0)
-    src_enc = build_encoder(cfg, torch.device("cpu"))
-    path = tmp_path / "src.pt"
-    torch.save({"model": src_enc.state_dict(), "config": cfg}, path)
-    enc = build_encoder(cfg, torch.device("cpu"))
-    init_encoder(enc, cfg, path)
-    assert all(torch.equal(a, b) for a, b in zip(enc.state_dict().values(), src_enc.state_dict().values()))
-    other = {**cfg, "model": {**cfg["model"], "rope_min_period_mm": 32.0}}
-    try:
-        init_encoder(build_encoder(other, torch.device("cpu")), other, path)
-    except SystemExit as e:
-        assert "rope_min_period_mm" in str(e)
-    else:
-        raise AssertionError("a RoPE mismatch must not load")
-
-
 def test_schedule_ssl_starts_large_and_settles_even_with_the_tasks():
     """R15: tasks from the start (short ramp), SSL weight 4 -> 1 by 60% of the run, then held."""
     j = {"warmup_frac": 0.0, "task_ramp_frac": 0.02, "taper_end_frac": 0.6, "ssl_start": 4.0, "ssl_floor": 1.0}

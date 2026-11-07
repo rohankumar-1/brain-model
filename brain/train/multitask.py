@@ -38,7 +38,7 @@ TYPE_COLUMNS = {"binary": "t_bin", "regression": "t_reg", "multiclass": "t_cls",
 def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     """The SSL encoder, trainable. Copies its model / views config into ``cfg`` (what frozen evaluation reads)."""
     from brain.downstream.embed3d import load_brain3d
-    from brain.models.vit3d import BrainEncoder
+    from brain.train.lejepa3d import build_encoder
 
     m = cfg["model"]
     if m.get("arch") == "resnet3d":          # from-scratch convolutional baseline (brain.models.resnet3d)
@@ -53,11 +53,7 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         # the config records how the encoder was built (frozen evaluation rebuilds it from these, with other defaults)
         m.update(size=m.get("size") or "test", qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
                  conv_stem=list(m.get("conv_stem") or []))
-        enc = BrainEncoder(size=m["size"], patch_xyz=tuple(cfg["views"]["patch_xyz"]),
-                           in_chans=int(m.get("in_chans", 1)),
-                           qk_norm=True, n_cls=m["n_cls"], proj_dim=16, proj_hidden=32,
-                           rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
-                           n_meta=n_meta(m), conv_stem=m["conv_stem"] or None)
+        enc = build_encoder(cfg, torch.device("cpu"))       # no loss.dense / predict: no token head, no predictor
     else:
         src = torch.load(resolve(m["init_from"]), map_location="cpu", weights_only=False)
         enc = load_brain3d(src, torch.device("cpu")).model

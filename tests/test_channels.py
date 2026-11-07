@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 
 from brain.common.windowing import CANONICAL, ROLES, asinh_window, role_windows
-from brain.models.vit3d import BrainEncoder, widen_patch_embed
+from brain.models.vit3d import BrainEncoder
 
 PATCH = (8, 8, 4)
 SHAPE_ZYX = (16, 32, 32)
@@ -29,20 +29,6 @@ def test_role_channel_one_is_the_canonical_window_for_both_modalities():
         assert torch.allclose(y[i, 2], asinh_window(x[i, 0], *ROLES[m][2]))
     jit = role_windows(x, mod, jitter=0.1)
     assert jit.shape == y.shape and not torch.allclose(jit, y)
-
-
-def test_widened_checkpoint_computes_what_the_one_channel_encoder_did():
-    one, three = _encoder(1), _encoder(3)
-    r = three.load_state_dict(widen_patch_embed(one.state_dict(), 3))
-    assert not r.missing_keys and not r.unexpected_keys
-    view = torch.randn(1, 1, *SHAPE_ZYX[::-1])                              # (B, C, X, Y, Z)
-    n = (SHAPE_ZYX[2] // PATCH[0]) * (SHAPE_ZYX[1] // PATCH[1]) * (SHAPE_ZYX[0] // PATCH[2])
-    coords = torch.randn(1, n, 3) * 20
-    pmm = torch.tensor([[8.0, 8.0, 4.0]])
-    with torch.no_grad():
-        a = one(view, coords, pmm)["tokens"]
-        b = three(torch.cat([view, torch.randn_like(view), torch.randn_like(view)], 1), coords, pmm)["tokens"]
-    assert torch.allclose(a, b, atol=1e-5)                                  # the new channels start at zero
 
 
 def test_roles_appearance_is_native_units_then_three_channels():

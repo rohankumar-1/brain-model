@@ -33,21 +33,25 @@ from brain.models.viewnet3d import batch_meta
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
 from brain.train import multitask
-from brain.train.lejepa3d import build_encoder as build_ssl_encoder
-from brain.train.lejepa3d import forever_loader, loss_kwargs, metric_keys, synthetic_loader, viewnet_from_config
+from brain.train.lejepa3d import (build_encoder, forever_loader, loss_kwargs, metric_keys, synthetic_loader,
+                                  viewnet_from_config)
 
 
-def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
-    """(w_ssl, w_task) at ``step``: SSL alone (weight ``ssl_start``), then the task weight ramps in (cosine) while SSL
-    tapers to the floor.
-    Phases are fractions of ``max_steps`` unless given in steps (``warmup_steps`` etc.)."""
-    t = step / max(max_steps, 1)
-
+def _phases(max_steps: int, j: dict) -> tuple[float, float, float]:
+    """(warm-up end, task ramp length, taper end) as fractions of ``max_steps``; ``<name>_steps`` win over
+    ``<name>_frac`` when set."""
     def at(name: str, frac: float) -> float:
         return float(j[f"{name}_steps"]) / max(max_steps, 1) if j.get(f"{name}_steps") is not None \
             else float(j.get(f"{name}_frac", frac))
 
-    warm, ramp, taper_end = at("warmup", 0.25), at("task_ramp", 0.15), at("taper_end", 0.6)
+    return at("warmup", 0.25), at("task_ramp", 0.15), at("taper_end", 0.6)
+
+
+def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
+    """(w_ssl, w_task) at ``step``: SSL alone (weight ``ssl_start``), then the task weight ramps in (cosine) while SSL
+    tapers to the floor."""
+    t = step / max(max_steps, 1)
+    warm, ramp, taper_end = _phases(max_steps, j)
     floor, start = float(j.get("ssl_floor", 0.5)), float(j.get("ssl_start", 1.0))
 
     def smooth(x: float) -> float:
@@ -61,42 +65,13 @@ def schedule(step: int, max_steps: int, j: dict) -> tuple[float, float]:
 
 def task_start(max_steps: int, j: dict) -> int:
     """The step the task branch starts (``schedule``'s warm-up end): task tokens open their write path from here."""
-    if j.get("warmup_steps") is not None:
-        return int(j["warmup_steps"])
-    return int(round(float(j.get("warmup_frac", 0.25)) * max_steps))
-
-
-# encoder settings that are not in the weights (RoPE frequencies are rebuilt from them) or that change what the weights
-# mean; a warm start must match its source on all of them
-ARCH_KEYS = ("size", "rope_base_mm", "rope_min_period_mm", "qk_norm", "n_cls", "n_registers", "proj_dim", "proj_hidden",
-             "dense_dim", "dense_hidden", "proj_norm", "rope_fp32", "fp32_residual")
-LEGACY = {"rope_fp32": False, "fp32_residual": False}        # what a config without the key was trained with
-
-
-def init_encoder(enc: nn.Module, cfg: dict, src_path) -> None:
-    """Load an SSL checkpoint's whole view network (encoder, projector, token head, predictor) into ``enc``, after
-    checking that this run builds the same architecture and token gate as the source."""
-    src = torch.load(src_path, map_location="cpu", weights_only=False)
-    sm, sv = (src.get("config") or {}).get("model") or {}, (src.get("config") or {}).get("views") or {}
-    m, v = cfg["model"], cfg["views"]
-    bad = [f"model.{k}: run {m.get(k, LEGACY.get(k))!r} vs source {sm.get(k, LEGACY.get(k))!r}" for k in ARCH_KEYS
-           if m.get(k, LEGACY.get(k)) != sm.get(k, LEGACY.get(k))]
-    if list(v["patch_xyz"]) != list(sv.get("patch_xyz", [])):
-        bad.append(f"views.patch_xyz: run {v['patch_xyz']} vs source {sv.get('patch_xyz')}")
-    gate, sgate = dict(v.get("gate") or {}), dict(sv.get("gate") or {})
-    if gate.get("mode", "center") != sgate.get("mode", "center"):
-        bad.append(f"views.gate.mode: run {gate.get('mode', 'center')} vs source {sgate.get('mode', 'center')}")
-    if bad:
-        raise SystemExit("[init] this run's encoder differs from its init_from source:\n  " + "\n  ".join(bad))
-    missing, unexpected = enc.load_state_dict(src["model"], strict=False)
-    if unexpected or set(missing) - {"meta_emb.weight"}:       # only the (zero-initialised) metadata table may be new
-        raise SystemExit(f"[init] state mismatch: missing {missing[:5]}, unexpected {unexpected[:5]}")
+    return int(round(_phases(max_steps, j)[0] * max_steps))
 
 
 class JointNet(nn.Module):
     """The SSL view network and the BrainQuery model over one shared encoder, as one module (one DDP forward)."""
 
-    def __init__(self, core: ViewNet, mt: nn.Module):
+    def __init__(self, core: nn.Module, mt: nn.Module):
         super().__init__()
         self.core, self.mt = core, mt
 
@@ -115,7 +90,6 @@ class Trainer(multitask.Trainer):
         self.j = cfg.get("joint") or {}
         self.max_steps = int(args.max_steps or cfg["train"]["max_steps"])
         self.task_start = task_start(self.max_steps, self.j)
-        self._resuming = ckpt is not None
         super().__init__(rt, cfg, args, ckpt, step)        # encoder (build_encoder), BrainQuery, task loaders, optimizer
         m, lc, d = cfg["model"], cfg["loss"], cfg["data"]
         dev = rt.device
@@ -123,7 +97,7 @@ class Trainer(multitask.Trainer):
         self.buckets = int(m.get("length_buckets", 4))
         self.lk, self.gather = loss_kwargs(cfg), bool(lc.get("gather_ddp", True))
         self.ssl_keys = metric_keys(cfg)
-        self.ramp = 0 if m.get("init_from") else int((lc.get("predict") or {}).get("ramp_steps", 0))
+        self.ramp = int((lc.get("predict") or {}).get("ramp_steps", 0))
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
         seed = int(cfg["seed"]) + rt.rank
         if args.synthetic:
@@ -142,12 +116,11 @@ class Trainer(multitask.Trainer):
         self._banner += f" ssl_batch={self.ssl_batch}x{rt.world} schedule={sched}"
 
     def build_encoder(self, cfg: dict, device: torch.device, synthetic: bool):
-        """The LeJEPA encoder (projector, token head, predictor inside it), from scratch or warm from ``init_from``."""
+        """The LeJEPA encoder (projector, token head, predictor inside it), from scratch."""
         m = cfg["model"]
-        enc = build_ssl_encoder(cfg, device)
-        if m.get("init_from") and not synthetic and not self._resuming:
-            init_encoder(enc, cfg, resolve(m["init_from"]))
-            print(f"[init] encoder, projector and predictor from {m['init_from']}", flush=True)
+        if m.get("init_from"):
+            raise SystemExit("joint trains its encoder from scratch: model.init_from is not supported")
+        enc = build_encoder(cfg, device)
         enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
         if hasattr(enc.patch_embed, "checkpoint"):
             enc.patch_embed.checkpoint = enc.checkpoint_blocks

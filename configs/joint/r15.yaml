@@ -206,4 +206,4 @@ optim:
   betas: [0.9, 0.95]
 train: {max_steps: 120000, log_every: 50, eval_every: 2000, ckpt_every: 500, keep_every: 10000, stop_poll: 20,
   best_metric: score, ema_decay: 0.999, keep_full: false}   # weights-only snapshots: scratch is ~97% full
-output: {out_dir: runs/joint/r15, resume_from: null, init_from: null}
+output: {out_dir: runs/joint/r15, resume_from: null}

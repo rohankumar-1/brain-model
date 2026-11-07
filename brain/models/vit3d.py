@@ -232,21 +232,6 @@ class Predictor(nn.Module):
         return self.latent(h), (self.pixel(h) if self.pixel is not None else None)
 
 
-def widen_patch_embed(state: dict, in_chans: int) -> dict:
-    """A checkpoint's state for an encoder with ``in_chans`` inputs: a one-channel patch embedding is copied into
-    channel 1 and the new channels start at zero, so the widened encoder computes exactly what the checkpoint did on
-    channel 1 (``windowing.ROLES``: the canonical window) until training uses the others."""
-    if any(".patch_embed.stem." in k or k.startswith("patch_embed.stem.") for k in state):
-        return state                      # a conv stem's proj reads stem features: nothing to widen
-    key = next((k for k in state if k.endswith("patch_embed.proj.weight")), None)
-    if key is None or state[key].shape[1] == in_chans:
-        return state
-    w = state[key]
-    wide = w.new_zeros(w.shape[0], in_chans, *w.shape[2:])
-    wide[:, :w.shape[1]] = w
-    return {**state, key: wide}
-
-
 # sequence / modality types a fused study tells apart (``SequenceFusion``); index 0 = unknown
 SEQ_TYPES = ("unknown", "ct", "t1", "t1c", "t2", "flair", "pd", "dwi", "t2s", "swi", "tof", "other")
 
