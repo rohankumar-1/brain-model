@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from brain.common.windowing import asinh_window, canonical_windows, floors, foreground_mask
+from brain.common.windowing import asinh_window, canonical_windows, foreground_mask
 from brain.objectives.sigreg import prediction_loss
 
 
