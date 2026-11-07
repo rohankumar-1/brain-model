@@ -26,6 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from brain.common.paths import SCRATCH
+from brain.prep.morph import largest_cc
 
 TOOLS = Path(os.environ.get("BRAIN_SYNTHSEG", SCRATCH / "tools" / "synthseg"))
 WEIGHTS = TOOLS / "synthseg_robust_2.0.h5"
@@ -145,20 +146,9 @@ def normalise(vol_xyz: np.ndarray, modality: str) -> np.ndarray:
     return np.clip((im - lo) / max(hi - lo, 1e-6), 0, 1).astype(np.float32)
 
 
-def _largest_component(mask: np.ndarray) -> np.ndarray:
-    from scipy.ndimage import label
-
-    lab, n = label(mask)
-    if n <= 1:
-        return mask
-    sizes = np.bincount(lab.ravel())
-    sizes[0] = 0
-    return lab == sizes.argmax()
-
-
 def postprocess(post: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """``postprocess(fast=True)``: (33, X, Y, Z) posteriors -> FreeSurfer label map and volumes (ml, per label)."""
-    fg = _largest_component(post[1:].sum(0) > 0.25)
+    fg = largest_cc(post[1:].sum(0) > 0.25)
     post = post.copy()
     post[1:] *= fg
     post[1:] *= post[1:] > 0.2
@@ -220,7 +210,7 @@ class Segmenter:
         labels = torch.as_tensor(LABELS, device=self.device)
         out = []
         for p, fg in zip(post, fg_cpu.numpy()):
-            p[1:] *= torch.from_numpy(_largest_component(fg)).to(self.device)
+            p[1:] *= torch.from_numpy(largest_cc(fg)).to(self.device)
             p[1:] *= p[1:] > 0.2
             p /= p.sum(0, keepdim=True).clamp_min(1e-12)
             seg = labels[p.argmax(0)].to(torch.int16).permute(2, 1, 0).contiguous().cpu().numpy()

@@ -38,6 +38,7 @@ import pandas as pd
 
 from brain.common.paths import PROCESSED_ROOT
 from brain.prep import store
+from brain.prep.morph import dice
 
 ROOT = PROCESSED_ROOT
 TS_MODEL = Path.home() / ".totalsegmentator/nnunet/results/Dataset150_icb_v0/nnUNetTrainer__nnUNetPlans__3d_fullres"
@@ -220,11 +221,6 @@ def slice_qc(mask: np.ndarray, state: np.ndarray) -> tuple[float, float]:
     return recall, spill
 
 
-def _dice(a: np.ndarray, b: np.ndarray) -> float:
-    s = a.sum() + b.sum()
-    return float(2 * (a & b).sum() / s) if s else 1.0
-
-
 def validate(rows: pd.DataFrame) -> None:
     slices = pd.read_parquet(ROOT / "labels/rsna_slices/rsna_slices.parquet").set_index("volume_id")
     res = []
@@ -238,10 +234,10 @@ def validate(rows: pd.DataFrame) -> None:
             continue
         row = {"volume_id": r.volume_id, "manual_ml": man.sum() / 1000}
         for k, m in c.items():
-            row[f"dice_{k}"] = _dice(m, man)
+            row[f"dice_{k}"] = dice(m, man, empty=1.0)
             row[f"ml_{k}"] = m.sum() / 1000
         row["recall_union"], row["spill_union"] = slice_qc(c["union"], st)
-        row["dice_ts_model"] = _dice(c["ts"], c["model"])
+        row["dice_ts_model"] = dice(c["ts"], c["model"], empty=1.0)
         res.append(row)
     df = pd.DataFrame(res)
     OUT.mkdir(parents=True, exist_ok=True)
@@ -265,7 +261,7 @@ def fuse(rows: pd.DataFrame, min_agree: float, max_spill: float) -> None:
             continue
         st, m = c["_state"], c["union"]
         recall, spill = slice_qc(m, st)
-        agree = _dice(c["ts"], c["model"])
+        agree = dice(c["ts"], c["model"], empty=1.0)
         mixed = bool(str(r.volume_id) in lab.index and (lab.loc[str(r.volume_id), others] > 0).any())
         ok = agree >= min_agree and spill <= max_spill and m.sum() >= 100
         if ok:

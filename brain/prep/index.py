@@ -417,11 +417,7 @@ def folder_of(dataset: str) -> str:
     A trailing contrast token is stripped (``brats2023_gli_t1n`` -> ``brats2023_gli``, ``fomo_hbn_t1w`` ->
     ``fomo_hbn``, ``wmh_flair`` -> ``wmh``); other sequences keep their own folder (``wmh_t1``, ``isles22_dwi``).
     """
-    ds = str(dataset)
-    for c in CONTRAST_SUFFIXES:
-        if ds.endswith("_" + c):
-            return ds[: -len(c) - 1]
-    return ds
+    return strip_contrast(dataset)
 
 
 def inherit_current_splits(vols: pd.DataFrame, old_vols: pd.DataFrame) -> pd.DataFrame:

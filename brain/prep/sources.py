@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from brain.common.paths import DATASETS, SCRATCH  # noqa: F401  (re-exported for prep.index)
-from brain.prep.fomo import CONTRAST_SUFFIXES
+from brain.prep.fomo import strip_contrast
 
 BRATS_CONTRASTS = ("t1n", "t1c", "t2w", "t2f")
 BRATS_COHORTS = {"2023_GLI": "brats2023_gli", "2023_MEN": "brats2023_men",
@@ -48,11 +48,8 @@ class Case:
 
     @property
     def folder(self) -> str:
-        """Store folder: BraTS contrasts share their cohort folder."""
-        for c in CONTRAST_SUFFIXES:
-            if self.dataset.endswith(f"_{c}"):
-                return self.dataset[: -len(c) - 1]
-        return self.dataset
+        """Store folder: the dataset without its contrast token (BraTS contrasts share their cohort folder)."""
+        return strip_contrast(self.dataset)
 
     @property
     def mask_id(self) -> str:

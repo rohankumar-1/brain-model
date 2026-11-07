@@ -268,12 +268,12 @@ def prepare(case: Case, size=SIZE, z_anchor: str = "auto", keep_debug: bool = Fa
     return Partial(case, raw, masks, info, t, prior, float(cover), debug)
 
 
-# MRI z-scores come from the brain mask when it passed QC, or when it failed QC with a plausible extent: most failures
-# are the template-Dice check on partial-coverage slabs and infant brains, whose masks are fine, while whole-head
-# statistics (scalp and skull included) put the brain off the store's scale (RSNA-ICA MRA: brain median 0.54, spread
-# 0.36 instead of 0 / 1). The 2026-11-03 store was corrected after prep (the former ``restat_failed`` step, stored as
-# ``stats_from = brain_restat``); this rule makes a rebuild produce that scale directly.
-BRAIN_STATS_FRAC = (0.02, 0.30)
+# MRI z-scores come from the brain mask when it passed QC, or when it failed QC with a plausible extent
+# (``brainmask.PLAUSIBLE_FRAC``, i.e. it failed only the template-Dice check): those are mostly partial-coverage slabs and
+# infant brains whose masks are fine, while whole-head statistics (scalp and skull included) put the brain off the
+# store's scale (RSNA-ICA MRA: brain median 0.54, spread 0.36 instead of 0 / 1). The 2026-11-03 store was corrected
+# after prep (the former ``restat_failed`` step, stored as ``stats_from = brain_restat``); this rule makes a rebuild
+# produce that scale directly.
 
 
 def mri_stats_on_brain(brain: np.ndarray | None, binfo: dict) -> bool:
@@ -283,7 +283,8 @@ def mri_stats_on_brain(brain: np.ndarray | None, binfo: dict) -> bool:
     if binfo.get("brain_ok", True):
         return True
     frac = binfo.get("brain_frac")
-    return frac is not None and BRAIN_STATS_FRAC[0] <= float(frac) <= BRAIN_STATS_FRAC[1]
+    lo, hi = brainmask.PLAUSIBLE_FRAC
+    return frac is not None and lo <= float(frac) <= hi
 
 
 def finish(p: Partial, opts: Options | None = None, synth: np.ndarray | None = None,

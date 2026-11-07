@@ -27,6 +27,8 @@ from pathlib import Path
 import numpy as np
 from scipy import ndimage as ndi
 
+from brain.prep.morph import ball, dice, largest_cc
+
 METHODS = ("auto", "synthstrip", "classical", "none")
 SKULL_MM = 14.0           # scalp + skull thickness removed from a skull-on MRI head mask
 # brain fraction of the 256 x 256 x 160 mm grid. A full brain is ~0.17; the floor stays low for partial-FOV scans
@@ -43,16 +45,6 @@ class BrainMaskUnavailable(RuntimeError):
     pass
 
 
-def _ball(r: int) -> np.ndarray:
-    a = np.arange(-r, r + 1)
-    return (a[:, None, None] ** 2 + a[None, :, None] ** 2 + a[None, None, :] ** 2) <= r * r
-
-
-def _largest(mask: np.ndarray) -> np.ndarray:
-    lab, n = ndi.label(mask)
-    return mask if n <= 1 else lab == (1 + np.bincount(lab.ravel())[1:].argmax())
-
-
 def _fill_axial(mask: np.ndarray) -> np.ndarray:
     return np.stack([ndi.binary_fill_holes(s) for s in mask])
 
@@ -60,8 +52,8 @@ def _fill_axial(mask: np.ndarray) -> np.ndarray:
 def classical_ct(hu: np.ndarray) -> np.ndarray:
     """Soft-tissue window, opened so the scalp/table disconnect across the skull, closed and filled, bone removed."""
     soft = (hu > -5.0) & (hu < 100.0)                     # CSF .. acute blood; excludes air, fat and bone
-    core = _largest(ndi.binary_opening(soft, _ball(3)))
-    m = _fill_axial(ndi.binary_closing(core, _ball(4)))
+    core = largest_cc(ndi.binary_opening(soft, ball(3)))
+    m = _fill_axial(ndi.binary_closing(core, ball(4)))
     return m & (hu < 300.0)
 
 
@@ -69,10 +61,10 @@ def classical_mri(vol: np.ndarray, floor: float, stripped: bool, skull_mm: float
     """``vol`` is stored robust-z with background ``floor``. A stripped scan's foreground already is the brain."""
     fg = vol > floor + 0.5
     if stripped:
-        return _largest(fg)
+        return largest_cc(fg)
     # EDT erosion: keep voxels deeper than the skull+scalp thickness from the head surface
-    depth = ndi.distance_transform_edt(_fill_axial(_largest(fg)))
-    return _largest(ndi.binary_opening(depth > skull_mm, _ball(2)))
+    depth = ndi.distance_transform_edt(_fill_axial(largest_cc(fg)))
+    return largest_cc(ndi.binary_opening(depth > skull_mm, ball(2)))
 
 
 def ras_image(a: np.ndarray):
@@ -83,11 +75,6 @@ def ras_image(a: np.ndarray):
     img.SetSpacing((1.0, 1.0, 1.0))
     img.SetDirection(RAS_DIRECTION)
     return img
-
-
-def dice(a: np.ndarray, b: np.ndarray) -> float:
-    a, b = a.astype(bool), b.astype(bool)
-    return float(2 * (a & b).sum() / max(int(a.sum()) + int(b.sum()), 1))
 
 
 def qc(mask: np.ndarray, prior: np.ndarray | None = None, fg: np.ndarray | None = None) -> dict:

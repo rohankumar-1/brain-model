@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import multiprocessing as mp
 import os
 import queue
@@ -35,11 +34,6 @@ import pandas as pd
 from brain.prep import pipeline, sources, store
 
 STAGES = ("read", "n4", "center", "register", "resample", "brainmask", "intensity")
-
-
-def _plain(v):
-    v = v.item() if hasattr(v, "item") else v
-    return None if isinstance(v, float) and not math.isfinite(v) else v
 
 
 def read_manifests(root: Path) -> pd.DataFrame:
@@ -272,7 +266,7 @@ def run_gpu(pool, todo: list, root: Path, z_anchor: str, opts, out, batch: int, 
             if n_ok == 0 and n_err >= ERROR_BREAKER:
                 print(f"[run] {n_err} errors and no success: stopping (last: {r.get('error', '')[-200:]!r})", flush=True)
                 stopped = True
-            out.write(json.dumps({**{key: _plain(v) for key, v in r.items()}, "written_at": time.time()}) + "\n")
+            out.write(json.dumps({**{key: store.plain(v) for key, v in r.items()}, "written_at": time.time()}) + "\n")
             out.flush()
             if k % 50 == 0 or r["status"] == "error":
                 print(f"[run] {k}/{len(todo)} {r['dataset']}/{r['case_id']} {r['status']} "
@@ -431,7 +425,7 @@ def main() -> None:
                 complete = run_gpu(pool, todo, a.root, a.z_anchor, opts, out, a.mask_batch, guard)
                 continue
             for k, row in enumerate(pool.imap_unordered(work, [(c, a.root, a.z_anchor, opts) for c in todo]), 1):
-                out.write(json.dumps({**{k: _plain(v) for k, v in row.items()}, "written_at": time.time()}) + "\n")
+                out.write(json.dumps({**{k: store.plain(v) for k, v in row.items()}, "written_at": time.time()}) + "\n")
                 out.flush()
                 if k % 50 == 0 or row["status"] == "error":
                     print(f"[run] {k}/{len(todo)} {row['dataset']}/{row['case_id']} {row['status']} "
