@@ -336,11 +336,10 @@ def make_loader(
     shuffle: bool,
     seed: int,
     distributed: bool = False,
-    n_volumes: int | None = None,
 ) -> DataLoader:
     """Loader of crop chunks of ``crop_microbatch(batch_size)`` volumes, cut inside the workers.
 
-    ``shuffle=False`` is for validation: a fixed random subset of ``n_volumes`` volumes with fixed crops.
+    ``shuffle=False`` is for validation: a fixed random subset of ``batch_size`` volumes with fixed crops.
     """
     d = cfg["data"]
     ds = VolumeDataset(
@@ -353,7 +352,7 @@ def make_loader(
     )
     workers = int(d.get("num_workers", 8))
     if not shuffle:
-        keep = torch.randperm(len(ds), generator=torch.Generator().manual_seed(0))[: int(n_volumes or batch_size)]
+        keep = torch.randperm(len(ds), generator=torch.Generator().manual_seed(0))[: int(batch_size)]
         ds = torch.utils.data.Subset(ds, keep.tolist())
         workers = min(workers, 2)
     alpha = float(d.get("balance_alpha", 1.0))

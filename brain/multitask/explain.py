@@ -234,8 +234,8 @@ TASK_EMB_STEPS = "task_emb_steps.npz"
 
 
 def task_emb_steps(run: Path) -> tuple[list[int], list[np.ndarray], list[str], str | None]:
-    """The task embeddings at each ``step_*.pt`` snapshot of a run, or from ``task_emb_steps.npz`` (written by
-    ``save_task_emb_steps``) once the snapshots are deleted: (steps, embeddings, task ids, registry path)."""
+    """The task embeddings at each ``step_*.pt`` snapshot of a run, or from a saved ``task_emb_steps.npz`` once the
+    snapshots are deleted: (steps, embeddings, task ids, registry path)."""
     import re
 
     if (run / TASK_EMB_STEPS).exists():
@@ -251,13 +251,6 @@ def task_emb_steps(run: Path) -> tuple[list[int], list[np.ndarray], list[str], s
         cfg = cfg or ck["config"]
         embs.append(ck["multitask"]["task_emb.weight"].float().numpy())
     return [int(re.findall(r"\d+", q.stem)[0]) for q in steps], embs, ids, cfg["data"].get("registry")
-
-
-def save_task_emb_steps(run: Path) -> Path:
-    steps, embs, ids, registry = task_emb_steps(run)
-    np.savez(run / TASK_EMB_STEPS, steps=np.array(steps), emb=np.stack(embs), tasks=np.array(ids),
-             registry=np.array(registry or ""))
-    return run / TASK_EMB_STEPS
 
 
 def dynamics(a) -> None:

@@ -31,7 +31,7 @@ GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich",
 # heads a resumed run may add (absent from its checkpoint): HL-Gauss bins, the token map
 NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.")
 TYPE_COLUMNS = {"binary": "t_bin", "regression": "t_reg", "multiclass": "t_cls", "segmentation": "t_seg",
-                "survival": "t_surv", "dense": "t_dense"}
+                "dense": "t_dense"}
 
 
 def build_encoder(cfg: dict, device: torch.device, synthetic: bool):

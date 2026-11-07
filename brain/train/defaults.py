@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from typing import Any
+
+from brain.common.config import deep_update
 from brain.common.grid import GRID_XYZ
 
 METHODS = {
@@ -199,19 +201,11 @@ def _multitask_defaults() -> dict[str, Any]:
 
 MULTITASK: dict[str, Any] = _multitask_defaults()
 
-def _merge(a: dict, b: dict) -> dict:
-    """Deep merge, ``b`` over ``a``."""
-    out = deepcopy(a)
-    for k, v in b.items():
-        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else deepcopy(v)
-    return out
-
-
 def _joint_defaults() -> dict[str, Any]:
     """Joint SSL + multitask training from scratch (brain.train.joint): the 3D LeJEPA config plus the multitask
     sections (their keys do not collide: LeJEPA ``aug`` / ``loss`` / ``model`` keys and the multitask ones are disjoint),
     the encoder fixes as options and the curriculum under ``joint``."""
-    c = _merge(MULTITASK, LEJEPA3D)
+    c = deep_update(MULTITASK, LEJEPA3D)
     c["model"].update(init_from=None, n_cls=1, drop_path=0.0,
                       # RoPE frequencies from a 32 mm shortest period (None: the original 6.3 mm, ~38% aliased pairs)
                       rope_min_period_mm=None)
@@ -221,8 +215,7 @@ def _joint_defaults() -> dict[str, Any]:
     # ssl_start: the SSL weight while it tapers from the start (1.0 = equal to the tasks' full weight); R15 4 -> floor 1
     c["joint"] = {"ssl_start": 1.0, "ssl_floor": 0.5, "warmup_frac": 0.25, "task_ramp_frac": 0.15, "taper_end_frac": 0.6,
                   "warmup_steps": None, "task_ramp_steps": None, "taper_end_steps": None,
-                  "ssl_batch_size": 4, "normalize": True,
-                  "task_batch_size": None, "task_workers": None}    # legacy (pre-2026-11-06 joint trainer): ignored
+                  "ssl_batch_size": 4, "normalize": True}
     # the task side is brain.train.multitask's trainer: optim.batch_size = task volumes per GPU; from scratch the encoder
     # trains at the full LR (no multitask post-training discount, no layer-wise decay)
     c["optim"].update(batch_size=4, enc_lr_mult=1.0, layer_decay=1.0)

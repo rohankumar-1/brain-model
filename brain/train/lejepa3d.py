@@ -98,10 +98,10 @@ def _record(obj, stream) -> None:
             _record(v, stream)
 
 
-def forever_loader(store, split, cfg, *, batch_size, shuffle, seed, distributed, n_volumes=None):
+def forever_loader(store, split, cfg, *, batch_size, shuffle, seed, distributed):
     """Yields lists of crop chunks that together hold ``batch_size`` volumes."""
     loader = make_loader(store, split, cfg, batch_size=batch_size, shuffle=shuffle, seed=seed,
-                         distributed=distributed, n_volumes=n_volumes)
+                         distributed=distributed)
     parts = batch_size // crop_microbatch(batch_size)
 
     def _gen():
