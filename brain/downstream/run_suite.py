@@ -204,10 +204,9 @@ def main() -> None:
     print(f"[task] {task.name} type={task.task_type} n_volumes={len(task.volume_ids)}")
     if task.name in SEGMENTATION_TASKS or task.task_type == "segmentation":
         raise SystemExit(f"{task.name} is a segmentation task: python -m brain.downstream.seg3d (our 3D encoders)")
-    mods = set(model.spec.get("modalities") or ("ct", "mri"))
     task_mods = {str(m).lower()[:2] for m in task.modalities.values()} if task.modalities else set()
-    if task_mods and not task_mods & {m[:2] for m in mods}:
-        raise SystemExit(f"{model.name} takes {sorted(mods)} only; {task.name} is {sorted(task_mods)}")
+    if task_mods and not task_mods & model.modality_set:
+        raise SystemExit(f"{model.name} takes {sorted(model.modality_set)} only; {task.name} is {sorted(task_mods)}")
     require_stores(task, args.slices_root)
 
     emb = load_or_build_embeddings(model=model, slices_root=args.slices_root, image_paths=task.image_paths,

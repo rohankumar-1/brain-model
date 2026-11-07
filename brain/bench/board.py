@@ -3,8 +3,9 @@
 For each model and modality: the tasks both it and the reference can be scored on (their modalities; neither trained
 on the task's labels), one readout per task fixed on validation across all models (``brain.eval.report.fixed_heads``),
 per-scan predictions paired on the scans both answered, and the paired subject bootstrap of ``brain.eval.report``
-(skill: 0 = chance, 1 = perfect; a headline is the mean over groups of the mean over tasks). Results computed on a
-store index other than the spec's ``index_sha1`` are left out and counted.
+(skill: 0 = chance, 1 = perfect; a headline is the mean over groups of the mean over tasks). Results that are not
+current (``current_results``: another store index, another eval window or encoding, before the version's
+``results_from``) are left out and counted.
 """
 
 from __future__ import annotations
@@ -21,18 +22,25 @@ OUT = REPO_ROOT / "runs" / "bench"
 
 
 def current_results(t: pd.DataFrame, b) -> pd.Series:
-    """Rows computed under this benchmark version: on its store index, with the suite's default eval window (multi)
-    and plain encoding (no refinement / fine grid / taps variant) and, for cross-validated tasks, with cross-fitted
-    validation (v2; v1 CV results are left out and counted as stale)."""
+    """Rows computed under this benchmark version: on its store index (or an append-only successor), with the suite's
+    default eval window (multi: CT brain / subdural / bone) and plain encoding, finished after the version's
+    ``results_from`` (v3: decontaminated test sets, pooled readouts; older rows are another protocol)."""
     ok = t.index_sha1.isin(b.index_shas) if b.index_sha1 else pd.Series(True, index=t.index)
-    ok &= t.variant == "multi"        # the suite's default window (CT: brain, subdural, bone), plain encoding
-    ok = ok & (t.cv != "cv") if b.version >= 2 else ok
-    if b.version >= 3:                # v3: pooled heads + tok_conv from v3 runs only (decontaminated test sets)
-        ok &= ~t["head"].astype(str).str.match(r"^(cls|grid|plane|pca_global|pca)_")      # v2's axial / CLS views
-        since = b.raw.get("results_from")
-        if since:
-            ok &= pd.to_datetime(t["finished_utc"], utc=True) >= pd.Timestamp(since)
+    ok &= t.variant == "multi"
+    if b.results_from:
+        ok &= pd.to_datetime(t["finished_utc"], utc=True) >= pd.Timestamp(b.results_from)
     return ok
+
+
+def current_table(b, tasks: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
+    """The current results (``current_results``) on ``tasks`` and each task's readout: pinned, else the head with the
+    best mean validation score (``fixed_heads``)."""
+    from brain.eval.report import fixed_heads, suite_heads
+
+    t = suite_heads()
+    t = t[t.task.isin(tasks)]
+    t = t[current_results(t, b)]
+    return t, b.readouts() or fixed_heads(t)
 
 
 def discover(t: pd.DataFrame, tasks: list[str], min_tasks: int = 5) -> list[str]:
@@ -62,11 +70,10 @@ def pairs(model, ref, b, t: pd.DataFrame, heads: dict, tasks: list[str]) -> tupl
     from brain.eval.report import _suite_preds, pair_rows
 
     seen = b.seen_by(model) | b.seen_by(ref)
-    mods = [{str(m).lower()[:2] for m in (x.spec.get("modalities") or ("ct", "mri"))} for x in (model, ref)]
     out, notes = [], []
     for task in tasks:
         mod = b.modality[task][:2]
-        if not all(mod in m for m in mods):
+        if mod not in model.modality_set or mod not in ref.modality_set:
             continue
         if task in seen:
             notes.append({"task": task, "why": "labels seen in training"})
@@ -95,21 +102,19 @@ def board(models: list[str] | None = None, ref: str | None = None, with_seg: boo
           out: Path = OUT) -> pd.DataFrame:
     from brain.bench.spec import load
     from brain.downstream.models import resolve_model
-    from brain.eval.report import fixed_heads, suite_heads, summarise
+    from brain.eval.report import suite_heads, summarise
 
     b = load()
     tasks = b.tasks + (b.seg_tasks if with_seg else [])
+    t, heads = current_table(b, tasks)
     t_all = suite_heads()
-    t_all = t_all[t_all.task.isin(tasks)]
-    current = current_results(t_all, b)
-    t = t_all[current]
-    heads = b.readouts() or fixed_heads(t)
+    stale_rows = t_all[t_all.task.isin(tasks) & ~current_results(t_all, b)]
     refm = resolve_model(ref or b.reference)
     targets = models if models else discover(t, tasks)
     resolved = [refm] + [m for m in (resolve_model(x) for x in targets) if m.model_id != refm.model_id]
     rows, per_task, notes = [], [], []
     for m in resolved:
-        stale = int((t_all[~current].model_id == m.model_id).sum())
+        stale = int((stale_rows.model_id == m.model_id).sum())
         prs, nts = pairs(m, refm, b, t, heads, tasks)
         notes += [{"model": m.name, **n} for n in nts]
         for mod in sorted({r["modality"] for r in prs}):
@@ -196,8 +201,8 @@ def render(tab: pd.DataFrame, ref, b) -> str:
                          f"{r.stale_results} |")
         lines.append("")
     lines += ["`*`: the interval excludes 0. Left out: tasks dropped for that model (seen labels, missing results, "
-              "protocol mismatch; see `_left_out.csv`). Stale: results on another store index, or cross-validated "
-              "without cross-fitted validation (before v2), not used. "
+              "protocol mismatch; see `_left_out.csv`). Stale: results on another store index or from before this "
+              "benchmark version (`results_from`), not used. "
               "(partial): results missing on some of its tasks, so its numbers are not yet comparable.", ""]
     return "\n".join(lines)
 
@@ -212,14 +217,12 @@ def pin(models: list[str] | None = None) -> dict[str, str]:
 
     from brain.bench.spec import load
     from brain.downstream.models import resolve_model
-    from brain.eval.report import fixed_heads, suite_heads
+    from brain.eval.report import fixed_heads
 
     b = load()
     if b.readouts_file is None:
         raise SystemExit("the spec has no readouts file")
-    t = suite_heads()
-    t = t[t.task.isin(b.tasks + b.seg_tasks)]
-    t = t[current_results(t, b)]
+    t, _ = current_table(b, b.tasks + b.seg_tasks)
     refs = [resolve_model(x) for x in (models or discover(t, b.tasks))]
     complete = []
     for m in refs:

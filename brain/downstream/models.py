@@ -68,6 +68,11 @@ class ModelRef:
     def is_checkpoint(self) -> bool:
         return self.ckpt is not None
 
+    @property
+    def modality_set(self) -> set[str]:
+        """The modalities it takes, as ``{"ct", "mr"}`` prefixes (models.yaml ``modalities``; default both)."""
+        return {str(m).lower()[:2] for m in (self.spec.get("modalities") or ("ct", "mri"))}
+
     def load(self, device: torch.device):
         """A frozen encoder with ``encode_volume``."""
         if self.ckpt is not None:

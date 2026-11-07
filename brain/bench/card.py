@@ -35,14 +35,11 @@ def _fmt(v, d: int = 3) -> str:
 def transfer_rows(model, b, tasks: list[str]) -> pd.DataFrame:
     """One row per benchmark task: the leaderboard's readout for this model on the pinned index, scored like the
     leaderboard scores it (its saved per-scan predictions, every CV repeat saved, subject bootstrap)."""
-    from brain.bench.board import _pick, current_results
-    from brain.eval.report import _suite_preds, fixed_heads, score_ci, suite_heads
+    from brain.bench.board import _pick, current_table
+    from brain.eval.report import _suite_preds, score_ci
     from brain.eval.skill import skill
 
-    t = suite_heads()
-    t = t[t.task.isin(tasks)]
-    t = t[current_results(t, b)]
-    heads = b.readouts() or fixed_heads(t)
+    t, heads = current_table(b, tasks)
     rows = []
     for task in tasks:
         r = _pick(t, model.model_id, task, heads.get(task))
@@ -89,7 +86,7 @@ def card(target: str, out: Path = CARDS) -> str:
              + (f" Trained on {len(m.seen_tasks)} registry tasks; benchmark tasks with seen labels: "
                 f"{', '.join(seen) or 'none'}." if m.is_checkpoint and m.seen_tasks else ""), ""]
 
-    tasks = [t for t in b.tasks if b.modality[t][:2] in {x[:2] for x in (m.spec.get("modalities") or ["ct", "mri"])}]
+    tasks = [t for t in b.tasks if b.modality[t][:2] in m.modality_set]
     tr = transfer_rows(m, b, tasks)
     lines += ["## 1. Transfer (frozen encoder)", "",
               "| Group | Task | Mod | Metric | Readout | Test [95% CI] | Val | Skill | n test | Overlap |",
@@ -99,13 +96,13 @@ def card(target: str, out: Path = CARDS) -> str:
             lines.append(f"| {r.group} | {r.task} | {r.modality} | | | not run | | | | |")
             continue
         flag = " (seen)" if r.task in seen else ""
-        cv = (f" (CV, {r.repeats} rep.)" if r.repeats > 1 else " (CV, 1st rep.)") if r.cv else ""
+        cv = f" (CV, {int(r.repeats)} rep.)" if r.cv else ""
         lines.append(f"| {r.group} | {r.task}{flag} | {r.modality} | {r.metric} | {r.head}{cv} "
                      f"| {_fmt(r.test)} [{_fmt(r.lo)}, {_fmt(r.hi)}] | {_fmt(r.val)} | {_fmt(r.skill)} | "
                      f"{int(r.n_test) if pd.notna(r.n_test) else '-'} | {_fmt(r.overlap, 2)} |")
     if "cv" in tr and tr.cv.fillna(False).any():
         lines += ["", "Test is scored from the saved per-scan predictions, as on the leaderboard. CV tasks: the mean over "
-                  "the saved repeats (`1st rep.`: a result from before 2026-10-27, which kept only the first of 3)."]
+                  "the saved repeats."]
     scored = tr[~tr.task.isin(seen)] if "skill" in tr else tr
     if "skill" in scored and scored.skill.notna().any():
         g = scored.dropna(subset=["skill"]).groupby("group").skill.agg(["mean", "count"])
