@@ -6,8 +6,6 @@ so no intensity is clipped. ``x`` is in native units (HU for CT, robust z for MR
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import torch
 
@@ -36,43 +34,6 @@ MOD_CT, MOD_MRI = 0, 1
 # lesions), 3 the bright extreme (CT bone; MRI hyperintensities: enhancement, FLAIR lesions, fat). MRI values are robust
 # z-scores, CT Hounsfield units.
 ROLES = {"ct": [(40.0, 40.0), (75.0, 100.0), (500.0, 400.0)], "mri": [(0.5, 1.5), (2.0, 4.0), (4.0, 2.0)]}
-
-_CT_CW = torch.tensor([
-    [40.0, 40.0], [75.0, 100.0], [32.0, 20.0], [40.0, 200.0], [500.0, 400.0],
-])
-# last bin is the uniform tail, not a preset
-WINDOW_MIXES = {
-    "v4": {
-        "ct_p": (0.35, 0.15, 0.15, 0.15, 0.10, 0.10),
-        "mri_tissue_p": 0.70,
-        "mri_tissue_c": (0.3, 0.5),
-        "mri_tissue_w_log": (math.log(1.5), 0.3),
-    },
-    # More mass on the eval/tissue windows; bone and the wild tail stay rare.
-    "tissue": {
-        "ct_p": (0.50, 0.18, 0.12, 0.12, 0.05, 0.03),
-        "mri_tissue_p": 0.80,
-        "mri_tissue_c": (0.3, 0.5),
-        "mri_tissue_w_log": (math.log(2.2), 0.25),
-    },
-    # Brain, subdural, stroke, soft tissue. No bone preset and no wild tail:
-    # a bone window flattens the tissue the brain mask keeps.
-    "brain": {
-        "ct_p": (0.55, 0.25, 0.15, 0.05, 0.0, 0.0),
-        "mri_tissue_p": 0.85,
-        "mri_tissue_c": (0.3, 0.5),
-        "mri_tissue_w_log": (math.log(1.5), 0.25),
-    },
-    # As "brain", plus a small bone share (3%): frozen evaluation feeds CT through a bone window too (MULTI), and
-    # skull / fracture findings need bone contrast, so the encoder should have seen it. Still no wild tail.
-    "brain_bone": {
-        "ct_p": (0.54, 0.25, 0.15, 0.03, 0.03, 0.0),
-        "mri_tissue_p": 0.85,
-        "mri_tissue_c": (0.3, 0.5),
-        "mri_tissue_w_log": (math.log(1.5), 0.25),
-    },
-}
-
 
 def asinh_window(x, c, w):
     """Works on torch tensors and numpy arrays."""
@@ -111,56 +72,12 @@ def foreground_mask(x: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
     return x > t
 
 
-def _mix(name: str) -> dict:
-    key = (name or "v4").lower()
-    if key not in WINDOW_MIXES:
-        raise KeyError(f"Unknown window mix {name!r}. Choices: {', '.join(WINDOW_MIXES)}")
-    return WINDOW_MIXES[key]
-
-
-def sample_windows(mod: torch.Tensor, mode: str = "random", mix: str = "v4", generator=None) -> tuple[torch.Tensor, torch.Tensor]:
-    """Independent (c, w) per sample. Returns (B, 1, 1, 1) tensors.
-
-    ``mode``: ``fixed`` uses the canonical window; ``random`` draws from ``mix``
-    (CT radiology presets plus a tail; MRI tissue vs wide).
-    """
-    b, device = mod.shape[0], mod.device
-    if mode == "fixed":
-        c = torch.where(mod == MOD_CT, 40.0, 0.5)
-        w = torch.where(mod == MOD_CT, 40.0, 1.5)
-        return c.view(b, 1, 1, 1), w.view(b, 1, 1, 1)
-
-    spec = _mix(mix)
-    ct_p = torch.tensor(spec["ct_p"], device=device, dtype=torch.float32)
-    choice = torch.multinomial(ct_p.expand(b, -1), 1, generator=generator).squeeze(1)
-    cw = _CT_CW.to(device=device, dtype=torch.float32)[choice.clamp(max=4)]
-    c_ct = cw[:, 0] + torch.randn(b, device=device, generator=generator) * 10.0
-    w_ct = cw[:, 1] * torch.exp(torch.randn(b, device=device, generator=generator) * 0.25)
-    tail = choice == 5
-    c_ct = torch.where(tail, torch.empty(b, device=device).uniform_(-200.0, 600.0, generator=generator), c_ct)
-    w_ct = torch.where(
-        tail,
-        torch.empty(b, device=device).uniform_(math.log(15.0), math.log(400.0), generator=generator).exp(),
-        w_ct,
-    )
-
-    c_mu, c_std = spec["mri_tissue_c"]
-    w_mu, w_std = spec["mri_tissue_w_log"]
-    tissue = torch.rand(b, device=device, generator=generator) < float(spec["mri_tissue_p"])
-    c_mri = torch.where(
-        tissue,
-        torch.randn(b, device=device, generator=generator) * c_std + c_mu,
-        torch.empty(b, device=device).uniform_(-2.0, 6.0, generator=generator),
-    )
-    w_mri = torch.where(
-        tissue,
-        torch.exp(torch.randn(b, device=device, generator=generator) * w_std + w_mu),
-        torch.empty(b, device=device).uniform_(math.log(0.5), math.log(4.0), generator=generator).exp(),
-    )
-    is_ct = mod == MOD_CT
-    c = torch.where(is_ct, c_ct, c_mri)
-    w = torch.where(is_ct, w_ct, w_mri).clamp_min(1e-3)
-    return c.view(b, 1, 1, 1), w.view(b, 1, 1, 1)
+def canonical_windows(mod: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Each row's canonical (c, w) (``CANONICAL``) by its modality, as (B, 1, 1, 1) tensors."""
+    b = mod.shape[0]
+    c = torch.where(mod == MOD_CT, CANONICAL["ct"][0], CANONICAL["mri"][0])
+    w = torch.where(mod == MOD_CT, CANONICAL["ct"][1], CANONICAL["mri"][1])
+    return c.float().view(b, 1, 1, 1), w.float().view(b, 1, 1, 1)
 
 
 def role_windows(x: torch.Tensor, modality: torch.Tensor, jitter: float = 0.0) -> torch.Tensor:

@@ -54,11 +54,11 @@ LEJEPA3D: dict[str, Any] = {
     },
     # Intensity re-rendering, applied per crop. See brain/data/augment.py.
     "aug": {
-        # mode random / fixed: one asinh window; roles: the three role windows as channels (model.in_chans 3,
-        # windowing.ROLES), each jittered by ``jitter`` widths; roles with channels 1: the same pipeline with one
-        # role window per crop (model.in_chans 1), the matched control for the three-channel input
-        "window": {"mode": "random", "mix": "brain", "jitter": 0.0, "channels": 3},
-        # Monotone tissue-contrast curve on MRI rows: random knots over the window's output range, so soft tissue can
+        # mode fixed: the canonical asinh window (bias, through-plane, noise, blur, drift only); roles: the three role
+        # windows as channels (model.in_chans 3, windowing.ROLES), each jittered by ``jitter`` widths; roles with
+        # channels 1: the same pipeline with one role window per crop (model.in_chans 1; the v4 recipe)
+        "window": {"mode": "fixed", "jitter": 0.0, "channels": 3},
+        # (roles) Monotone tissue-contrast curve on MRI rows: random knots over the window's output range, so soft tissue can
         # be stretched, compressed or (with ``flip``) inverted, as T1 <-> T2 do. Never CT (HU are physical).
         "curve": {"p": 0.8, "knots": 5, "strength": 0.6, "flip": 0.3},
         # Smooth multiplicative bias field (MRI coil shading). Skipped for CT.
@@ -75,7 +75,7 @@ LEJEPA3D: dict[str, Any] = {
         "skull": {"p": 0.5, "per_view": False},
         # Per-view rotation / scale / left-right flip on the GPU (crops3d.draw_geometry); p 0 = off.
         "geometric": {"p": 0.0, "rot_deg": [10.0, 10.0, 15.0], "scale": [0.85, 1.15], "flip_lr": 0.5},
-        # MRI histogram matching to another volume of the same contrast group (augment.histogram_match); p 0 = off.
+        # (roles) MRI histogram matching to another volume of the same contrast group (augment.histogram_match); p 0 = off.
         "histmatch": {"p": 0.0, "alpha": [0.3, 0.7]},
         # one contrast draw per volume shared by all its views (roles mode; batch3d.prepare): the agreement terms then
         # teach invariance to crop and degradation, not to contrast (R15); False = an independent draw per view

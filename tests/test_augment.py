@@ -78,7 +78,7 @@ def test_appearance_does_not_modify_its_input_and_is_finite():
     torch.manual_seed(4)
     x, mod = _mri_rows()
     x0 = x.clone()
-    aug = {"window": {"mode": "random", "mix": "brain"}, "curve": {"p": 1.0, "flip": 0.5}, "bias": {"p": 1.0},
+    aug = {"window": {"mode": "roles", "channels": 1}, "curve": {"p": 1.0, "flip": 0.5}, "bias": {"p": 1.0},
            "through_plane": {"p": 1.0}, "noise": {"p": 1.0, "sigma": (0.05, 0.05)}, "blur": {"p": 1.0},
            "drift": {"p": 1.0, "amp": 0.2}}
     a, b = augment.appearance(x, mod, aug), augment.appearance(x, mod, aug)
@@ -91,7 +91,7 @@ def test_appearance_with_everything_off_is_just_the_window():
     torch.manual_seed(5)
     a = augment.appearance(x, mod, {"window": {"mode": "fixed"}})
     torch.manual_seed(5)
-    assert torch.allclose(a, augment.window_view(x, mod, {"window": {"mode": "fixed"}}))
+    assert torch.allclose(a, augment.window_view(x, mod))
 
 
 def test_skull_dropout_cuts_to_the_brain_only_when_drawn():

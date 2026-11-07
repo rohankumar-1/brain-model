@@ -50,18 +50,12 @@ def test_rope_translation_preserves_relative_attention():
     assert torch.allclose(logits1, logits2, atol=1e-4, rtol=1e-4)
 
 
-def test_asinh_window_is_finite_and_independent_per_view():
+def test_asinh_window_is_finite():
     from brain.data.augment import window_view
 
     x = torch.linspace(-1024, 400, 8 * 8 * 4).reshape(1, 1, 8, 8, 4).expand(2, -1, -1, -1, -1).contiguous()
-    mod = torch.zeros(2, dtype=torch.long)
-    aug = {"window": {"mode": "random", "mix": "brain"}}
-    torch.manual_seed(0)
-    a = window_view(x, mod, aug)
-    torch.manual_seed(1)
-    b = window_view(x, mod, aug)
-    assert torch.isfinite(a).all() and torch.isfinite(b).all()
-    assert not torch.allclose(a, b, atol=1e-5)
+    a = window_view(x, torch.zeros(2, dtype=torch.long))
+    assert torch.isfinite(a).all()
     from brain.common.windowing import asinh_window
 
     floor = torch.full((1, 1, 8, 8, 4), -1024.0)

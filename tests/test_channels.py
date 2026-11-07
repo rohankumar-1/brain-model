@@ -60,15 +60,12 @@ def test_roles_appearance_is_native_units_then_three_channels():
 
 
 def test_the_contrast_curve_never_touches_ct():
-    """CT density is physical: in both appearance paths the curve (here always on, always inverting) re-renders only
-    the MRI rows."""
+    """CT density is physical: the curve (here always on, always inverting) re-renders only the MRI rows."""
     from brain.data.augment import appearance
 
     x = torch.randn(4, 1, *SHAPE_ZYX) * 40 + 40
     mod = torch.tensor([0, 0, 1, 1])
     curve = {"p": 1.0, "knots": 5, "strength": 0.6, "flip": 1.0}
-    one, plain = (appearance(x, mod, {"window": {"mode": "fixed"}, **extra}) for extra in ({"curve": curve}, {}))
-    assert torch.equal(one[:2], plain[:2]) and not torch.allclose(one[2:], plain[2:])
     roles, full = appearance(x, mod, {"window": {"mode": "roles"}, "curve": curve}), role_windows(x, mod)
     assert torch.equal(roles[:2], full[:2]) and not torch.allclose(roles[2:], full[2:])
 

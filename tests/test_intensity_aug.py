@@ -58,7 +58,7 @@ def test_appearance_runs_with_both():
     torch.manual_seed(1)
     x = torch.randn(4, 1, 16, 32, 32)
     mod = torch.tensor([1, 1, 0, 1])
-    aug = {"window": {"mode": "random", "mix": "brain_bone"}, "noise": {"p": 1.0, "kind": "rician"},
+    aug = {"window": {"mode": "roles", "channels": 1}, "noise": {"p": 1.0, "kind": "rician"},
            "histmatch": {"p": 1.0}}
     quant = torch.stack([tissue_quantiles(x[i, 0], int(mod[i])) for i in range(4)])
     y = appearance(x, mod, aug, None, torch.arange(4), torch.tensor([1, 1, 0, 1]), quant)
