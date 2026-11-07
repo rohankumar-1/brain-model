@@ -1,5 +1,4 @@
-# The benchmark: one fixed, versioned protocol every model is scored on (python -m brain.bench; the per-run report
-# python -m brain.eval.report reads the same file).
+# The benchmark: one fixed, versioned protocol every model is scored on (python -m brain.bench).
 #
 # Any model the suite can encode with is eligible: our checkpoints, and the published encoders and baselines of
 # configs/bench/models.yaml (brain.downstream.models). Results are compared within a training class, or across classes
@@ -14,9 +13,8 @@
 # probe on 8 octant means; (2) decontaminated evaluation sets: 234 volumes that are pixel-verified copies of training
 # scans (UCSF-PDGM = BraTS-GoAT, MSD = BraTS-GLI) or second copies inside one cohort (ATLAS, MSD, ADNI) leave every task
 # (configs/bench/exclude_v3.csv, brain.downstream.tasks.load_task); (3) readouts re-pinned on current models. v2 results
-# are a different protocol: not compared with v3.
+# are a different protocol: not compared with v3. The suite's readouts are v3's (brain.downstream.run_suite).
 version: 3
-readout: pooled
 # v3 results are runs finished after this (the last v2 run ended 2026-11-05T23:00Z, the first v3 one started 23:21Z):
 # older rows share head names (tok_conv) but were scored on the contaminated test sets
 results_from: "2026-11-05T23:10:00Z"
@@ -106,12 +104,6 @@ seen:
   brats2023_men: *tumor_masks
 
 # adaptation: few-shot on the held-out tasks (brain.multitask.fewshot), task embedding fitted on k labelled scans.
-# Multitask / joint checkpoints only (the run report).
+# BrainQuery checkpoints with task heads only (python -m brain.bench run --full; the model card's section 5).
 adaptation:
   k: 64
-
-# in_domain: the model's own heads on the trained tasks' test splits (brain.multitask.test_eval), grouped by the
-#   registry's task groups; scored on the tasks both the run and the reference trained (the run report).
-in_domain:
-  max_test: 400
-  max_seg: 100

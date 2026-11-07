@@ -1,27 +1,18 @@
-"""One report per run: three headline numbers against a reference run, then group scores; per-task detail to CSV.
+"""Scoring shared by the benchmark front end (``brain.bench``: board, card, compare, pin) and its page generators.
 
-    python -m brain.eval.report runs/joint/x/best.pt --ref runs/multitask/v7nosmall_s42/best.pt
-    jobs/submit_report.sh RUN_CKPT REF_CKPT          # runs the evaluations below, then this report
-
-* **In-domain**: the model's own heads on the trained tasks' test splits (``brain.multitask.test_eval`` per-scan
-  predictions), grouped by registry task group, on the tasks both models trained.
-* **Transfer**: the frozen encoder on the benchmark tasks (``configs/bench/benchmark.yaml``; per-scan predictions of
-  the frozen suite, ``brain.downstream.suite``). One head per task for every model, fixed on validation (the encoder
-  readout with the best mean validation score across all evaluated models). A task whose labels a model trained on
-  (``benchmark.yaml: seen``) is left out of that model's comparisons.
-* **Adaptation**: few-shot on the held-out tasks at one k (``brain.multitask.fewshot``), paired seed by seed.
-
-Every metric is on the skill scale (``brain.eval.skill``: 0 = chance, 1 = perfect). A headline is the mean over groups
-of the mean over tasks, on the tasks both models have, scored on the scans both models answered. Intervals come from
-one paired bootstrap per headline: each subject (``dedup_key``) gets a Poisson(1) weight shared by every task and
-model it appears in, so scans of one person, and tasks sharing scans, move together; the headline is recomputed in
-each replicate and its 2.5 / 97.5 percentiles are the interval (per-task intervals come from the same replicates).
-Writes ``<out>/report.md`` and ``<out>/report_tasks.csv`` (default ``runs/eval/<run>``).
+* ``suite_heads``: every frozen-suite result of the records database, one row per (model, task, head, variant), with
+  its val / test score, protocol and per-scan prediction file; ``fixed_heads`` picks a readout per task on validation.
+* ``_suite_preds`` / ``score_ci``: a result's saved per-scan predictions (every CV repeat) and one model's score with
+  a subject-level bootstrap interval.
+* ``pair_rows`` / ``summarise``: two models paired on the scans both answered, and the paired subject bootstrap of a
+  headline on the skill scale (``brain.eval.skill``: 0 = chance, 1 = perfect). A headline is the mean over groups of
+  the mean over tasks. Each subject (``dedup_key``) gets a Poisson(1) weight shared by every task and model it appears
+  in, so scans of one person, and tasks sharing scans, move together; the headline is recomputed in each replicate and
+  its 2.5 / 97.5 percentiles are the interval (per-task intervals come from the same replicates).
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 from functools import lru_cache
@@ -29,82 +20,15 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 
-from brain.common.paths import REPO_ROOT, resolve
+from brain.common.paths import REPO_ROOT
 from brain.eval.skill import skill
 
-CORE = REPO_ROOT / "configs" / "bench" / "benchmark.yaml"
-HEADS_PREDS = REPO_ROOT / "runs" / "eval" / "heads_all" / "test_eval_preds.parquet"
 # readouts of a BrainQuery model's own outputs, not its encoder (records from before 2026-10-27 still have them)
 SUPERVISED_READOUTS = ("slots", "taskout", "general")
-PARTS = {"in_domain": "In-domain (heads)", "transfer": "Transfer (frozen)", "adaptation": "Adaptation (few-shot)"}
 
 
-# ------------------------------------------------------------------------------------------------ models
-def model_id(ckpt: Path) -> str:
-    """The checkpoint's records-DB id (``<run>/<file>@<fingerprint>``)."""
-    from brain.downstream.records import model_info
-
-    return model_info(ckpt)["model_id"]
-
-
-def fingerprint(mid: str) -> str:
-    return mid.split("+")[0].rpartition("@")[2]
-
-
-def label(ckpt: Path) -> str:
-    """The checkpoint's display name (``run @17k`` / ``run/best``)."""
-    from brain.downstream.results_view import model_label
-
-    return model_label(model_id(ckpt))
-
-
-def display_name(ckpt: Path) -> str:
-    """The checkpoint's BrainQuery name (``BQ-A1``, configs/bench/models.yaml) when it has one, else ``label``."""
-    from brain.downstream.models import bq_names
-
-    return bq_names().get(Path(ckpt).resolve(), label(ckpt))
-
-
-def _checkpoint(target: str) -> Path:
-    """A checkpoint path, or a BrainQuery name from configs/bench/models.yaml."""
-    from brain.downstream.models import registry
-
-    entry = registry().get(str(target)) or {}
-    return resolve(entry["ckpt"]) if entry.get("ckpt") else resolve(target)
-
-
-def heads_name(ckpt: Path) -> str:
-    """The model name ``test_eval`` writes (``<run dir>/<file stem>``)."""
-    return f"{ckpt.parent.name}/{ckpt.stem}"
-
-
-def trained(ckpt: Path) -> set[str]:
-    """The tasks a multitask / joint checkpoint was trained on (its registry minus its ``tasks`` selection); none for
-    an SSL encoder."""
-    import torch
-
-    from brain.multitask.registry import load_registry
-
-    ck = torch.load(ckpt, map_location="cpu", weights_only=False, mmap=True)
-    if "tasks" not in ck:                                       # an SSL encoder: no heads, transfer only
-        return set()
-    cfg = ck["config"]
-    return set(load_registry(cfg["data"].get("registry")).subset(list(ck["tasks"])).train_ids(cfg.get("tasks")))
-
-
-def default_out(ckpt: Path) -> Path:
-    return REPO_ROOT / "runs" / "eval" / label(ckpt).replace("/", "_").replace(" @", "_")
-
-
-def core_tasks(core: Path = CORE, with_seg: bool = False) -> list[str]:
-    """The transfer tasks of the core set, in order (``jobs/submit_report.sh`` runs these through the suite)."""
-    c = yaml.safe_load(open(core))
-    groups = dict(c["transfer"]) | (dict(c["transfer_seg"]) if with_seg else {})
-    return [t for ts in groups.values() for t in ts]
-
-
+# ------------------------------------------------------------------------------------------------ subjects
 @lru_cache(maxsize=1)
 def subject_of() -> dict[str, str]:
     """volume_id -> subject key (``dedup_key``, what the splits group by)."""
@@ -112,13 +36,6 @@ def subject_of() -> dict[str, str]:
 
     v = pd.read_csv(DEFAULT_VOLUMES, usecols=["volume_id", "dedup_key"], low_memory=False)
     return dict(zip(v.volume_id.astype(str), v.dedup_key.astype(str)))
-
-
-@lru_cache(maxsize=1)
-def n_classes() -> dict[str, int]:
-    from brain.multitask.registry import load_registry
-
-    return {t.id: max(len(t.classes), 2) for t in load_registry().tasks}
 
 
 # ------------------------------------------------------------------------------------------------ weighted metrics
@@ -207,29 +124,6 @@ def pair_rows(part: str, group: str, task: str, metric: str, runs: list, refs: l
             "run": [align(r) for r in runs], "ref": [align(r) for r in refs]}
 
 
-MIN_IN_DOMAIN_SCANS = 20     # SynthSeg-derived tasks have ~4 test scans: too few to compare, and they swamp the CI
-
-
-def heads_pairs(preds: pd.DataFrame, run: str, ref: str, tasks: set[str]) -> list[dict]:
-    from brain.multitask.registry import load_registry
-
-    group = {t.id: t.group for t in load_registry().tasks}
-    metric = {"binary": "auc", "regression": "r2", "multiclass": "bacc", "segmentation": "dice"}
-    out = []
-    d = preds[preds.task.isin(tasks) & preds.model.isin([run, ref])]
-    for t, g in d.groupby("task"):
-        a, b = g[g.model == run], g[g.model == ref]
-        if a.empty or b.empty:
-            continue
-        kind = a.kind.iloc[0]
-        r = pair_rows("in_domain", group.get(t, "?"), t, metric[kind],
-                      [(a.volume_id.tolist(), a.y.to_numpy(), a.p.to_numpy())],
-                      [(b.volume_id.tolist(), b.y.to_numpy(), b.p.to_numpy())], n_classes().get(t, 2))
-        if r and len(r["vids"]) >= MIN_IN_DOMAIN_SCANS:
-            out.append(r)
-    return out
-
-
 def cv_protocol(protocol: str | None) -> str:
     """'' for a fixed split; 'cv-xf' for cross-validation with cross-fitted validation (benchmark v2: a head's
     validation score never comes from the scans it was tuned on); 'cv' for the earlier CV, whose validation scores
@@ -258,15 +152,14 @@ def suite_heads() -> pd.DataFrame:
     db.ingest(con)
     t = db.table(con)
     t = t[t.kind == "task"].copy()
-    # the eval window (canonical / multi / ...) and encoding variant (``embeddings.cache_tag``: refinement, fine grid,
-    # taps, ...) are part of a result's identity: a variant's run is another result, never the plain encoder's
+    # the eval window (canonical / multi / ...) and, in rows from before 2026-11-07, the encoding variant (refinement,
+    # fine grid, taps, tiling: since retired) are part of a result's identity: a variant's run is another result
     proto = [(json.loads(p) if isinstance(p, str) and p else {}) for p in t.protocol]
     t["window"] = [p.get("window") or "multi" for p in proto]
     t["variant"] = [(p.get("window") or "multi") + (p.get("encoding") or "") for p in proto]
     t = t.sort_values("finished_utc").drop_duplicates(["model_id", "task", "head", "view", "seed", "variant"],
                                                       keep="last")
     t = t[~t.model_id.str.contains("+", regex=False)].copy()
-    t["fp"] = t.model_id.map(fingerprint)
     # segmentation heads store per-volume Dice (``<head>_volumes``), the others per-scan predictions (``<head>``)
     t["pred"] = [_reroot((json.loads(a).get(h) or json.loads(a).get(f"{h}_volumes")) if isinstance(a, str) and a
                          else None) for a, h in zip(t.artifacts, t["head"])]
@@ -313,71 +206,6 @@ def score_ci(metric: str, preds: list, reps: int = 1000, seed: int = 0) -> tuple
     return float(m[0]), float(np.nanpercentile(m[1:], 2.5)), float(np.nanpercentile(m[1:], 97.5))
 
 
-def transfer_pairs(run_ck: Path, ref_ck: Path, groups: dict[str, list[str]], seen: dict[str, list[str]],
-                   run_tr: set[str], ref_tr: set[str]) -> tuple[list[dict], list[dict]]:
-    """Paired transfer rows, and notes on tasks left out (missing results, protocol mismatch, seen labels)."""
-    t = suite_heads()
-    heads = fixed_heads(t)
-    fp_run, fp_ref = fingerprint(model_id(run_ck)), fingerprint(model_id(ref_ck))
-    out, notes = [], []
-    for g, tasks in groups.items():
-        for task in tasks:
-            if set(seen.get(task, [])) & (run_tr | ref_tr):
-                notes.append({"task": task, "why": "labels seen in training"})
-                continue
-            picked = []
-            for fp in (fp_run, fp_ref):
-                m = t[(t.fp == fp) & (t.task == task) & t.encoder]
-                row = m[m["head"] == heads.get(task)]
-                if row.empty and len(m) and m.val.notna().any():      # this model lacks the fixed head
-                    row = m.loc[[m.val.idxmax()]]
-                picked.append(row.iloc[-1] if len(row) else None)
-            if any(p is None for p in picked):
-                notes.append({"task": task, "why": "no result for " + ("run" if picked[0] is None else "ref")})
-                continue
-            if picked[0].cv != picked[1].cv:
-                pa, pb = picked[0].cv or "fixed", picked[1].cv or "fixed"
-                notes.append({"task": task, "why": f"protocols differ ({pa} vs {pb})"})
-                continue
-            a, b = _suite_preds(picked[0]), _suite_preds(picked[1])
-            if a is None or b is None:
-                notes.append({"task": task, "why": "prediction file missing"})
-                continue
-            r = pair_rows("transfer", g, task, picked[0].metric, a, b)
-            if r:
-                r["head"] = picked[0]["head"] if picked[0]["head"] == picked[1]["head"] else \
-                    f"{picked[0]['head']} / {picked[1]['head']}"
-                out.append(r)
-    return out, notes
-
-
-def adaptation_pairs(run_ck: Path, ref_ck: Path, k: int, seen: dict[str, list[str]] | None = None,
-                     trained_by_either: set[str] | None = None) -> list[dict]:
-    def load(ck: Path) -> dict:
-        f = ck.parent / f"fewshot_{ck.stem}.json"
-        if not f.exists():
-            return {}
-        rows = json.load(open(f)).get("preds", [])
-        return {(r["task"], int(r["seed"])): r for r in rows if int(r["k"]) == k}
-
-    a, b = load(run_ck), load(ref_ck)
-    out = []
-    for task in sorted({t for t, _ in a} & {t for t, _ in b}):
-        if set((seen or {}).get(task, [])) & (trained_by_either or set()):
-            continue                                      # e.g. dementia (OASIS-1 CDR) for runs that trained MMSE there
-        seeds = sorted({s for t, s in a if t == task} & {s for t, s in b if t == task})
-        if not seeds:
-            continue
-        m = a[(task, seeds[0])]["metric"]
-        group = "ct" if task.startswith("cq500") else "lesion_seg" if m == "dice" else "mri_dx"
-        r = pair_rows("adaptation", group, task, m,
-                      [(a[(task, s)]["volume_id"], a[(task, s)]["y"], a[(task, s)]["p"]) for s in seeds],
-                      [(b[(task, s)]["volume_id"], b[(task, s)]["y"], b[(task, s)]["p"]) for s in seeds])
-        if r:
-            out.append(r)
-    return out
-
-
 # ------------------------------------------------------------------------------------------------ bootstrap
 def summarise(rows: list[dict], reps: int = 1000, seed: int = 0) -> tuple[pd.DataFrame, dict]:
     """Per-task and headline skill for run and ref, with the paired subject-level Poisson bootstrap."""
@@ -412,112 +240,3 @@ def summarise(rows: list[dict], reps: int = 1000, seed: int = 0) -> tuple[pd.Dat
     hd = hr - hf
     return pd.DataFrame(per_task), {"run": hr[0], "ref": hf[0], "delta": hd[0], "lo": np.nanpercentile(hd[1:], 2.5),
                                     "hi": np.nanpercentile(hd[1:], 97.5), "n_tasks": len(rows)}
-
-
-def compare_pair(run_ck: Path, ref_ck: Path, heads_preds: Path = HEADS_PREDS, core: Path = CORE,
-                 with_seg: bool = False, reps: int = 1000) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """(per-task rows, headline rows, notes on left-out tasks) for one run against one reference."""
-    c = yaml.safe_load(open(core))
-    groups = dict(c["transfer"]) | (dict(c["transfer_seg"]) if with_seg else {})
-    run_ck, ref_ck = resolve(run_ck), resolve(ref_ck)
-    run_tr, ref_tr = trained(run_ck), trained(ref_ck)
-    preds = pd.read_parquet(heads_preds) if Path(heads_preds).exists() else pd.DataFrame(columns=["model", "task"])
-    tr_rows, notes = transfer_pairs(run_ck, ref_ck, groups, c.get("seen") or {}, run_tr, ref_tr)
-    parts = {"in_domain": heads_pairs(preds, heads_name(run_ck), heads_name(ref_ck), run_tr & ref_tr),
-             "transfer": tr_rows,
-             "adaptation": adaptation_pairs(run_ck, ref_ck, int(c["adaptation"]["k"]), c.get("seen") or {},
-                                            run_tr | ref_tr)}
-    tasks, heads = [], []
-    for p, rows in parts.items():
-        per, h = summarise(rows, reps=reps)
-        tasks.append(per)
-        heads.append({"part": p, **h})
-    return pd.concat(tasks, ignore_index=True), pd.DataFrame(heads), pd.DataFrame(notes)
-
-
-def compare(models: dict[str, Path], ref: str, heads_preds: Path = HEADS_PREDS, core: Path = CORE,
-            with_seg: bool = False, reps: int = 1000) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Every model in ``models`` (display name -> checkpoint) against ``models[ref]``: per-task rows, headline rows and
-    left-out-task notes, each with a ``model`` column. The notebook's view of many reports at once."""
-    tasks, heads, notes = [], [], []
-    for name, ck in models.items():
-        if name == ref:
-            continue
-        t, h, n = compare_pair(ck, models[ref], heads_preds, core, with_seg, reps)
-        tasks.append(t.assign(model=name))
-        heads.append(h.assign(model=name))
-        notes.append(n.assign(model=name))
-    return (pd.concat(tasks, ignore_index=True), pd.concat(heads, ignore_index=True),
-            pd.concat(notes, ignore_index=True))
-
-
-# ------------------------------------------------------------------------------------------------ text
-def render(run: str, ref: str, tasks: pd.DataFrame, heads: pd.DataFrame, notes: pd.DataFrame) -> str:
-    lines = [f"run: {run}   vs   ref: {ref}",
-             "skill: 0 = chance, 1 = perfect; mean over groups of task means; paired subject bootstrap 95% CI", "",
-             f"{'':24}{'run':>7}{'ref':>7}{'Δ':>8}   95% CI            tasks"]
-    for _, h in heads.iterrows():
-        ci = f"[{h.lo:+.3f}, {h.hi:+.3f}]" if np.isfinite(h.delta) else ""
-        lines.append(f"{PARTS[h.part]:24}{h.run:7.3f}{h.ref:7.3f}{h.delta:+8.3f}   {ci:18}{int(h.n_tasks):>5}")
-    for p in PARTS:
-        d = tasks[tasks.part == p] if len(tasks) else tasks
-        if not len(d):
-            lines += ["", f"{PARTS[p]}: no results for both models"]
-            continue
-        g = d.groupby("group").agg(run=("run", "mean"), ref=("ref", "mean"), n=("task", "size"))
-        g["delta"] = g.run - g.ref
-        lines += ["", f"{PARTS[p]} by group", f"  {'group':18}{'run':>7}{'ref':>7}{'Δ':>8}{'tasks':>7}"]
-        lines += [f"  {i:18}{r.run:7.3f}{r.ref:7.3f}{r.delta:+8.3f}{int(r.n):>7}" for i, r in g.iterrows()]
-    if len(notes):
-        lines += ["", "left out of transfer:"] + [f"  {r.task}: {r.why}" for _, r in notes.iterrows()]
-    return "\n".join(lines) + "\n"
-
-
-def val_history(run_dir: Path) -> pd.DataFrame:
-    """A run's validation history on the skill scale, recomputed from ``metrics.json`` (runs from before ``val_score``
-    was logged included): one row per (step, group) plus group ``score`` (mean of group means)."""
-    import re
-
-    from brain.eval.skill import summarize
-    from brain.multitask.registry import load_registry
-
-    reg = load_registry()
-    info = {t.id: (t.group, max(len(t.classes), 2)) for t in reg.tasks}
-    pat = re.compile(r"^val_(.+)_(auc|r2|bacc|dice)$")
-    out = []
-    for h in json.load(open(resolve(run_dir) / "metrics.json")).get("history", []):
-        rows = []
-        for k, v in h.items():
-            m = pat.match(k)
-            if m and m.group(1) in info and v is not None:
-                g, n = info[m.group(1)]
-                rows.append((g, skill(m.group(2), v, n)))
-        out += [{"step": int(h["step"]), "group": k.removeprefix("group_"), "skill": v}
-                for k, v in summarize(rows).items()]
-    return pd.DataFrame(out)
-
-
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("ckpt", help="a checkpoint or a BrainQuery name (BQ-A1)")
-    ap.add_argument("--ref", required=True, help="a checkpoint or a BrainQuery name (BQ-R6)")
-    ap.add_argument("--heads", type=Path, default=None, help="test_eval predictions (default <out>/test_eval_preds.parquet)")
-    ap.add_argument("--out", type=Path, default=None)
-    ap.add_argument("--core", type=Path, default=CORE)
-    ap.add_argument("--with-seg", action="store_true", help="add the segmentation transfer group")
-    ap.add_argument("--reps", type=int, default=1000)
-    a = ap.parse_args()
-    ckpt, ref_ckpt = _checkpoint(a.ckpt), _checkpoint(a.ref)
-    out = a.out or default_out(ckpt)
-    out.mkdir(parents=True, exist_ok=True)
-    tasks, heads, notes = compare_pair(ckpt, ref_ckpt, a.heads or out / "test_eval_preds.parquet", a.core,
-                                       a.with_seg, a.reps)
-    text = render(display_name(ckpt), display_name(ref_ckpt), tasks, heads, notes)
-    print(text, end="")
-    (out / "report.md").write_text("```\n" + text + "```\n")
-    tasks.to_csv(out / "report_tasks.csv", index=False)
-    print(f"[report] -> {out}/report.md, report_tasks.csv")
-
-
-if __name__ == "__main__":
-    main()

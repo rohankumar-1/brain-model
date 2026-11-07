@@ -132,16 +132,12 @@ def card(target: str, out: Path = CARDS) -> str:
             lines.append("")
 
     if has_heads(m):
-        from brain.eval.report import default_out
-
         f = HEADS_DIR / m.cache_key / "test_eval_heads.csv"
-        if not f.exists():                                     # the run report's own-head evaluation
-            f = default_out(m.ckpt) / "test_eval_heads.csv"
         if f.exists():
             h = pd.read_csv(f)
             mine = h[h.model == f"{m.ckpt.parent.name}/{m.ckpt.stem}"]
-            # tasks it trained (an untrained head's output means nothing) with enough test scans
-            # (brain.eval.report.MIN_IN_DOMAIN_SCANS)
+            # tasks it trained (an untrained head's output means nothing) with enough test scans (SynthSeg-derived
+            # tasks have ~4: too few to compare)
             mine = mine[mine.task.isin(m.seen_tasks) & (mine.n >= 20)]
             lines += ["## 4. In-domain (own heads, test splits)", "",
                       f"The tasks it trained, with at least 20 test scans; Δ is the paired difference to {ref.name} on "
