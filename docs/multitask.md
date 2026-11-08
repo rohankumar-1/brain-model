@@ -131,6 +131,35 @@ sequences, SynthRAD MR + CT; `data.study_partners`).
 A scan without partners never enters the fusion, so its path is the single-scan model's exactly. Labels and the
 decoder's image pyramid are the anchor scan's. `test_eval --study N` scores the heads with partners.
 
+### Native geometry (`data.ngeo`, `model.ngeo`; 2026-11-07)
+
+CT can train on its own slices instead of the 1 mm template grid (runs/diagnostics/ngeo/CONTRACT.md). The prep
+writes `<case>.ngeo.zip` next to each CT image zip: slices along the acquisition's normal at their native spacing
+(never interpolated through-plane), 0.5 mm in-plane on a 512 x 512 field, plus `<case>.<mask>.ngeo.zip` masks, all
+listed in `volumes_ngeo.csv` under the 1 mm rows' `volume_id`, so the label tables work unchanged.
+- Reader: `brain/data/ngeo.py` (`read_ngeo`, `read_ngeo_mask`: the only code that knows the zip layout).
+  `MultitaskDataset(ngeo_index=...)` keeps the scans the index lists, reads image / brain / masks from the ngeo
+  copies, skips live targets and masks without an ngeo copy; each sample carries `affine` (voxel (s, r, c) ->
+  template index) and `spacing`. The CQ500 / seg_cq500 duplicate id resolves to the ngeo copy's folder.
+- Batches: `collate_ngeo` pads to the batch's longest scan (rounded to `pad_multiple`) with air, and marks the real
+  slices (`slice_keep`). The stem and decoder run per slice / per scan, so a scan's outputs do not depend on the
+  padding; the transformer packs kept tokens, so padded tokens cost nothing there. `max_slices` caps very long scans.
+- Stem: `NgeoStemEmbed`: (1, 3, 3) convolutions, two stride-(1, 2, 2) stages (0.5 -> 1 -> 2 mm), then 1 x 8 x 8
+  patches: 16 x 16 mm tokens one slice deep (32 x 16 x 16 = 8192 tokens for 32 slices), into the same blocks.
+- Positions: each token centre's template mm (`affine_template` composed with the 1 mm grid's index -> physical
+  map), the frame the 1 mm tokens always had, so RoPE and the slot readout's position code agree across grids.
+- Dense outputs: `seg_ngeo` (a second `SegDecoder`) at stride `model.ngeo.seg_stride` (1, 4, 4): native slices x 2 mm
+  in-plane; targets from the ngeo masks; token maps and RSNA slice labels (through the affine) as on the 1 mm grid.
+- Gate: the same `views.gate` on raw HU (CT above -500 HU; air stored at -1024); padded slices never kept.
+- Augmentation (`data.prepare_ngeo`): column flip, rotation about the slice normal (`aug.affine.rot_deg[2]`, or
+  `rot_deg_inplane`), in-plane shift and optional `scale`; no out-of-plane rotation; `appearance.through_plane`
+  ignored; the isotropic blur runs in-plane with the same mm sigma; the field-of-view cut in whole slices.
+- Not supported on this grid: study-level input, dense (self-supervised) slots, MRI, few-shot (`fewshot.py`) and the
+  frozen benchmark's encoders (they read the 1 mm grid).
+- Input windows: `model.in_chans` 3 = the role windows (CT brain / subdural / bone); `model.window_bank`
+  (`{class: "module:Name", ...}`, branch winbank) = native HU in, the model's bank maps them to `in_chans` channels.
+- Comparison configs: `configs/single/hemorrhage_iso_fixed3.yaml` (1 mm) vs `hemorrhage_ngeo_fixed3.yaml`.
+
 ## Evaluation
 
 ### Scoring a run
@@ -187,6 +216,7 @@ third ventricle or lateral ventricles found). Not yet a training target.
 - `model.task_tokens.enabled` (false: the slot readout, used by the ResNet specialists).
 - `model.seg.shared` / `head_hidden` (shared segmentation decoder with per-task MLP heads).
 - `model.fusion`, `tasks.study` (study-level input).
+- `data.ngeo`, `model.ngeo` (native-geometry CT), `model.window_bank` (learned input windows, branch winbank).
 - `tasks.group_weights`, `tasks.groups` / `tasks.ids` (train only some groups or tasks), `tasks.exclude`.
 - `loss.negative_tasks` (lesion tasks with true negatives).
 - `data.exclude_datasets` / `exclude_volumes` (benchmark cohorts and duplicates out of training).
