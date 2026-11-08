@@ -18,6 +18,7 @@ from brain.data.volumes import collate_volumes, crop_microbatch, make_loader, ma
 from brain.data.volumes import n_meta
 from brain.models.viewnet3d import ViewNet, batch_meta
 from brain.models.vit3d import BrainEncoder
+from brain.models.window_bank import attach_bank, bank_cfg, encoder_in_chans
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
 from brain.train import engine
@@ -31,10 +32,10 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
     pr = cfg["loss"].get("predict") or {}
     predict = dense and float(pr.get("weight", 0.0)) > 0
     cells = pr.get("pixel_cells", (2, 2, 2))
-    return BrainEncoder(
+    enc = BrainEncoder(
         size=m["size"],
         patch_xyz=tuple(cfg["views"]["patch_xyz"]),
-        in_chans=int(m.get("in_chans", 1)),
+        in_chans=encoder_in_chans(m),                       # K with the window bank (model.window_bank)
         proj_dim=int(m["proj_dim"]),
         proj_hidden=m.get("proj_hidden"),
         qk_norm=bool(m.get("qk_norm", False)),
@@ -54,6 +55,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         n_registers=int(m.get("n_registers", 0)),
         drop_path=float(m.get("drop_path", 0.0)),          # stochastic depth (max rate, linear over depth)
     ).to(device)
+    return attach_bank(enc, m)
 
 
 def loss_kwargs(cfg: dict) -> dict:
@@ -174,6 +176,9 @@ class Trainer(engine.Trainer):
             self.val_iter = forever_loader(store, "val", cfg, batch_size=val_batch, shuffle=False, seed=0,
                                            distributed=False) if rt.main else None
 
+        if bank_cfg(cfg["model"]) is not None:
+            raise SystemExit("model.window_bank: the SSL view pipeline (brain.data.batch3d) windows outside the model; "
+                             "the bank is supported by the multitask trainer only")
         raw = build_encoder(cfg, dev)
         if rt.world > 1:
             raw = torch.nn.SyncBatchNorm.convert_sync_batchnorm(raw)

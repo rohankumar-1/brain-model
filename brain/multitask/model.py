@@ -31,6 +31,7 @@ from torch.utils.checkpoint import checkpoint
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.models.conv3d import Res, conv3, group_norm
 from brain.models.vit3d import BrainEncoder
+from brain.models.window_bank import bank_input, bank_of
 from brain.multitask.data import TYPE_ID
 from brain.multitask.registry import Registry
 
@@ -272,12 +273,31 @@ class BrainQuery(nn.Module):
         self.tt_write.zero_()
         self.tt_write[self.tok_of[torch.as_tensor(list(ids), dtype=torch.long, device=self.tt_write.device)]] = True
 
+    def window_input(self, x: torch.Tensor, modality: torch.Tensor | None, hide: torch.Tensor | None = None,
+                     study: dict | None = None) -> tuple[torch.Tensor, dict | None]:
+        """The encoder's window bank (``backbone.window_bank``, ``brain.models.window_bank``) on native-unit input
+        ``x`` (B, 1, Z, Y, X) and the study partners (``study["x"]`` by ``study["mod"]``), then the masked voxels
+        ``hide`` (B, Z, Y, X) blanked (0 in every channel). Without a bank, or for input already windowed to K
+        channels, ``x`` passes unchanged."""
+        bank = bank_of(self.backbone)
+        if bank is None:
+            return x, study
+        x = bank_input(bank, x, modality)
+        if hide is not None:
+            x = x.masked_fill(hide.unsqueeze(1), 0.0)
+        if study is not None and len(study["row"]):
+            study = {**study, "x": bank_input(bank, study["x"], study.get("mod"))}
+        return x, study
+
     def encode(self, x: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None = None,
-               task: torch.Tensor | None = None, study: dict | None = None) -> dict:
+               task: torch.Tensor | None = None, study: dict | None = None,
+               modality: torch.Tensor | None = None) -> dict:
         """Encoder outputs. With task tokens: every trained task's token, plus read-only tokens for the other tasks
         in ``task`` (held-out / few-shot), so an answer never depends on which other tasks were asked.
         ``study`` (R14-F): the anchors' co-registered partner scans, ``x`` (P, C, Z, Y, X), ``row`` (P,) their
-        anchor, ``seq`` (B,) / ``pseq`` (P,) sequence types; fused inside the encoder (``SequenceFusion``)."""
+        anchor, ``seq`` (B,) / ``pseq`` (P,) sequence types; fused inside the encoder (``SequenceFusion``).
+        With a window bank, native-unit ``x`` (B, 1, ...) needs ``modality`` (``window_input``)."""
+        x, study = self.window_input(x, modality, study=study)
         b = x.shape[0]
         fuse = None
         if study is not None and len(study["row"]) and getattr(self.backbone, "fusion", None) is not None:
@@ -409,12 +429,16 @@ class BrainQuery(nn.Module):
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
                 encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None,
                 dense_pair: torch.Tensor | None = None, tok_pair: torch.Tensor | None = None,
-                study: dict | None = None) -> dict:
+                study: dict | None = None, modality: torch.Tensor | None = None,
+                hide: torch.Tensor | None = None) -> dict:
         """Typed answers per slot; ``out["seg"]`` (segmentation slots, ``seg_pair`` order) and ``out["dense"]`` (dense
-        slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``."""
+        slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``.
+        With a window bank ``x`` is native units (B, 1, ...) and ``modality`` (B,) is required; the bank's K channels
+        feed the encoder and the decoder's image pyramid, and ``hide`` voxels are blanked after it (``window_input``)."""
         # task tokens live inside the encoder, so their gradient has to pass through it even when the encoder is frozen
         # (few-shot fitting: its weights have requires_grad off and get none)
         with torch.set_grad_enabled(torch.is_grad_enabled() and (encoder_grad or self.tokens)):
+            x, study = self.window_input(x, modality, hide, study)
             enc = self.encode(x, keep, meta, task, study)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         z = self.member(z, task)

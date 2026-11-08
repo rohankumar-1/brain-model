@@ -25,6 +25,12 @@ Optional ``histmatch`` (roles; MRI only, first, in native units): a row's tissue
 another volume's row of the same contrast group in the batch (blended), so contrast and dynamic range of a real other
 scanner are borrowed and "which scanner" stops being a cheap cue. Not CT: Hounsfield units are physical (blood ~60 HU).
 
+``window.mode: native`` (the learned window bank, ``brain.models.window_bank``, which windows inside the model): every
+augmentation in native units and no window at all (``_appearance_native``). MRI rows get the same intensity
+augmentations as the canonical-window path, on robust z; CT rows get no window jitter, drift or contrast change, only
+physical ones: a calibration offset / scale (``ct_physical``), a reconstruction-kernel blur or sharpen (``kernel``),
+Gaussian noise in HU and the slice-thickness blur (``through_plane``).
+
 All are drawn independently per row; shapes are (R, 1, Z, Y, X). ``skull`` is separate: with probability ``p`` a whole
 volume is cut to its brain mask before cropping, so "has a skull" is not a modality cue.
 """
@@ -36,9 +42,12 @@ import math
 import torch
 import torch.nn.functional as F
 
-from brain.common.windowing import FLOOR, MOD_CT, MOD_MRI, asinh_window, canonical_windows, fg_thresh, floors, role_windows
+from brain.common.windowing import (CANONICAL, FG_THRESH, FLOOR, MOD_CT, MOD_MRI, asinh_window, canonical_windows,
+                                    fg_thresh, floors, role_windows)
 
 FWHM_TO_SIGMA = 1.0 / 2.3548
+FG_THRESH_CT = FG_THRESH["ct"]
+CANONICAL_MRI_W = CANONICAL["mri"][1]
 QUANTILE_SAMPLES = 16384  # foreground voxels sampled per row to place the curve knots
 
 
@@ -300,8 +309,12 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     mode = (aug.get("window") or {}).get("mode", "fixed")
     if mode == "roles":
         return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp, tie_seed)
+    if mode == "native":
+        if tie_seed is not None:
+            raise ValueError("tie_seed needs window.mode roles")
+        return _appearance_native(x, modality, aug, thick, protect, sharp)
     if mode != "fixed":
-        raise ValueError(f"window.mode {mode!r}: fixed or roles")
+        raise ValueError(f"window.mode {mode!r}: fixed, roles or native")
     if tie_seed is not None:
         raise ValueError("tie_seed needs window.mode roles")
     if _enabled(aug.get("bias")):
@@ -357,6 +370,88 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
         pick = torch.randint(0, y.shape[1], (r, 1) + (1,) * (y.dim() - 2), device=dev)
         y = y.gather(1, pick.expand(r, 1, *y.shape[2:]))
     return y
+
+
+def ct_physical(x: torch.Tensor, modality: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """CT rows: a scanner calibration error, ``HU' = HU * (1 + s) + o`` with ``o ~ U(+-offset_hu)`` and
+    ``s ~ U(+-scale)``, applied to the foreground only (air stays at the floor)."""
+    r, dev = x.shape[0], x.device
+    on = (torch.rand(r, device=dev) < float(cfg["p"])) & (modality.reshape(r).to(dev) == MOD_CT)
+    idx = on.nonzero(as_tuple=True)[0]
+    if idx.numel():
+        o = float(cfg.get("offset_hu", 10.0))
+        sc = float(cfg.get("scale", 0.03))
+        off = _uniform(idx.numel(), -o, o, dev).view(-1, 1, 1, 1, 1)
+        gain = 1.0 + _uniform(idx.numel(), -sc, sc, dev).view(-1, 1, 1, 1, 1)
+        v = x[idx]
+        x[idx] = torch.where(v > FG_THRESH_CT, v * gain + off, v)
+    return x
+
+
+def recon_kernel(x: torch.Tensor, modality: torch.Tensor, cfg: dict, skip_blur: torch.Tensor | None = None) -> torch.Tensor:
+    """CT rows: a different reconstruction kernel, in-plane only (the rows / columns of an axial slice: y and x): a
+    softer kernel as a Gaussian blur (``sigma_vox``), or with probability ``sharpen`` a sharper one as an unsharp mask
+    ``x + a (x - blur(x))`` (``amount``). ``skip_blur`` rows (small targets) are only ever sharpened."""
+    r, dev = x.shape[0], x.device
+    on = (torch.rand(r, device=dev) < float(cfg["p"])) & (modality.reshape(r).to(dev) == MOD_CT)
+    sharp = torch.rand(r, device=dev) < float(cfg.get("sharpen", 0.5))
+    if skip_blur is not None:
+        sharp = sharp | skip_blur.to(dev)
+    idx = on.nonzero(as_tuple=True)[0]
+    if not idx.numel():
+        return x
+    lo, hi = cfg.get("sigma_vox", (0.3, 1.0))
+    sigma = _uniform(idx.numel(), float(lo), float(hi), dev)
+    v = x[idx]
+    soft = _gaussian_blur(v, sigma, dims=(3, 4))
+    alo, ahi = cfg.get("amount", (0.2, 1.0))
+    a = _uniform(idx.numel(), float(alo), float(ahi), dev).view(-1, 1, 1, 1, 1)
+    x[idx] = torch.where(sharp[idx].view(-1, 1, 1, 1, 1), v + a * (v - soft), soft)
+    return x
+
+
+def _appearance_native(x, modality, aug, thick, protect, sharp) -> torch.Tensor:
+    """``appearance`` for the window bank (``window.mode: native``): returns native units (R, 1, ...), the bank windows
+    inside the model. MRI rows: bias field, through-plane blur, Rician noise as in the canonical-window path, then
+    isotropic blur, drift and Gaussian noise, which that path applies in windowed units, here on z scaled by the
+    canonical MRI width (asinh is linear near the window centre, so the same draw is the same perturbation of tissue).
+    CT rows: no window jitter, drift or contrast change; ``ct_physical`` offset / scale, ``kernel`` blur / sharpen,
+    the slice-thickness blur, isotropic blur, and Gaussian noise in HU (``noise.sigma_hu``)."""
+    r, dev = x.shape[0], x.device
+    ct = modality.reshape(r).to(dev) == MOD_CT
+    if _enabled(aug.get("bias")):
+        x = bias_field(x, modality, aug["bias"], skip=protect)          # MRI rows only
+    if _enabled(aug.get("ct_physical")):
+        x = ct_physical(x, modality, aug["ct_physical"])
+    if _enabled(aug.get("through_plane")):
+        x = through_plane(x, aug["through_plane"], thick, skip=sharp)
+    if _enabled(aug.get("kernel")):
+        x = recon_kernel(x, modality, aug["kernel"], skip_blur=sharp)
+    noise = aug.get("noise") or {}
+    noisy = torch.zeros(r, dtype=torch.bool, device=dev)
+    if _enabled(noise) and str(noise.get("kind", "gaussian")) == "rician":
+        x, noisy = rician_noise(x, modality, noise)
+    mri_w = float(CANONICAL_MRI_W)
+    bl, dr = aug.get("blur") or {}, aug.get("drift") or {}
+    if _enabled(bl):
+        on = torch.rand(r, device=dev) < float(bl["p"])
+        if sharp is not None:
+            on &= ~sharp.to(dev)
+        lo, hi = bl.get("sigma_vox", (0.5, 1.5))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
+    if _enabled(dr):
+        on = (torch.rand(r, device=dev) < float(dr["p"])) & ~ct
+        if protect is not None:
+            on &= ~protect.to(dev)
+        field = torch.randn(r, 1, 3, 3, 3, device=dev) * float(dr.get("amp", 0.25)) * mri_w
+        x = x + on.view(r, 1, 1, 1, 1) * F.interpolate(field, size=x.shape[2:], mode="trilinear", align_corners=True)
+    if _enabled(noise):
+        on = (torch.rand(r, device=dev) < float(noise["p"])) & ~noisy
+        lo, hi = noise.get("sigma", (0.02, 0.15))
+        hlo, hhi = noise.get("sigma_hu", (2.0, 15.0))
+        sigma = torch.where(ct, _uniform(r, hlo, hhi, dev), _uniform(r, lo, hi, dev) * mri_w)
+        x = x + (on.float() * sigma).view(r, 1, 1, 1, 1) * torch.randn_like(x)
+    return x
 
 
 def mri_curve(x: torch.Tensor, modality: torch.Tensor, fg: torch.Tensor, cfg: dict) -> torch.Tensor:

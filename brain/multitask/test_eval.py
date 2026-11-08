@@ -177,11 +177,16 @@ def main() -> None:
             torch.cuda.empty_cache()
 
     # linear probes on pooled embeddings (scalar tasks)
+    from brain.models.window_bank import bank_of
     from brain.multitask.explain import encode_backbone, load_backbone
 
     for ck in a.probe_ckpts:
         name = Path(ck).parent.name + "/" + Path(ck).stem
         enc, _ = load_backbone(Path(ck), dev)
+        # prepare windows for this encoder, not the reference run's: native units for a window-bank encoder (the bank
+        # windows in encode_backbone), else its own input channels
+        pcfg = {**ref_cfg, "model": {**(ref_cfg.get("model") or {}), "in_chans": int(enc.in_chans),
+                                     "window_bank": {"enabled": bank_of(enc) is not None}}}
         cache: dict[str, np.ndarray] = {}
 
         def feats(t, ids, split):
@@ -190,9 +195,9 @@ def main() -> None:
                 loader, _ = _loader(store, labels, volumes, ref_reg, stats, t, split, ids=todo, use="train",
                                     workers=a.workers)
                 for raw in loader:
-                    b = prepare(raw, ref_cfg, dev, tuple(enc.patch_xyz), train=False)
+                    b = prepare(raw, pcfg, dev, tuple(enc.patch_xyz), train=False)
                     with torch.no_grad(), torch.autocast(**amp):
-                        f = encode_backbone(enc, b["x"], b["keep"])["pooled"].float().cpu().numpy()
+                        f = encode_backbone(enc, b["x"], b["keep"], b["modality"])["pooled"].float().cpu().numpy()
                     for vid, row in zip(raw["volume_id"], f):
                         cache[str(vid)] = row
             return np.stack([cache[v] for v in ids])

@@ -11,7 +11,8 @@ from brain.data.gate import token_keep
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.data.volumes import meta_id, n_meta
 from brain.models.vit3d import VIT_SIZES, BrainEncoder
-from brain.common.windowing import asinh_window, role_windows, windows_for
+from brain.common.windowing import asinh_window, encoder_input, windows_for
+from brain.models.window_bank import attach_bank, bank_of, encoder_in_chans
 from brain.common.grid import GRID_XYZ
 
 
@@ -72,8 +73,12 @@ class FrozenEncoder3D:
         self.gate = dict(DEFAULT_GATE)
         self.meta: int | None = None   # the next volume's META id (``volume_meta``); None = unknown
         self.task_tokens: torch.Tensor | None = None   # a task-token model's trained-task tokens (task_token_prefix)
-        # a three-input encoder takes the role windows (windowing.ROLES) as channels in one pass, whatever ``window``
-        self.role_channels = int(getattr(model, "in_chans", 0) or model.patch_embed.proj.in_channels) == 3
+        # an encoder with a learned window bank (brain.models.window_bank: its windows are in its state dict) windows
+        # every scan with it in one pass, whatever ``window``; so does a three-input encoder with the role windows
+        self.bank = bank_of(model)
+        self.in_chans = int(getattr(model, "in_chans", 0) or model.patch_embed.proj.in_channels)
+        self.role_channels = self.bank is None and self.in_chans == 3
+        self.single_pass = self.bank is not None or self.role_channels
         self.meta_off = False          # encode as if the scan's metadata (its contrast) were unknown
         # the CLS (n_windows, D) and register (n_windows, R, D) outputs of the last ``embed_windows`` call, or None
         self.last_cls: torch.Tensor | None = None
@@ -81,12 +86,12 @@ class FrozenEncoder3D:
 
     @torch.no_grad()
     def _window(self, cropped: torch.Tensor, c: float, w: float, modality: str) -> torch.Tensor:
-        """The encoder input of a native-unit (X, Y, Z) crop: one asinh window, or the three role channels (C, X, Y, Z)
-        for a three-input encoder."""
-        if not self.role_channels:
+        """The encoder input of a native-unit (X, Y, Z) crop: one asinh window (c, w), or (``windowing.encoder_input``,
+        ``c`` / ``w`` ignored) the window bank's K channels / the three role channels (C, X, Y, Z)."""
+        if not self.single_pass:
             return asinh_window(cropped, c, w)
         mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=cropped.device)
-        return role_windows(cropped[None, None], mod)[0]
+        return encoder_input(cropped[None, None], mod, self.in_chans, self.bank)[0]
 
     def _encode_batch(self, x, starts, size, keep) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """``x`` is (B, X, Y, Z) or (B, C, X, Y, Z), ``starts`` are B origin triples, ``keep`` is (B, T). Returns the
@@ -144,7 +149,7 @@ class FrozenEncoder3D:
         x = torch.from_numpy(np.ascontiguousarray(read_volume_xyz(path))).to(next(self.model.parameters()).device)
         with_meta = getattr(self.model, "meta_emb", None) is not None and not self.meta_off
         self.meta = volume_meta().get(str(volume_id)) if with_meta else None
-        windows = [(0.0, 1.0)] if self.role_channels else windows_for(window, modality)   # roles: one pass
+        windows = [(0.0, 1.0)] if self.single_pass else windows_for(window, modality)   # bank / roles: one pass
         seqs, xyz, fg = self.embed_windows(x, windows, modality=modality)
         return VolumeEmbedding(tokens=torch.cat(list(seqs), dim=-1), xyz=xyz, keep=fg,
                                cls=None if self.last_cls is None else self.last_cls.reshape(-1),
@@ -182,7 +187,8 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         r = m.get("resnet") or {}
         patch = tuple(int(x) for x in (v.get("patch_xyz") or (16, 16, 8)))
         net = ResNetEncoder(widths=r.get("widths", (64, 128, 240, 384)), blocks=r.get("blocks", (2, 2, 2, 2)),
-                            in_chans=int(m.get("in_chans", 1)), patch_xyz=patch, checkpoint_blocks=False).to(device)
+                            in_chans=encoder_in_chans(m), patch_xyz=patch, checkpoint_blocks=False).to(device)
+        attach_bank(net, m)
         if pretrained:
             net.load_state_dict(state)
         enc = FrozenEncoder3D(net.eval().requires_grad_(False), patch, native, spacing)
@@ -197,7 +203,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
     projector_bn = any("projector" in str(k) and str(k).endswith("running_mean") for k in state)
     proj_norm = "batch" if projector_bn else str(m.get("proj_norm", "layer"))
     net = BrainEncoder(
-        size=size, patch_xyz=patch, in_chans=int(m.get("in_chans", 1)),
+        size=size, patch_xyz=patch, in_chans=encoder_in_chans(m),
         proj_dim=int(m.get("proj_dim", 128)), proj_hidden=m.get("proj_hidden"),
         qk_norm=bool(m.get("qk_norm", False)), rope_base_mm=float(m.get("rope_base_mm", 100.0)),
         checkpoint_blocks=False, proj_norm=proj_norm,
@@ -212,6 +218,7 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
     if any(str(k).startswith("fusion.") for k in state):     # study-level input (R14-F): rebuild before loading
         fu = m.get("fusion") or {}
         net.enable_fusion(int(fu.get("after_block", net.depth - 4)), fu.get("heads"))
+    attach_bank(net, m)               # model.window_bank: its learned windows load with the weights
     if pretrained:
         net.load_state_dict(state)
     net.eval().requires_grad_(False)
