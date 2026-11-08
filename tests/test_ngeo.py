@@ -414,3 +414,22 @@ def test_untrusted_scans_keep_scan_labels_only():
                         "ref": ["", "rsna_ich/x.bleedpl.zip|1|2", "@brain", "bhsd/x.ICH.zip|1", "rsna_ich/y.bleedpl.zip|1|2"]})
     kept = drop_untrusted_labels(lab, bad)
     assert kept["ref"].tolist() == ["", "bhsd/x.ICH.zip|1", "rsna_ich/y.bleedpl.zip|1|2"]
+
+
+def test_eval_loader_reads_ngeo_for_an_ngeo_config(tmp_path):
+    """fewshot._loader (test_eval, head_init_cq500 extract) with a native-geometry checkpoint config: the ngeo index
+    under data.ngeo.root and ngeo batches (collate_ngeo); input_patch gives the ngeo token patch."""
+    from brain.multitask import data as mdata
+    from brain.multitask.fewshot import _loader
+
+    lab, vols, idx = _tables(tmp_path, {"c0": 6, "c1": 9})
+    idx.to_csv(tmp_path / "volumes_ngeo.csv", index=False)
+    mdata._NGEO_INDEX.clear()
+    cfg = {"data": {"ngeo": {"enabled": True, "root": str(tmp_path)}}}
+    loader, ds = _loader(tmp_path, lab, vols, REG, {}, "hemorrhage_any", "train", use="train", workers=0, cfg=cfg)
+    b = next(iter(loader))
+    assert len(ds) == 2 and "affine" in b and b["image"].shape[1:] == (12, 64, 64)
+    model = _model(_cfg())
+    assert mdata.input_patch(model, cfg) == NGEO_PATCH and mdata.input_patch(model, {}) == tuple(model.backbone.patch_xyz)
+    plain, _ = _loader(tmp_path, lab, vols, REG, {}, "hemorrhage_any", "train", use="train", workers=0)
+    assert "affine" not in plain.dataset[0]

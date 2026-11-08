@@ -27,7 +27,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 
 from brain.common.paths import resolve
 from brain.downstream.metrics import balanced_accuracy
-from brain.multitask.data import checkpoint_stats, load_labels, prepare
+from brain.multitask.data import checkpoint_stats, input_patch, load_labels, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.fewshot import _loader, linear_probe, load_model
 
@@ -128,7 +128,7 @@ def main() -> None:
     for i, ck in enumerate([] if a.probe_only else a.ckpts):
         model, reg, cfg = (ref_model, ref_reg, ref_cfg) if i == 0 else load_model(Path(ck), dev)
         name = Path(ck).parent.name + "/" + Path(ck).stem
-        patch = tuple(model.backbone.patch_xyz)
+        patch = input_patch(model, cfg)                  # native geometry: the ngeo stem's token patch
         m_stats = checkpoint_stats(model.label_stats, labels_dir, stats)
         for t in tasks:
             if t not in reg.index or not test_ids[t]:
@@ -136,7 +136,7 @@ def main() -> None:
             loader, _ = _loader(store, labels, volumes, reg, m_stats, t, a.split, ids=test_ids[t], use="train",
                                 workers=a.workers, strip_all=a.strip_mri,
                                 strip_match=list(((cfg.get("aug") or {}).get("skull_strip") or {}).get("match") or []),
-                                study=study, partners=partners)
+                                study=study, partners=partners, cfg=cfg)
             _, pr = run_eval(model, loader, cfg, reg, m_stats, dev, patch, amp, return_preds=True)
             r = pr.get(reg.index[t], [])
             if not r:
@@ -183,6 +183,10 @@ def main() -> None:
     for ck in a.probe_ckpts:
         name = Path(ck).parent.name + "/" + Path(ck).stem
         enc, _ = load_backbone(Path(ck), dev)
+        if getattr(enc, "ngeo_embed", None) is not None:
+            print(f"[probe] {name}: native-geometry encoder, linear probes not supported (heads only): skipped",
+                  flush=True)
+            continue
         # prepare windows for this encoder, not the reference run's: native units for a window-bank encoder (the bank
         # windows in encode_backbone), else its own input channels
         pcfg = {**ref_cfg, "model": {**(ref_cfg.get("model") or {}), "in_chans": int(enc.in_chans),
