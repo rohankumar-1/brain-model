@@ -494,6 +494,38 @@ def mask_stack(mask_img, st: SliceStack) -> SliceStack:
     return SliceStack(out, st.p, st.a, st.b, st.q, st.thick, {})
 
 
+def sample_physical(img, g: NGrid, order: int = 1, nsub: int = 1, cval: float = 0.0) -> np.ndarray:
+    """A SimpleITK volume in the true scanner frame sampled at the ngeo voxels: ``nsub`` points spread through each
+    slab's thickness, averaged (order 1) or majority-voted per label (order 0)."""
+    import SimpleITK as sitk
+
+    arr = sitk.GetArrayViewFromImage(img)
+    Ai = np.linalg.inv(_affine_from(img.GetOrigin(), img.GetSpacing(), img.GetDirection()))
+    ax = np.arange(g.rc, dtype=np.float64)
+    rr, cc = np.meshgrid(ax, ax, indexing="ij")
+    du, dc, dn = Ai[:3, :3] @ (g.h * g.u_r), Ai[:3, :3] @ (g.h * g.u_c), Ai[:3, :3] @ (g.D * g.n)
+    offs = (np.arange(nsub) + 0.5) / nsub - 0.5
+    out = np.zeros((g.S, g.rc, g.rc), dtype=np.float32 if order else np.uint8)
+    for s in range(g.S):
+        base = Ai[:3, :3] @ g.slice_origin(s) + Ai[:3, 3]
+        acc, votes = None, {}
+        for o in offs:
+            xyz = (base + o * dn)[:, None, None] + du[:, None, None] * rr + dc[:, None, None] * cc
+            v = ndimage.map_coordinates(arr, [xyz[2], xyz[1], xyz[0]], order=order, mode="constant", cval=cval,
+                                        prefilter=False)
+            if order:
+                acc = v if acc is None else acc + v
+            else:
+                for lab in np.unique(v):
+                    votes[int(lab)] = votes.get(int(lab), 0) + (v == lab)
+        if order:
+            out[s] = acc / len(offs)
+        else:
+            labs = sorted(votes)
+            out[s] = np.asarray(labs, dtype=np.uint8)[np.argmax(np.stack([votes[k] for k in labs]), axis=0)]
+    return out
+
+
 # ---------------------------------------------------------------------------------------------- range and centring
 
 def head_range_and_center(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None) -> tuple[float, float, np.ndarray, dict]:

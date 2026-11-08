@@ -162,11 +162,17 @@ def resolve(rows: pd.DataFrame, local: Path) -> dict[str, dict]:
             if d == "rsna_ica_cta" and c in idx:
                 spec[f"{d}:{c}"] = {"kind": "dicom", "zip": str(rz), "members": sorted(idx[c]), "masks": {}}
     if "cq500" in dsets:
+        segs = {c.case_id: c for c in sources.seg_cq500(local / "seg_cq500" / "volumes")} \
+            if (local / "seg_cq500" / "volumes").is_dir() else {}
         for d, c in want:
             if d == "cq500":
                 thick = CQ500_THICK / f"{c}.zip"
+                sc = segs.get(c)
+                seg = {"path": str(sc.path), "ICH": str(dict(sc.masks)["ICH"])} \
+                    if sc is not None and "ICH" in dict(sc.masks) else None
                 spec[f"{d}:{c}"] = {"kind": "dicom_zip", "zip": str(DATASETS / "cq500_dicom" / f"{c}.zip"),
-                                    "thick_zip": str(thick) if thick.exists() else None, "masks": {}}
+                                    "thick_zip": str(thick) if thick.exists() else None, "masks": {},
+                                    "seg_cq500": seg}
     adapters = {"bhsd": lambda: sources.bhsd(local / "bhsd" / "extracted"),
                 "seg_cq500": lambda: sources.seg_cq500(local / "seg_cq500" / "volumes"),
                 "aisd": lambda: sources.aisd(local / "aisd" / "extracted"),
@@ -196,7 +202,7 @@ def stage(datasets: set[str], local: Path, case_ids: dict[str, set[str]] | None 
     def mark(name):
         (local / f".staged_{name}").touch()
 
-    for folder, names in (("seg_cq500", ("seg_cq500",)), ("aisd", ("aisd",)), ("instance2022", ("instance",)),
+    for folder, names in (("seg_cq500", ("seg_cq500", "cq500")), ("aisd", ("aisd",)), ("instance2022", ("instance",)),
                           ("isles24", ("isles24",)), ("pedi_cranial_ct", ("pedi_cranial_ct",))):
         if has(*names) and not done(folder):
             rawpack.stage(pool / folder, local)
@@ -251,7 +257,9 @@ def read_case(dataset: str, spec: dict, attrs: dict, brain: np.ndarray | None):
             series_src = "cq500_thick" if spec.get("thick_zip") else "dicom"
         st, main, info = ngeo.dicom_geometry(blobs)
         extra |= info | {"source": source, "series": main[0].series, "series_kind": series_src}
-        if dataset in SITK_FRAME:
+        if dataset in SITK_FRAME and os.environ.get("NGEO_IGNORE_STORE_FRAME") == "1":    # diagnostic only
+            extra["store_frame"] = "ignored"
+        elif dataset in SITK_FRAME:
             q, finfo = ngeo.sitk_store_origins(st.p, st.a, st.b, attrs)
             st.q = q
             extra |= finfo if q is not None else finfo | {"store_frame_ok": False}
@@ -314,6 +322,15 @@ def run_case(row: dict, spec: dict, store_root: str, out_root: str) -> dict:
             store.write(mp, "mask", m, {"kind": "mask_ngeo", "mask_source": src, "ngeo_rev": ngeo.NGEO_REV})
             nbytes += mp.stat().st_size
             mpaths[name] = str(mp.relative_to(orr))
+        if spec.get("seg_cq500"):
+            m, cinfo = cross_map_seg_cq500(spec["seg_cq500"], res)
+            res.attrs.update(cinfo)
+            if m is not None:
+                mp = orr / f"{stem}.ICH.ngeo.zip"
+                store.write(mp, "mask", m, {"kind": "mask_ngeo", "mask_source": "seg_cq500_physical",
+                                            "ngeo_rev": ngeo.NGEO_REV, **cinfo})
+                nbytes += mp.stat().st_size
+                mpaths["ICH"] = str(mp.relative_to(orr))
         a = res.attrs
         flat = {k: v for k, v in a.items() if isinstance(v, (int, float, str, bool))}
         return base | flat | {
@@ -324,6 +341,29 @@ def run_case(row: dict, spec: dict, store_root: str, out_root: str) -> dict:
     except Exception as e:                                         # noqa: BLE001  logged, retried on the next run
         return base | {"status": "error", "error": f"{type(e).__name__}: {e}"[:400],
                        "trace": traceback.format_exc()[-1500:], "written_ts": time.time()}
+
+
+SEG_CQ500_MIN_CORR = 0.8
+
+
+def cross_map_seg_cq500(seg: dict, res) -> tuple[np.ndarray | None, dict]:
+    """Seg-CQ500's ICH mask (third-party NIfTI of the same study) onto the cq500 ngeo grid through physical space,
+    accepted only when its CT matches the ngeo image there (the NIfTI release is mirrored for some studies)."""
+    import SimpleITK as sitk
+
+    from brain.prep import geometry
+
+    ct = geometry.read(Path(seg["path"]))
+    nsub = max(1, int(round(res.plan.D / 0.6))) if res.plan.D > 1.5 else 1
+    x = ngeo.sample_physical(ct, res.grid, order=1, nsub=nsub, cval=ngeo.FLOOR_HU)
+    a, b = res.image.astype(np.float32), x
+    head = (a > ngeo.AIR_HU) | (b > ngeo.AIR_HU)
+    corr = float(np.corrcoef(np.clip(a[head], -50, 150), np.clip(b[head], -50, 150))[0, 1]) if head.sum() > 100 else 0.0
+    info = {"seg_cq500_corr": corr}
+    if not corr >= SEG_CQ500_MIN_CORR:
+        return None, info
+    m = sitk.Cast(geometry.read(Path(seg["ICH"])), sitk.sitkUInt8)
+    return ngeo.sample_physical(m, res.grid, order=0, nsub=nsub), info
 
 
 # ---------------------------------------------------------------------------------------------------- driver
