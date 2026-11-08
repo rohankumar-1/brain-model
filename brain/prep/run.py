@@ -379,7 +379,7 @@ def main() -> None:
         keep, skipped = [], []
         for c in todo:
             image = store.paths(a.root, c)[0]
-            if store.is_current(image, "image", (pipeline.SIZE[2], 1, pipeline.SIZE[1], pipeline.SIZE[0]), np.float16) \
+            if store.is_current(image, "image", (pipeline.SIZE[2], 1, pipeline.SIZE[1], pipeline.SIZE[0]), np.int16) \
                     and attrs_satisfy(store.read_attrs(image, "image"), a.require_attr):
                 skipped.append(c)
             else:
