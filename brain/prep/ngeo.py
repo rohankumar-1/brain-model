@@ -151,7 +151,10 @@ def plan(t, lo: float = -np.inf, hi: float = np.inf, slab_mm: float = SLAB_MM, t
         uneven = bool(np.any(np.abs(dt - D) > 0.1 * D))
     left, right = np.r_[dt[0], dt], np.r_[dt, dt[-1]]
     s_lo, s_hi = t - np.minimum(left, D) / 2, t + np.minimum(right, D) / 2
-    native_ok = (s_hi - s_lo) >= (1 - SNAP_FRAC) * D
+    # a slice stands for a whole slab when it has the slab's width or a neighbour at the slab spacing (the first 5 mm
+    # slice after a 2.5 mm block); only those are copied
+    native_ok = ((s_hi - s_lo) >= (1 - SNAP_FRAC) * D) | (np.abs(left - D) <= SNAP_FRAC * D) \
+        | (np.abs(right - D) <= SNAP_FRAC * D)
     if thin:
         anchor = s_lo[0] + D / 2
     else:
@@ -172,13 +175,13 @@ def plan(t, lo: float = -np.inf, hi: float = np.inf, slab_mm: float = SLAB_MM, t
             snap = max(snap, abs(t[k] - Tj))
             continue
         ov = np.clip(np.minimum(s_hi, Tj + D / 2) - np.maximum(s_lo, Tj - D / 2), 0.0, None)
-        if ov.sum() >= 0.5 * D:
+        if ov.sum() >= (0.99 if thin else 0.5) * D:            # thin: whole slabs only
             ks = np.flatnonzero(ov > 1e-6)
             w = ov[ks] / ov[ks].sum()
             T.append(Tj)
             W.append([(int(a), float(b)) for a, b in zip(ks, w)])
             n_synth += int(len(ks) > 1)
-        elif t[0] < Tj < t[-1]:                                     # a hole inside the series: interpolate, count it
+        elif s_lo[0] <= Tj - D / 2 and Tj + D / 2 <= s_hi[-1]:      # a hole inside the series: interpolate, count it
             hi_k = int(np.searchsorted(t, Tj))
             lo_k = hi_k - 1
             f = (Tj - t[lo_k]) / (t[hi_k] - t[lo_k])
