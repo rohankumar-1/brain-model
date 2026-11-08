@@ -45,7 +45,8 @@ NATIVE_MASKS = {"bhsd": ("ICH",), "hemseg": ("ICH",), "instance": ("ICH",), "seg
                 "aisd": ("lesion",), "isles24_ncct": ("lesion", "lvo", "cow")}
 # template-grid-only label zips next to the image (nearest through the per-slice map); checked by name, per dataset
 TEMPLATE_MASKS = {"rsna_ich": ("bleedpl",), "rsna_ica_cta": ("cow", "aneurysm"), "*": ("synthseg",)}
-CQ500_THICK = "cq500_dicom_thick"                    # pool folder with the real 5 mm series (download_cq500 --thick)
+# the real 5 mm series of thin CQ500 studies (python -m brain.datasets.download_cq500 --thick); NGEO_CQ500_THICK overrides
+CQ500_THICK = Path(os.environ.get("NGEO_CQ500_THICK", DATASETS / "cq500_dicom_thick"))
 MIN_FREE_GB = float(os.environ.get("NGEO_MIN_FREE_GB", 20))
 EST_MB_PER_CASE = 12.0                                # space reserved per case in flight
 MANIFESTS = "ngeo_manifests"
@@ -163,7 +164,7 @@ def resolve(rows: pd.DataFrame, local: Path) -> dict[str, dict]:
     if "cq500" in dsets:
         for d, c in want:
             if d == "cq500":
-                thick = DATASETS / CQ500_THICK / f"{c}.zip"
+                thick = CQ500_THICK / f"{c}.zip"
                 spec[f"{d}:{c}"] = {"kind": "dicom_zip", "zip": str(DATASETS / "cq500_dicom" / f"{c}.zip"),
                                     "thick_zip": str(thick) if thick.exists() else None, "masks": {}}
     adapters = {"bhsd": lambda: sources.bhsd(local / "bhsd" / "extracted"),
@@ -289,13 +290,15 @@ def run_case(row: dict, spec: dict, store_root: str, out_root: str) -> dict:
     try:
         sr, orr = Path(store_root), Path(out_root)
         img_zip = sr / row["image_path"]
-        arrays = store.read_many(img_zip, ("brain",))
+        arrays = store.read_many(img_zip, ("brain", "image"))
         attrs = store.read_attrs(img_zip, "image")
         brain = arrays.get("brain")
         st, nmasks, extra = read_case(row["dataset"], spec, attrs, brain)
         t1 = time.time()
         tmasks = _template_masks(sr, row["image_path"], row["dataset"])
-        res = ngeo.build(st, attrs, brain, nmasks, tmasks, extra | {"volume_id": row["volume_id"]})
+        img1 = arrays.get("image")
+        res = ngeo.build(st, attrs, brain, nmasks, tmasks, extra | {"volume_id": row["volume_id"]},
+                         None if img1 is None else store.squeeze_channel(img1))
         t2 = time.time()
         stem = row["image_path"][:-4]
         out = orr / f"{stem}.ngeo.zip"
@@ -421,6 +424,7 @@ def _jsonable(r: dict) -> dict:
 # ----------------------------------------------------------------------------------------------------- index
 
 QC_RULES = (("brain_off", lambda r: r.get("qc_brain_tissue", 1.0) < 0.8),
+            ("frame_mismatch", lambda r: r.get("qc_corr_1mm", 1.0) < 0.8),
             ("tpl_nonlinear", lambda r: r.get("tpl_resid_mm", 0.0) > 3.0),
             ("gaps", lambda r: r.get("asm_n_gaps", 0) > 0),
             ("fov_cut", lambda r: r.get("qc_edge_tissue", 0.0) > 0.02),
@@ -456,7 +460,8 @@ def build_index(out_root: Path) -> pd.DataFrame:
     out = out[~((out["dataset"] == "seg_cq500") & out["volume_id"].isin(cq))]
     keep = ["volume_id", "dataset", "case_id", "path", "S", "slice_mm", "thick_mm", "synth_thick", "n_synth",
             "series_kind", "asm_n_dup_removed", "asm_n_gaps", "asm_uneven", "asm_tilt_deg", "asm_deshear",
-            "store_frame", "tpl_resid_mm", "qc_brain_tissue", "qc_brain_air", "qc_edge_tissue", "qc_flags", "bytes"]
+            "store_frame", "tpl_resid_mm", "qc_brain_tissue", "qc_brain_air", "qc_corr_1mm", "qc_edge_tissue", "qc_flags",
+            "bytes"]
     keep += sorted(c for c in out.columns if c.startswith("mask_") and c.endswith("_ngeo"))
     return out[[c for c in keep if c in out.columns]].sort_values(["dataset", "case_id"]).reset_index(drop=True)
 

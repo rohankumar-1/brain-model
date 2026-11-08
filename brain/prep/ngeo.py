@@ -441,18 +441,37 @@ def fit_slice_affine(Q: np.ndarray, g: NGrid) -> tuple[np.ndarray, float]:
     return A, resid
 
 
-def map_template_array(arr_zyx: np.ndarray, attrs: dict, Q: np.ndarray, g: NGrid, order: int = 0) -> np.ndarray:
-    """A 1 mm stored-grid array (Z, Y, X) sampled at every ngeo voxel through the exact per-slice store-frame map."""
+def map_template_array(arr_zyx: np.ndarray, attrs: dict, Q: np.ndarray, g: NGrid, order: int = 0,
+                       stride: int = 1, cval: float = 0.0) -> np.ndarray:
+    """A 1 mm stored-grid array (Z, Y, X) sampled at every ngeo voxel through the exact per-slice store-frame map
+    (``stride``: every n-th row / column only)."""
     M = np.linalg.inv(grid_affine(attrs)) @ store_to_template(attrs)        # store phys -> 1 mm grid index (x, y, z)
-    rr, cc = np.meshgrid(np.arange(g.rc, dtype=np.float64), np.arange(g.rc, dtype=np.float64), indexing="ij")
-    out = np.zeros((g.S, g.rc, g.rc), dtype=arr_zyx.dtype if order == 0 else np.float32)
+    ax = np.arange(0, g.rc, stride, dtype=np.float64)
+    rr, cc = np.meshgrid(ax, ax, indexing="ij")
+    out = np.zeros((g.S, len(ax), len(ax)), dtype=arr_zyx.dtype if order == 0 else np.float32)
     du, dc = M[:3, :3] @ (g.h * g.u_r), M[:3, :3] @ (g.h * g.u_c)
     for s in range(g.S):
         base = M[:3, :3] @ Q[s] + M[:3, 3]
         xyz = base[:, None, None] + du[:, None, None] * rr + dc[:, None, None] * cc
-        out[s] = ndimage.map_coordinates(arr_zyx, [xyz[2], xyz[1], xyz[0]], order=order, mode="constant", cval=0,
+        out[s] = ndimage.map_coordinates(arr_zyx, [xyz[2], xyz[1], xyz[0]], order=order, mode="constant", cval=cval,
                                          prefilter=False)
     return out
+
+
+def corr_with_1mm(img: np.ndarray, image_1mm_zyx: np.ndarray, attrs: dict, Q: np.ndarray, g: NGrid,
+                  stride: int = 4) -> float:
+    """Frame check: correlation of the ngeo image with the 1 mm stored image sampled at the same voxels (through the
+    per-slice map), in a soft-tissue window over the head. A wrong frame (offset, mirror, shear) drops it."""
+    ref = map_template_array(np.asarray(image_1mm_zyx, dtype=np.float32), attrs, Q, g, order=1, stride=stride,
+                             cval=FLOOR_HU)
+    x = img[:, ::stride, ::stride].astype(np.float32)
+    head = (x > AIR_HU) | (ref > AIR_HU)
+    if head.sum() < 100:
+        return float("nan")
+    a, b = np.clip(x[head], -50, 150), np.clip(ref[head], -50, 150)
+    if a.std() < 1e-6 or b.std() < 1e-6:
+        return float("nan")
+    return float(np.corrcoef(a, b)[0, 1])
 
 
 def mask_stack(mask_img, st: SliceStack) -> SliceStack:
@@ -516,7 +535,8 @@ class NgeoResult:
 
 
 def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, native_masks: dict | None = None,
-          template_masks: dict | None = None, extra: dict | None = None) -> NgeoResult:
+          template_masks: dict | None = None, extra: dict | None = None,
+          image_1mm_zyx: np.ndarray | None = None) -> NgeoResult:
     """Everything after reading: dedupe -> range -> plan -> grid -> resample -> template maps -> attrs.
 
     ``st`` must carry ``q`` when the 1 mm store read the scan in another frame. ``native_masks``: name -> label
@@ -558,6 +578,8 @@ def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, nati
         **rinfo, **st.info, **(extra or {}),
     }
     out_attrs |= qc(img, brain, masks, pl.D)
+    if image_1mm_zyx is not None:
+        out_attrs["qc_corr_1mm"] = corr_with_1mm(img, image_1mm_zyx, attrs, Q, g)
     return NgeoResult(img, brain, masks, out_attrs, g, pl, Q)
 
 
