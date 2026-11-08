@@ -223,6 +223,7 @@ class Trainer(engine.Trainer):
         self.mil_w = torch.tensor([self.slice_w] * len(SLAB_TASKS) + [self.box_w] * (len(TOKEN_MIL_TASKS) - len(SLAB_TASKS)),
                                   device=dev)
         self.aux_sum, self.aux_cnt = torch.zeros(2, device=dev), torch.zeros(2, device=dev)
+        self.ng_acc, self.ng_n = torch.zeros(3, device=dev), 0
         seed = int(cfg["seed"]) + rt.rank
         self.loader, self.val_loader, self.stats, n_train = task_loaders(
             cfg, self.reg, self.train_ids, batch=self.batch, workers=int(d.get("num_workers", 10)), seed=seed + int(step),
@@ -385,7 +386,11 @@ class Trainer(engine.Trainer):
         total, per_task = self.balancer(loss, has, task)
         self.apply(total, step)
         self.log_tasks(per_task, has, {"task": task})
-        self.n_ngeo = getattr(self, "n_ngeo", 0) + (len(raw["ngeo"]["task"]) if raw.get("ngeo") is not None else 0)
+        if raw.get("ngeo") is not None:          # logged: ngeo rows / labelled slots per batch, their mean slot loss
+            h = hass[-1].detach()
+            self.ng_acc += torch.stack([torch.tensor(float(len(raw["ngeo"]["task"])), device=h.device),
+                                        h.float().sum(), (losses[-1].detach() * h).sum() / h.sum().clamp_min(1)])
+        self.ng_n += 1
         return {"loss": total.detach(), "k": (task >= 0).float().sum(1).mean()}
 
     def apply(self, total: torch.Tensor, step: int) -> None:
@@ -470,6 +475,11 @@ class Trainer(engine.Trainer):
             self.aux_sum.zero_()
             self.aux_cnt.zero_()
             out.update({c: (f"{mean[i]:.4f}" if n[i] else "-") for i, c in enumerate(("tokmap", "slabmil"))})
+        if self.mixed:                            # native-geometry share of the window: rows, labelled slots, loss
+            m = (self.ng_acc / max(self.ng_n, 1)).tolist()
+            out.update(ng_rows=f"{m[0]:.2f}", ng_slots=f"{m[1]:.2f}", ng_loss=f"{m[2]:.4f}")
+            self.ng_acc.zero_()
+            self.ng_n = 0
         return out
 
     @torch.no_grad()

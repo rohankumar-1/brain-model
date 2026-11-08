@@ -4,7 +4,7 @@
 #   Warm start from R14-F (no bank): the bank's tissue channel is the canonical window and R14-F's 1-channel
 #   patch-embed / decoder-pyramid kernels move into it (others zero), so step 0 answers exactly as R14-F
 #   (window_bank.warm_start_state; tests/test_bank_warm_start.py). New bank parameters reset the optimizer state.
-#   2 GPUs x 9 = global 18 (R16: 3 x 6). Re-warmed WSD (warmup 500, cooldown 6000) to step 145000: --reset-schedule.
+#   2 GPUs x 6 = global 12 (R16: 3 x 6 = 18; lr scaled 3e-4 -> 2e-4). Re-warmed WSD (warmup 500, cooldown 6000) to step 145000: --reset-schedule.
 seed: 42
 data:
   store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
@@ -99,13 +99,13 @@ aug:
 loss: {seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
   negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
 optim:
-  lr: 0.0003
+  lr: 0.0002                       # R16 0.0003 at global 18, scaled linearly to 12
   enc_lr_mult: 1.0
   layer_decay: 0.75
   weight_decay: 0.05
   warmup_steps: 500
   clip_grad: 1.0
-  batch_size: 9                    # anchors per GPU on 2 GPUs: global 18 as R16 (fits a 40 GB A100, smoke)
+  batch_size: 6                    # anchors per GPU on 2 GPUs: global 12 (9 peaked at 40.1 GiB on an L40S: no 40 GB A100)
   schedule: wsd
   decay_steps: 6000
   betas: [0.9, 0.999]
