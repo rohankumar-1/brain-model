@@ -327,10 +327,17 @@ def resample_labels(st: SliceStack, pl: Plan, g: NGrid) -> np.ndarray:
 
 
 def to_hu_int16(vol: np.ndarray) -> np.ndarray:
-    """int16 HU with the air clamp (< -500 -> -1024) and the store's CT range."""
-    v = np.clip(np.rint(vol), FLOOR_HU, MAX_HU)
-    v[v < AIR_HU] = FLOOR_HU
-    return v.astype(np.int16)
+    """int16 HU in the store's format-7 CT encoding (``store.encode_image``: < -500 HU -> -1024, 1 HU steps), clipped
+    to the store's CT range."""
+    return encode_hu(vol)[0]
+
+
+def encode_hu(vol: np.ndarray) -> tuple[np.ndarray, dict]:
+    """(int16 array, attrs ``dtype_rev`` / ``scale`` / ``air_below``) so ``store.read`` decodes it like an image zip."""
+    from brain.prep import store
+
+    v = np.clip(np.asarray(vol, dtype=np.float32), FLOOR_HU, MAX_HU)
+    return store.encode_image(v, "ct_hu", air_below=AIR_HU)
 
 
 # ----------------------------------------------------------------------------------- store frame and template maps
@@ -617,7 +624,7 @@ def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, nati
     t = st_s.p @ st_s.normal
     pl = plan(t, lo, hi, thick_hint=st.thick)
     g = make_grid(st_s, pl, center)
-    img = to_hu_int16(resample_image(st_s, pl, g))
+    img, enc = encode_hu(resample_image(st_s, pl, g))
     Q, Ur, Uc = store_slice_origins(st_s, pl, g)
     A_store, resid_store = fit_slice_affine(Q, Ur, Uc)
     T2 = store_to_template(attrs)
@@ -632,7 +639,7 @@ def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, nati
     for name, arr in (template_masks or {}).items():
         masks[name] = map_template_array(np.asarray(arr), attrs, Q, Ur, Uc, g).astype(np.uint8)
     out_attrs = {
-        "kind": KIND, "ngeo_rev": NGEO_REV,
+        "kind": KIND, "ngeo_rev": NGEO_REV, **enc,
         "spacing_mm": [pl.D, H_MM, H_MM], "slice_mm": pl.D, "thick_mm": pl.thick_mm,
         "affine_scanner": g.affine().ravel().tolist(), "affine_template": A_tpl.ravel().tolist(),
         "synth_thick": bool(pl.thin), "n_synth": int(pl.n_synth),
