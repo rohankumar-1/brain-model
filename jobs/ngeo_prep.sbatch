@@ -5,8 +5,8 @@
 # The driver checks the space left before every case (statvfs + quota cache - ngeo bytes since) and exits 3 when it
 # drops below NGEO_MIN_FREE_GB (default 20).
 #
-#   # DICOM datasets, 48 shards, at most 24 at a time
-#   DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=48 sbatch --export=ALL --array=0-47%24 jobs/ngeo_prep.sbatch
+#   # DICOM datasets, 48 shards, at most 16 at a time (pool reads ~15 MB per RSNA study)
+#   DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=48 sbatch --export=ALL --array=0-47%16 jobs/ngeo_prep.sbatch
 #   # NIfTI datasets (each task stages them all, ~10 GB local): 2 shards
 #   DATASETS=bhsd,aisd,instance,seg_cq500,isles24_ncct,isles24_cta,pedi_cranial_ct,synthrad_ct,synthrad_cbct \
 #     SHARD_N=2 sbatch --export=ALL --array=0-1 jobs/ngeo_prep.sbatch

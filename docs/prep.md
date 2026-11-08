@@ -148,7 +148,7 @@ resampled in-plane to `<case>.<mask>.ngeo.zip`; template-grid labels (`bleedpl`,
   least-squares affine (`tpl_resid_mm` > 3 flags the uneven series, where `tpl_slice_origin` is the exact map).
 
     STORE=$SCRATCH/brain-model/data/processed/slices_zarr
-    DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=32 sbatch --export=ALL --array=0-31%8 jobs/ngeo_prep.sbatch
+    DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=48 sbatch --export=ALL --array=0-47%16 jobs/ngeo_prep.sbatch
     DATASETS=bhsd,aisd,instance,seg_cq500,isles24_ncct,isles24_cta,pedi_cranial_ct,synthrad_ct,synthrad_cbct \
       SHARD_N=2 sbatch --export=ALL --array=0-1 jobs/ngeo_prep.sbatch
     python -m brain.prep.ngeo_run index --root $STORE       # volumes_ngeo.csv
