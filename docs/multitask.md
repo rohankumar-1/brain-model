@@ -156,9 +156,9 @@ listed in `volumes_ngeo.csv` under the 1 mm rows' `volume_id`, so the label tabl
   ignored; the isotropic blur runs in-plane with the same mm sigma; the field-of-view cut in whole slices.
 - Not supported on this grid: study-level input, dense (self-supervised) slots, MRI, few-shot (`fewshot.py`) and the
   frozen benchmark's encoders (they read the 1 mm grid).
-- Input windows: `model.in_chans` 3 = the role windows (CT brain / subdural / bone); `model.window_bank`
-  (`{class: "module:Name", ...}`, branch winbank) = native HU in, the model's bank maps them to `in_chans` channels.
-- Comparison configs: `configs/single/hemorrhage_iso_fixed3.yaml` (1 mm) vs `hemorrhage_ngeo_fixed3.yaml`.
+- Input windows: `model.in_chans` 3 = the role windows (CT brain / subdural / bone); `model.window_bank` = the shared learned bank (`brain.models.window_bank`).
+  = native HU in, the encoder's bank maps them to K channels (`window_bank.k`, the encoder's in_chans).
+- Comparison configs (2x2, identical apart from grid and windowing): `configs/single/hemorrhage_{iso,ngeo}_{fixed3,bank}.yaml`. With `model.window_bank` the ngeo batch stays raw HU and the bank runs before the ngeo stem (in_chans = K); CT physical augmentations stay in-plane.
 
 ## Evaluation
 
@@ -216,7 +216,7 @@ third ventricle or lateral ventricles found). Not yet a training target.
 - `model.task_tokens.enabled` (false: the slot readout, used by the ResNet specialists).
 - `model.seg.shared` / `head_hidden` (shared segmentation decoder with per-task MLP heads).
 - `model.fusion`, `tasks.study` (study-level input).
-- `data.ngeo`, `model.ngeo` (native-geometry CT), `model.window_bank` (learned input windows, branch winbank).
+- `data.ngeo`, `model.ngeo` (native-geometry CT), `model.window_bank` (the shared learned window bank).
 - `tasks.group_weights`, `tasks.groups` / `tasks.ids` (train only some groups or tasks), `tasks.exclude`.
 - `loss.negative_tasks` (lesion tasks with true negatives).
 - `data.exclude_datasets` / `exclude_volumes` (benchmark cohorts and duplicates out of training).

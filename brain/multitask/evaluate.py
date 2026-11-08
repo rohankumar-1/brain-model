@@ -47,9 +47,8 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
             out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
-                        dense_pair=b.get("dense_pair"), study=b.get("study"),
-                        **({"geo": b["geo"]} if b.get("geo") is not None else {}),
-                        **({"modality": b["modality"]} if getattr(model, "window_bank", None) is not None else {}))
+                        dense_pair=b.get("dense_pair"), study=b.get("study"), modality=b["modality"],
+                        **({"geo": b["geo"]} if b.get("geo") is not None else {}))
         stride = b.get("seg_stride", 2)                     # native geometry: (z, y, x) of its decoder
         loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], stride, dense=b,
                                 negatives=negatives)

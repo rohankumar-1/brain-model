@@ -169,7 +169,7 @@ def run_model(rows: pd.DataFrame, ckpt: Path, batch: int = 2, workers: int = 6) 
             b = prepare(raw, cfg, dev, patch, train=False)
             with torch.autocast(**amp):
                 out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
-                            dense_pair=b.get("dense_pair"))
+                            dense_pair=b.get("dense_pair"), modality=b["modality"])
             prob = torch.sigmoid(F.interpolate(out["seg"].float(), size=tuple(raw["image"].shape[1:]),
                                                mode="trilinear", align_corners=False))
             for (i, _), p in zip(b["seg_pair"].tolist(), prob):

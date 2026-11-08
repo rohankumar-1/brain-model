@@ -119,6 +119,9 @@ class Trainer(multitask.Trainer):
         m = cfg["model"]
         if m.get("init_from"):
             raise SystemExit("joint trains its encoder from scratch: model.init_from is not supported")
+        if (m.get("window_bank") or {}).get("enabled"):
+            raise SystemExit("model.window_bank: the SSL view pipeline (brain.data.batch3d) windows outside the model; "
+                             "the bank is supported by the multitask trainer only")
         enc = build_encoder(cfg, device)
         enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
         if hasattr(enc.patch_embed, "checkpoint"):

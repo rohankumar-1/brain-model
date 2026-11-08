@@ -15,6 +15,7 @@ import torch
 
 from brain.common.optim import NO_DECAY_SUFFIXES, NO_DECAY_TABLES, POST_BLOCKS
 from brain.common.paths import resolve
+from brain.models.window_bank import attach_bank, bank_cfg, bank_of, describe, encoder_in_chans, is_bank_param
 from brain.data.volumes import n_meta
 from brain.multitask.data import SLAB_TASKS, TOKEN_MIL_TASKS, TYPE_ID, prepare, protected_tasks, sharp_tasks, task_loaders
 from brain.multitask.evaluate import format_eval, run_eval
@@ -45,9 +46,9 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
 
         r = m.get("resnet") or {}
         enc = ResNetEncoder(widths=r.get("widths", (64, 128, 240, 384)), blocks=r.get("blocks", (2, 2, 2, 2)),
-                            in_chans=int(m.get("in_chans", 1)), patch_xyz=tuple(cfg["views"]["patch_xyz"]),
+                            in_chans=encoder_in_chans(m), patch_xyz=tuple(cfg["views"]["patch_xyz"]),
                             checkpoint_blocks=bool(m.get("checkpoint", True)) and not synthetic)
-        return enc.to(device).train().requires_grad_(True)
+        return attach_bank(enc.to(device), m).train().requires_grad_(True)
     if synthetic or not m.get("init_from"):
         # the config records how the encoder was built (frozen evaluation rebuilds it from these, with other defaults)
         m.update(size=m.get("size") or "test", qk_norm=True, n_cls=int(m.get("n_cls", 1)), proj_dim=16, proj_hidden=32,
@@ -60,6 +61,10 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         for k, v in (scfg.get("model") or {}).items():
             if k not in ("checkpoint",) and k not in m:
                 m[k] = v
+        if bank_of(enc) is not None:            # the encoder's own windows: its bank's config, whatever this one says
+            m["window_bank"] = {**(scfg.get("model") or {}).get("window_bank", {}), "enabled": True}
+        if (bank_cfg(m) is None) != (bank_of(enc) is None):
+            raise SystemExit("model.window_bank: a bank cannot be added to a trained encoder without one (init_from)")
         cfg["views"] = {**(scfg.get("views") or {}), "gate": cfg["views"].get("gate")}
         cfg["views"]["patch_xyz"] = list(enc.patch_xyz)
         m["size"] = enc.size
@@ -83,10 +88,12 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
     return enc.to(device).train().requires_grad_(True)
 
 
-def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, layer_decay: float) -> list[dict]:
+def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, layer_decay: float,
+                 bank_mult: float = 1.0) -> list[dict]:
     """Encoder blocks at ``enc_mult * layer_decay ** (depth - 1 - i)`` of the LR (embedding at ``** depth``, the final
     norm and heads at ``enc_mult``), the rest at 1. Biases, norms, learned tokens
-    and the task tables get no weight decay."""
+    and the task tables get no weight decay. The window bank (``model.window_bank``) is its own group at ``bank_mult``
+    (``window_bank.lr_mult``) of the LR, no weight decay (the windows have no preferred size)."""
     depth = model.backbone.depth
     buckets: dict[tuple[float, float], list] = {}
     named = list(model.named_parameters()) + [(f"extra.{i}", p) for i, p in enumerate(extra)]
@@ -94,6 +101,9 @@ def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, lay
         if not p.requires_grad:
             continue
         scale = 1.0
+        if is_bank_param(name):
+            buckets.setdefault(("bank", float(bank_mult), 0.0), []).append(p)
+            continue
         if name.startswith("backbone."):
             if name.startswith("backbone.blocks."):
                 scale = enc_mult * layer_decay ** (depth - 1 - int(name.split(".")[2]))
@@ -102,8 +112,9 @@ def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, lay
             else:
                 scale = enc_mult * layer_decay ** depth
         skip = p.ndim < 2 or name.endswith(NO_DECAY_SUFFIXES) or any(k in name for k in NO_DECAY_TABLES)
-        buckets.setdefault((scale, 0.0 if skip else wd), []).append(p)
-    return [{"params": ps, "lr": s, "weight_decay": d, "lr_scale": s} for (s, d), ps in buckets.items()]
+        buckets.setdefault(("", scale, 0.0 if skip else wd), []).append(p)
+    return [{"params": ps, "lr": s, "weight_decay": d, "lr_scale": s, **({"name": "window_bank"} if g else {})}
+            for (g, s, d), ps in buckets.items()]
 
 
 def remap_tasks(state: dict, old_ids: list[str], new_ids: list[str], template: dict) -> dict:
@@ -205,7 +216,8 @@ class Trainer(engine.Trainer):
         self.epoch = 0
         self.opt = torch.optim.AdamW(
             param_groups(self.raw, list(self.balancer.parameters()), float(o["weight_decay"]),
-                         float(o.get("enc_lr_mult", 0.25)), float(o.get("layer_decay", 0.8))),
+                         float(o.get("enc_lr_mult", 0.25)), float(o.get("layer_decay", 0.8)),
+                         float((bank_cfg(cfg["model"]) or {}).get("lr_mult", 1.0))),
             lr=float(o["lr"]), betas=tuple(o.get("betas", (0.9, 0.999))), fused=dev.type == "cuda")
         if ckpt is not None:
             old_ids, new_ids = list(ckpt.get("tasks") or []), [t.id for t in self.reg.tasks]
@@ -289,11 +301,9 @@ class Trainer(engine.Trainer):
         seg_tok, slab_pair = self._token_pairs(b)
         tok_pair = torch.cat([seg_tok, slab_pair]) if len(seg_tok) or len(slab_pair) else None
         kw = dict(meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
-                  study=b.get("study"))
+                  study=b.get("study"), modality=b["modality"], hide=b.get("hide"))
         if b.get("geo") is not None:                   # native geometry: per-row template-mm token centres
             kw["geo"] = b["geo"]
-        if self.raw.window_bank is not None:
-            kw["modality"] = b["modality"]
         return (b["x"], b["keep"], b["task"], b["seg_pair"]), kw, (seg_tok, slab_pair)
 
     def task_loss(self, out: dict, b: dict, pairs: tuple) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -396,7 +406,9 @@ class Trainer(engine.Trainer):
         return {f"val_{k}": v for k, v in res.items()}
 
     def eval_lines(self, vals: dict[str, float]) -> list[str]:
-        return format_eval(vals, self.reg)
+        lines = format_eval(vals, self.reg)
+        bank = bank_of(self.raw.backbone)
+        return lines if bank is None else [*lines, f"[window_bank] {describe(bank)}"]
 
     def state(self, model_only: bool) -> dict:
         s = {"model": self.raw.backbone.state_dict(), "multitask": self.raw.state_dict(),

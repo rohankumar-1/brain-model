@@ -33,7 +33,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
-from brain.common.windowing import asinh_window, canonical_c_w, floors, role_windows
+from brain.common.windowing import canonical_window as _canonical_window, encoder_input, floors
+from brain.models.window_bank import bank_cfg
 from brain.data.augment import appearance
 from brain.data.gate import gate_kwargs, token_keep
 from brain.data.volumes import FamilySampler, _worker_threads, meta_id
@@ -885,44 +886,20 @@ def gate_cfg(cfg: dict) -> dict:
 
 def canonical_window(raw: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
     """Each row in its modality's canonical window (CT brain / MRI tissue), as frozen evaluation encodes."""
-    cw = torch.tensor([canonical_c_w("ct"), canonical_c_w("mri")], device=raw.device, dtype=torch.float32)[mod]
-    return asinh_window(raw, cw[:, 0].view(-1, 1, 1, 1, 1), cw[:, 1].view(-1, 1, 1, 1, 1))
+    return _canonical_window(raw, mod)
 
 
-def encoder_window(raw: torch.Tensor, mod: torch.Tensor, in_chans: int = 1) -> torch.Tensor:
-    """The unaugmented encoder input: the canonical window, or for a three-channel encoder the three role windows
-    (``windowing.ROLES``, the first of them the canonical one)."""
-    return role_windows(raw, mod) if int(in_chans) == 3 else canonical_window(raw, mod)
+def encoder_window(raw: torch.Tensor, mod: torch.Tensor, in_chans: int = 1, bank=None) -> torch.Tensor:
+    """The unaugmented encoder input (``windowing.encoder_input``): the encoder's window bank, the canonical window, or
+    for a three-channel encoder the three role windows (``windowing.ROLES``, the first of them the canonical one)."""
+    return encoder_input(raw, mod, in_chans, bank)
 
 
-def input_mode(cfg: dict) -> str:
-    """How ``prepare`` builds the encoder input: ``fixed`` (one canonical window), ``roles`` (``model.in_chans`` 3:
-    the three role windows ``windowing.ROLES``, CT brain / subdural / bone) or ``bank`` (``model.window_bank`` set:
-    native units, 1 channel; the model's learned window bank maps them to ``in_chans`` = K channels)."""
-    m = cfg.get("model") or {}
-    if m.get("window_bank"):
-        return "bank"
-    return "roles" if int(m.get("in_chans", 1)) == 3 else "fixed"
-
-
-def appearance_window(cfg: dict) -> dict:
-    """``appearance``'s window spec for this run's input mode (training)."""
-    mode = input_mode(cfg)
-    return {"mode": "raw"} if mode == "bank" else {"mode": "roles", "jitter": 0.0} if mode == "roles" \
-        else {"mode": "fixed"}
-
-
-def model_input(raw: torch.Tensor, mod: torch.Tensor, cfg: dict) -> torch.Tensor:
-    """The unaugmented encoder input of native-unit volumes ``raw`` (B, 1, ...) for this run's input mode."""
-    if input_mode(cfg) == "bank":
-        return raw.float()
-    return encoder_window(raw, mod, int((cfg.get("model") or {}).get("in_chans", 1)))
-
-
-def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None, in_chans: int = 1):
+def gate_and_window(raw: torch.Tensor, mod: torch.Tensor, patch_xyz, gate: dict | None = None, in_chans: int = 1,
+                    bank=None):
     """Native-unit volumes ``raw`` (B, 1, Z, Y, X) -> the windowed encoder input (``encoder_window``) and the
     foreground token mask (B, N) gated on the raw values."""
-    return encoder_window(raw, mod, in_chans), foreground_tokens(raw, mod, patch_xyz, gate)
+    return encoder_window(raw, mod, in_chans, bank), foreground_tokens(raw, mod, patch_xyz, gate)
 
 
 def fov_cut(raw: torch.Tensor, seg: torch.Tensor, rows: torch.Tensor, mod: torch.Tensor, allowed: torch.Tensor,
@@ -956,9 +933,11 @@ def token_voxels(m: torch.Tensor, shape_zyx, patch_xyz) -> torch.Tensor:
 
 
 def dense_targets(batch: dict, x: torch.Tensor, raw_dense: torch.Tensor, hide: torch.Tensor | None, patch_xyz,
-                  gate: dict | None, stride: int) -> tuple[torch.Tensor, torch.Tensor]:
+                  gate: dict | None, stride: int, rec_src: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Targets and voxel weights (D, 1, Z/s, Y/s, X/s) of the dense slots at the decoder stride. Reconstruction: the
-    unblanked encoder input's first channel, weighted on the hidden voxels (``hide``, (B, Z, Y, X)). Synthesis: the
+    unblanked encoder input's first channel (or ``rec_src``: with a window bank the input is native units and the
+    target its fixed canonical window, so the learned windows cannot shape their own target), weighted on the hidden
+    voxels (``hide``, (B, Z, Y, X)). Synthesis: the
     partner contrast (``raw_dense``, native units, already moved with the image) in its modality's canonical window,
     weighted on its foreground tokens."""
     src = batch["dense_src"].to(x.device)
@@ -976,7 +955,7 @@ def dense_targets(batch: dict, x: torch.Tensor, raw_dense: torch.Tensor, hide: t
     rec = ~syn
     if bool(rec.any()) and hide is not None:
         r = rows[rec]
-        tgt[rec] = pool(x[r, :1].float())
+        tgt[rec] = pool((x if rec_src is None else rec_src)[r, :1].float())
         w[rec] = pool(hide[r].unsqueeze(1).float())
     return tgt, w
 
@@ -1031,9 +1010,18 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     contrasts move with their image; masked rows (training) get ``tasks.mask_ratio`` of their foreground tokens blanked
     after the reconstruction target is taken (``dense_targets``). Rows asking a task in ``sharp`` (``sharp_tasks``) get
     no blur and no field-of-view cut. A native-geometry batch (``batch["affine"]``, ``collate_ngeo``) goes to
-    ``prepare_ngeo``."""
+    ``prepare_ngeo``.
+
+    With the window bank (``model.window_bank.enabled``) the encoder windows inside the model: ``x`` is the
+    (augmented) native-unit volume (B, 1, Z, Y, X) and BrainQuery applies the bank (``forward(..., modality=)``);
+    appearance augmentation runs in native units (``augment``'s native path: CT physical augmentations, no window
+    jitter); masked rows are not blanked here but returned as ``hide`` (B, Z, Y, X) for the model to blank after the
+    bank; the reconstruction target is the canonical window of the native input."""
     if "affine" in batch:
         return prepare_ngeo(batch, cfg, device, patch_xyz, train, fov_unsafe, aug_unsafe, sharp)
+    model_cfg = cfg.get("model") or {}
+    in_chans = int(model_cfg.get("in_chans", 1))
+    bank = bank_cfg(model_cfg) is not None
     aug = (cfg.get("aug") or {}) if train else {}
     raw = batch["image"].to(device, non_blocking=True).float().unsqueeze(1)
     mod = batch["modality"].to(device)
@@ -1088,20 +1076,22 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     app = aug.get("appearance")
     if train and app:
         thick = batch["thick"].to(device) if "thick" in batch else None
-        window = appearance_window(cfg)
+        window = {"mode": "native"} if bank else {"mode": "roles", "jitter": 0.0} if in_chans == 3 \
+            else {"mode": "fixed"}
         x = appearance(raw, mod, {**app, "window": window},
                        thick=(thick[:, 0], thick[:, 1].long()) if thick is not None else None, protect=live_rows,
                        sharp=sharp_rows)
     else:
-        x = model_input(raw, mod, cfg)
+        x = raw if bank else encoder_window(raw, mod, in_chans)
     study = None
     if praw is not None:
         pmod = batch["study_mod"].to(device)
         if train and app:
             px = appearance(praw, pmod, {**app, "window": window})
         else:
-            px = model_input(praw, pmod, cfg)
-        study = {"x": px, "row": prow, "seq": batch["seq"].to(device), "pseq": batch["study_seq"].to(device)}
+            px = praw if bank else encoder_window(praw, pmod, in_chans)
+        study = {"x": px, "row": prow, "seq": batch["seq"].to(device), "pseq": batch["study_seq"].to(device),
+                 "mod": pmod}
     hide = dense_tgt = dense_w = None
     tk = cfg.get("tasks") or {}
     if train and "masked" in batch and bool(batch["masked"].any()):
@@ -1111,13 +1101,14 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     if len(dense_pair):
         stride = int((cfg.get("loss") or {}).get("seg_stride", 2))
         dense_tgt, dense_w = dense_targets(batch, x, raw_dense, hide, patch_xyz, gate_cfg(cfg),
-                                           stride)
-    if hide is not None:                      # after the reconstruction target: blank voxels (0 in every channel)
+                                           stride, rec_src=_canonical_window(x, mod) if bank else None)
+    if hide is not None and not bank:         # after the reconstruction target: blank voxels (0 in every channel)
         x = x.masked_fill(hide.unsqueeze(1), 0.0)
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device),
             "dense_pair": dense_pair, "dense_tgt": dense_tgt, "dense_w": dense_w,
-            "meta": batch["meta"].to(device) if "meta" in batch else None, "slab": slab, "study": study}
+            "meta": batch["meta"].to(device) if "meta" in batch else None, "slab": slab, "study": study,
+            "hide": hide if bank else None}
 
 
 def prepare_ngeo(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None,
@@ -1132,6 +1123,9 @@ def prepare_ngeo(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_uns
       the grid's in-plane spacing); the field-of-view cut in whole slices of each row's spacing;
     * the token gate on the raw HU as for the 1 mm grid (CT lower bound -500 HU; air is stored at -1024), and
       tokens on padded slices dropped;
+    * window bank (``model.window_bank.enabled``): ``x`` stays raw HU (B, 1, ...), the model applies the bank before
+      the ngeo stem (in_chans = K); CT physical augmentations (``augment``'s native path) with the reconstruction
+      kernel and blur in-plane;
     * ``geo``: per-row token centres in template mm (``coords`` (B, N, 3)) and token sizes (``pmm`` (B, 3)), which
       ``BrainQuery`` takes instead of the 1 mm grid's; ``seg_stride`` the dense decoder's output stride
       (``model.ngeo.seg_stride``, (z, y, x)) for the losses.
@@ -1188,22 +1182,27 @@ def prepare_ngeo(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_uns
         slab = torch.cat([slab, torch.full((b, len(TOKEN_MIL_TASKS) - len(SLAB_TASKS), slab.shape[2]), -1,
                                            dtype=slab.dtype, device=device)], 1)
     app = aug.get("appearance")
+    in_chans = int(m.get("in_chans", 1))
+    bank = bank_cfg(m) is not None
     if train and app:
-        bl = dict(app.get("blur") or {})
-        if bl:
-            mm = float(spacing[:, 1:].mean())                  # sigma_vox is in 1 mm voxels: the same blur in mm
-            bl.update(dims=(3, 4), sigma_vox=[float(v) / mm for v in bl.get("sigma_vox", (0.5, 1.5))])
-        x = appearance(raw, mod, {**app, "through_plane": None, "blur": bl or None, "window": appearance_window(cfg)},
-                       protect=live_rows, sharp=sharp_rows)
+        mm = float(spacing[:, 1:].mean())                      # sigma_vox is in 1 mm voxels: the same blur in mm
+        app = {**app, "through_plane": None}                   # never through-plane on native slices
+        for key in ("blur", "kernel"):                         # isotropic blur in-plane; recon kernel is in-plane
+            if app.get(key):
+                app[key] = {**app[key], "dims": (3, 4),
+                            "sigma_vox": [float(v) / mm for v in app[key].get("sigma_vox", (0.5, 1.5))]}
+        window = {"mode": "native"} if bank else {"mode": "roles", "jitter": 0.0} if in_chans == 3 \
+            else {"mode": "fixed"}
+        x = appearance(raw, mod, {**app, "window": window}, protect=live_rows, sharp=sharp_rows)
     else:
-        x = model_input(raw, mod, cfg)
+        x = raw if bank else encoder_window(raw, mod, in_chans)
     coords = token_centres_mm(aff, raw.shape[2:], patch_xyz)
     stride = tuple(int(v) for v in ((m.get("ngeo") or {}).get("seg_stride") or (1, 4, 4)))
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device),
             "dense_pair": torch.zeros(0, 2, dtype=torch.long, device=device), "dense_tgt": None, "dense_w": None,
             "meta": batch["meta"].to(device) if "meta" in batch else None, "slab": slab, "study": None,
-            "geo": {"coords": coords, "pmm": token_size_mm(spacing, patch_xyz),
+            "hide": None, "geo": {"coords": coords, "pmm": token_size_mm(spacing, patch_xyz),
                     "n_slices": batch["slice_keep"].sum(1).cpu()}, "seg_stride": stride}
 
 

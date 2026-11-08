@@ -55,6 +55,26 @@ def transfer_rows(model, b, tasks: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def extra_rows(model, b, tasks: list[str], tr: pd.DataFrame) -> pd.DataFrame:
+    """The extra readouts (``metrics.EXTRA_READOUTS``: the attentive probe) of this model per task, beside its pinned
+    readout's test score (``tr``, ``transfer_rows``). Reported only: never pinned, never in the headline."""
+    from brain.bench.board import current_table
+
+    t, _ = current_table(b, tasks)
+    e = t[(t.model_id == model.model_id) & t.extra] if "extra" in t else t.iloc[0:0]
+    if e.empty:
+        return pd.DataFrame()
+    pinned = tr.set_index("task") if "test" in tr else pd.DataFrame()
+    rows = []
+    for r in e.sort_values("finished_utc").drop_duplicates(["task", "head"], keep="last").itertuples():
+        p = pinned.loc[r.task] if r.task in pinned.index else None
+        rows.append({"task": r.task, "head": r.head, "metric": r.metric, "test": r.test, "lo": r.ci_lo, "hi": r.ci_hi,
+                     "val": r.val, "pinned_head": None if p is None else p.get("head"),
+                     "pinned_test": np.nan if p is None else p.get("test")})
+    order = {t: i for i, t in enumerate(tasks)}
+    return pd.DataFrame(rows).sort_values("task", key=lambda s: s.map(order)).reset_index(drop=True)
+
+
 def headline(df: pd.DataFrame) -> float:
     d = df.dropna(subset=["skill"]) if "skill" in df else df.iloc[0:0]
     return float(d.groupby("group").skill.mean().mean()) if len(d) else np.nan
@@ -111,6 +131,15 @@ def card(target: str, out: Path = CARDS) -> str:
                       f"{mod.upper()} {headline(scored[scored.modality == mod]):.3f}" for mod in sorted(scored.modality.unique())
                       if scored[scored.modality == mod].skill.notna().any())]
     lines.append("")
+    ex = extra_rows(m, b, tasks, tr)
+    if len(ex):
+        lines += ["### Extra readout: attentive probe (not pinned, not in the headline)", "",
+                  "| Task | Readout | Metric | Test [95% CI] | Val | Pinned readout | Pinned test |",
+                  "|---|---|---|---|---:|---|---:|"]
+        for r in ex.itertuples():
+            lines.append(f"| {r.task} | {r.head} | {r.metric} | {_fmt(r.test)} [{_fmt(r.lo)}, {_fmt(r.hi)}] | "
+                         f"{_fmt(r.val)} | {r.pinned_head or '-'} | {_fmt(r.pinned_test)} |")
+        lines.append("")
 
     if m.is_checkpoint:
         seg = transfer_rows(m, b, b.seg_tasks)

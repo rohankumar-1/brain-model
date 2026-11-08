@@ -35,6 +35,7 @@ import torch
 import torch.nn.functional as F
 
 from brain.downstream.tasks import DEFAULT_VOLUMES
+from brain.models.window_bank import bank_input, bank_of
 from brain.multitask.data import gate_and_window, gate_cfg
 from brain.prep import store
 
@@ -46,7 +47,7 @@ def encode(model, cfg, image_zyx: np.ndarray, modality: str, device) -> tuple[di
     raw = torch.from_numpy(np.ascontiguousarray(image_zyx, np.float32))[None, None].to(device)
     mod = torch.tensor([0 if str(modality).lower().startswith("ct") else 1], device=device)
     x, keep = gate_and_window(raw, mod, tuple(model.backbone.patch_xyz), gate_cfg(cfg),
-                              in_chans=model.backbone.in_chans)
+                              in_chans=model.backbone.in_chans, bank=bank_of(model.backbone))
     with torch.no_grad(), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
         enc = model.encode(x, keep)
     enc = {k: (v.float() if torch.is_tensor(v) and v.is_floating_point() else v) for k, v in enc.items()}
@@ -128,8 +129,10 @@ def enrichment(weights: np.ndarray, lesion_frac: np.ndarray, valid: np.ndarray) 
     return float((w * f).sum() / w.sum() / (f.sum() / valid.sum()))
 
 
-def encode_backbone(backbone, x: torch.Tensor, keep: torch.Tensor) -> dict:
-    """``BrainQuery.encode`` for a bare 3D encoder (SSL checkpoints)."""
+def encode_backbone(backbone, x: torch.Tensor, keep: torch.Tensor, modality: torch.Tensor | None = None) -> dict:
+    """``BrainQuery.encode`` for a bare 3D encoder (SSL checkpoints). A native-unit ``x`` (B, 1, ...) goes through
+    the encoder's window bank first, if it has one (``modality`` then required)."""
+    x = bank_input(bank_of(backbone), x, modality)
     from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 
     size = (x.shape[4], x.shape[3], x.shape[2])
@@ -178,7 +181,7 @@ def tokens(a) -> None:
             raw = torch.from_numpy(img)[None, None].to(dev)
             mod = torch.tensor([0 if str(r.modality).lower().startswith("ct") else 1], device=dev)
             x, keep = gate_and_window(raw, mod, tuple(enc_net.patch_xyz), gate,
-                                      in_chans=enc_net.in_chans)
+                                      in_chans=enc_net.in_chans, bank=bank_of(enc_net))
             with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=dev.type == "cuda"):
                 e = encode_backbone(enc_net, x, keep)
             feats.append((e["tokens"][0].float().cpu().numpy(), keep[0].cpu().numpy().astype(bool)))

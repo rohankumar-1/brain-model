@@ -122,6 +122,11 @@ def summarize_for_table(head_name: str, metrics: dict) -> dict:
 
 
 HEADLINE = {"multilabel": "auc_ovr_macro", "binary": "auc", "regression": "r2", "segmentation": "dice_macro"}
+# Readouts reported beside the benchmark, never a pinned readout, never a fallback readout, never in a headline score
+# (brain.eval.report.suite_heads marks them ``extra`` and not ``encoder``, so fixed_heads / pin / the board's and the
+# card's pick skip them): the attentive probe (brain.downstream.heads.AttentiveProbe, run_suite --attn-probe).
+ATTN_PROBE = "attn_probe"
+EXTRA_READOUTS = (ATTN_PROBE,)
 
 
 def bootstrap_ci(stat, n: int, *, reps: int = 1000, seed: int = 0) -> tuple[float, float]:

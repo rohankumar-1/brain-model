@@ -309,31 +309,31 @@ def test_inplane_augmentation_never_mixes_slices():
     assert (b["x"][:, :, 2] > base + 1).any()
 
 
-def test_window_bank_hook():
-    """model.window_bank: prepare ships native HU (one channel), the model maps it to in_chans channels first."""
-    cfg = _cfg(in_chans=2)
-    cfg["model"]["window_bank"] = {"class": "tests.test_ngeo:DummyBank", "k": 2}
-    model = _model(cfg).eval()
+def test_window_bank_on_ngeo():
+    """model.window_bank on native geometry: prepare_ngeo ships raw HU (one channel, CT physical augmentations
+    in-plane), the model applies the encoder's bank before the ngeo stem (in_chans = K); the bank trains."""
+    cfg = _cfg()
+    cfg["model"]["window_bank"] = {"enabled": True, "k": 4, "init": "contract6", "per_modality": False,
+                                   "lr_mult": 0.1, "decoder_grad": False}
+    cfg["aug"] = {"flip_lr": 0.5, "affine": {"p": 1.0, "rot_deg": [8, 8, 12], "shift_mm": 4.0},
+                  "appearance": {"ct_physical": {"p": 1.0, "offset_hu": 10.0, "scale": 0.03},
+                                 "kernel": {"p": 1.0, "sigma_vox": [0.3, 1.0], "sharpen": 0.5, "amount": [0.2, 1.0]},
+                                 "through_plane": {"p": 1.0, "fwhm_vox": [4.0, 6.0]},
+                                 "noise": {"p": 1.0, "sigma_hu": [2.0, 15.0]}, "blur": {"p": 1.0, "sigma_vox": [0.5, 1.0]}}}
+    model = _model(cfg).train()
+    assert model.backbone.window_bank is not None and model.backbone.in_chans == 4
+    assert model.backbone.ngeo_embed.stem[0][0].weight.shape[1] == 4
     raw = _batch()
-    b = prepare(raw, cfg, CPU, NGEO_PATCH, train=False)
-    assert b["x"].shape[1] == 1 and torch.equal(b["x"][:, 0], raw["image"].float())
-    out = model(b["x"], b["keep"], b["task"], b["seg_pair"], geo=b["geo"], modality=b["modality"])
-    assert torch.isfinite(out["binary"]).all()
-    cfg["model"]["window_bank"] = {"class": "tests.test_ngeo:DummyBank", "k": 3}
-    with pytest.raises(ValueError):
-        _model(cfg)
+    ev = prepare(raw, cfg, CPU, NGEO_PATCH, train=False)
+    assert ev["x"].shape[1] == 1 and torch.equal(ev["x"][:, 0], raw["image"].float())
+    b = prepare(raw, cfg, CPU, NGEO_PATCH, train=True)
+    assert b["x"].shape[1] == 1 and not torch.equal(b["x"][:, 0], raw["image"].float())
+    out = model(b["x"], b["keep"], b["task"], b["seg_pair"], geo=b["geo"], modality=b["modality"], hide=b["hide"])
+    from brain.multitask.losses import slot_losses
 
-
-class DummyBank(torch.nn.Module):
-    """A stand-in window bank: K fixed asinh windows."""
-
-    def __init__(self, k: int):
-        super().__init__()
-        self.out_chans = int(k)
-        self.c = torch.nn.Parameter(torch.linspace(0, 80, k))
-
-    def forward(self, x, modality):
-        return torch.asinh((x - self.c.view(1, -1, 1, 1, 1)) / 40.0)
+    loss, has = slot_losses(out, b["task"], b["y"], model.task_type, b["seg"], b["seg_pair"], b["seg_stride"])
+    loss[has].mean().backward()
+    assert model.backbone.window_bank.c_raw.grad is not None and model.backbone.window_bank.c_raw.grad.abs().sum() > 0
 
 
 def test_iso_path_unchanged_by_the_option():
@@ -362,3 +362,21 @@ def test_trainer_runs_on_ngeo_phantoms(tmp_path, monkeypatch):
                 "--set", "train.eval_every=2", "--set", "train.ckpt_every=2"])
     model, _, cfg = load_model(tmp_path / "last.pt", CPU)
     assert model.backbone.ngeo_embed is not None and model.seg_ngeo is not None
+
+
+def test_bank_augmentation_stays_in_plane():
+    """With the bank (native-unit augmentation), kernel blur / sharpen, blur and the (ignored) through-plane blur
+    never move a slice's content to its neighbours."""
+    cfg = _cfg()
+    cfg["model"]["window_bank"] = {"enabled": True, "k": 4}
+    cfg["aug"] = {"flip_lr": 1.0, "affine": {"p": 1.0, "rot_deg": [8, 8, 30], "shift_mm": 8.0},
+                  "appearance": {"ct_physical": {"p": 1.0, "offset_hu": 10.0, "scale": 0.03},
+                                 "kernel": {"p": 1.0, "sigma_vox": [1.0, 1.0], "sharpen": 0.0, "amount": [0.2, 1.0]},
+                                 "through_plane": {"p": 1.0, "fwhm_vox": [4.0, 6.0]},
+                                 "blur": {"p": 1.0, "sigma_vox": [1.0, 1.0]}}}
+    raw = _batch()
+    raw["image"][:, :] = -1024
+    raw["image"][:, 2, 16:48, 16:48] = 40
+    b = prepare(raw, cfg, CPU, NGEO_PATCH, train=True)
+    other = torch.cat([b["x"][:, :, :2], b["x"][:, :, 3:]], 2)
+    assert torch.allclose(other, torch.full_like(other, -1024.0), atol=1e-3) and (b["x"][:, :, 2] > 0).any()

@@ -1,11 +1,12 @@
-# Native-geometry comparison (2026-11-07), arm 1 of 2: today's 1 mm template grid with three fixed CT windows.
-#   Recipe, steps and everything else as hemorrhage_scratch_hybrid.yaml (ViT-S + two-stage conv stem, slot readout,
-#   token maps, HL-Gauss, 30k steps WSD 4e-4, batch 8 x 2 GPUs); the only change is model.in_chans 3: the three role
-#   windows of brain.common.windowing.ROLES (CT brain 40/40, subdural 75/100, bone 500/400, asinh), unjittered, with
-#   every appearance augmentation in native units (data.prepare, augment roles path). Pair: hemorrhage_ngeo_fixed3.
-#   Window-bank variants (branch winbank) drop in by config: model.window_bank {class, ...} with model.in_chans = K
-#   (prepare then ships native HU, the model's bank windows them; data.input_mode).
-#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:2 -c 24 --mem=180G -t 06:00:00 -J s-hem-iso3 \
+# 1 mm template grid, three fixed CT windows.
+#   The 2x2 set (2026-11-08): {iso, ngeo} grid x {fixed3, bank} windowing, all from scratch with the
+#   hemorrhage_scratch_hybrid recipe (ViT-S + conv stem, slot readout, token maps, HL-Gauss, 30k steps WSD 4e-4, batch
+#   8 x 2 GPUs). The four configs are identical except the grid (data.ngeo / model.ngeo) and the windowing
+#   (model.in_chans 3 = ROLES brain / subdural / bone, unjittered, vs model.window_bank: 6 learned asinh windows). Same
+#   augmentation in all four, CT physical ones included (ct_physical, kernel, noise.sigma_hu: native units, before
+#   the fixed windows or the bank). The ngeo arms keep it in-plane: no out-of-plane rotation, through_plane ignored,
+#   kernel / isotropic blur in-plane with the same mm sigma (data.prepare_ngeo; docs/multitask.md "Native geometry").
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:2 -c 24 --mem=180G -t 06:00:00 -x node3006 -J s-iso_fixed3 \
 #     --export=ALL,METHOD=multitask,EXPECT_GPUS=2,CONFIG=configs/single/hemorrhage_iso_fixed3.yaml jobs/train.sbatch
 seed: 42
 data:
@@ -28,8 +29,6 @@ model:
   init_from: null
   size: small
   conv_stem: [32, 64]
-  in_chans: 3                     # fixed windows: ROLES brain / subdural / bone
-  window_bank: null               # winbank hook: {class: module:Name, ...}; in_chans = K
   checkpoint: true
   taps: [3, 7]
   slot: {dim: 256, layers: 3, heads: 8}
@@ -41,6 +40,8 @@ model:
   task_tokens: {enabled: false}
   regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
   token_map: {enabled: true, dim: 64}
+  in_chans: 3                     # fixed windows: windowing.ROLES brain / subdural / bone
+  window_bank: {enabled: false}
 views:
   patch_xyz: [16, 16, 8]
   gate:
@@ -76,6 +77,9 @@ aug:
       kind: rician
       snr: [15, 100]
       sigma: [0.02, 0.1]
+      sigma_hu: [2.0, 15.0]       # CT rows (window bank: Gaussian noise in HU)
+    ct_physical: {p: 0.5, offset_hu: 10.0, scale: 0.03}
+    kernel: {p: 0.3, sigma_vox: [0.3, 1.0], sharpen: 0.5, amount: [0.2, 1.0]}
     blur:
       p: 0.2
       sigma_vox: [0.5, 1.0]

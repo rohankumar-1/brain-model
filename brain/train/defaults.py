@@ -138,6 +138,10 @@ def _multitask_defaults() -> dict[str, Any]:
                   "regression": {"kind": "scalar", "bins": 80, "range": [-5.0, 5.0], "sigma_ratio": 0.75},
                   # a logit per encoder token for a slot (BrainQuery.token_logits), for loss.token_weight / slice_weight
                   "token_map": {"enabled": False, "dim": 64},
+                  # shared learned window bank (brain.models.window_bank; CONTRACT 4): the encoder takes native units and
+                  # windows them through k learnable asinh windows (k input channels); off = the fixed windows
+                  "window_bank": {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1,
+                                  "decoder_grad": False},
                   # encoder: the ViT (init_from an SSL checkpoint, or ``size`` from scratch) or ``resnet3d``
                   # (brain.models.resnet3d, from scratch; ``resnet`` its widths / blocks)
                   "arch": "vit", "resnet": {"widths": [64, 128, 240, 384], "blocks": [2, 2, 2, 2]},
@@ -147,7 +151,7 @@ def _multitask_defaults() -> dict[str, Any]:
                   # (patch_embed.ConvStemEmbed3D, e.g. [32, 64]); None = the plain linear patch embedding
                   "conv_stem": None,
                   # input channels: 1 = the canonical window, 3 = the role windows (CT brain / subdural / bone), K with
-                  # window_bank; an init_from encoder's own value replaces it
+                  # the window bank (window_bank.k replaces it); an init_from encoder's own value replaces it
                   "in_chans": 1,
                   # ``dim``: the heads' width. layers / heads: the slot readout (task_tokens.enabled: false)
                   "slot": {"dim": 256, "layers": 3, "heads": 8},
@@ -157,9 +161,7 @@ def _multitask_defaults() -> dict[str, Any]:
                   "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0},
                   # native-geometry CT (docs/multitask.md): {enabled, stem [w1, w2], patch_xyz [32, 32, 1] (input voxels),
                   # seg_stride [1, 4, 4] (z, y, x), template_xyz [256, 256, 160]}; None = 1 mm grid only
-                  "ngeo": None,
-                  # learned input windows (branch winbank): {class: "module:Name", ...}, in_chans = its K channels
-                  "window_bank": None},
+                  "ngeo": None},
         # gate mode: "center" (a token's centre voxel) or "frac" (>= min_frac of its voxels; data.gate.token_keep)
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
                                                      "min_frac": 0.25}},
@@ -178,8 +180,13 @@ def _multitask_defaults() -> dict[str, Any]:
                 # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
                 # bias is MRI only and mild (intensity asymmetry is a target); noise is Rician on MRI, Gaussian on CT
                 "appearance": {"bias": {"p": 0.3, "amp": 0.2}, "through_plane": {"p": 0.3, "fwhm_vox": [2.0, 6.0]},
-                               "noise": {"p": 0.5, "kind": "rician", "snr": [15.0, 100.0], "sigma": [0.02, 0.1]},
-                               "blur": {"p": 0.2, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.2, "amp": 0.1}},
+                               "noise": {"p": 0.5, "kind": "rician", "snr": [15.0, 100.0], "sigma": [0.02, 0.1],
+                                         "sigma_hu": [2.0, 15.0]},
+                               "blur": {"p": 0.2, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.2, "amp": 0.1},
+                               # native (window bank) and roles (in_chans 3) paths; ignored by the single fixed window: CT
+                               # calibration offset / scale and reconstruction-kernel blur / sharpen, p 0 = off
+                               "ct_physical": {"p": 0.0, "offset_hu": 10.0, "scale": 0.03},
+                               "kernel": {"p": 0.0, "sigma_vox": [0.3, 1.0], "sharpen": 0.5, "amount": [0.2, 1.0]}},
                 # blank a random inferior slab (truncated coverage) on rows asking no whole-brain target; p 0 = off
                 "fov_cut": {"p": 0.2, "mm": [10, 40]},
                 # skull-strip skull-on MRI with its SynthStrip mask (never rows asking a needs_skull task): the tumour

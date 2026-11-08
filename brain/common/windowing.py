@@ -92,3 +92,21 @@ def role_windows(x: torch.Tensor, modality: torch.Tensor, jitter: float = 0.0) -
         w = w * torch.exp(jitter * torch.randn_like(w))
     shape = (b, 3) + (1,) * (x.dim() - 2)
     return asinh_window(x.float().expand(b, 3, *x.shape[2:]), c.view(shape), w.view(shape))
+
+
+def canonical_window(x: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
+    """Each row of native-unit ``x`` (B, 1, ...) in its modality's canonical window (CT brain / MRI tissue)."""
+    b = x.shape[0]
+    cw = torch.tensor([CANONICAL["ct"], CANONICAL["mri"]], device=x.device, dtype=torch.float32)[mod.reshape(b).long()]
+    shape = (b,) + (1,) * (x.dim() - 1)
+    return asinh_window(x, cw[:, 0].view(shape), cw[:, 1].view(shape))
+
+
+def encoder_input(x: torch.Tensor, mod: torch.Tensor, in_chans: int = 1, bank=None) -> torch.Tensor:
+    """THE unaugmented encoder input of native-unit volumes ``x`` (B, 1, ...) with per-row modality ``mod`` (B,):
+    the encoder's learned window bank (``brain.models.window_bank``, K channels) when it has one, else the three role
+    windows for a three-channel encoder, else the canonical window. Training (``multitask.data.prepare``), evaluation,
+    few-shot, frozen embedding (``downstream.embed3d``) and the explain tools all window through here."""
+    if bank is not None:
+        return bank(x, mod)
+    return role_windows(x, mod) if int(in_chans) == 3 else canonical_window(x, mod)

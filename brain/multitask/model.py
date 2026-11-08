@@ -31,6 +31,7 @@ from torch.utils.checkpoint import checkpoint
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.models.conv3d import Res, conv3, group_norm
 from brain.models.vit3d import BrainEncoder
+from brain.models.window_bank import bank_input, bank_of
 from brain.multitask.data import TYPE_ID
 from brain.multitask.registry import Registry
 
@@ -204,6 +205,10 @@ class BrainQuery(nn.Module):
         # each other and read by the patch tokens; a task's answer is its token's output. Identity lives in the
         # encoder's width then.
         self.tokens = bool((cfg.get("task_tokens") or {}).get("enabled", False))
+        # window bank (``window_bank.decoder_grad``, default false): the decoder's image pyramid reads the learned
+        # windows but does not train them (the bank serves the encoder; the full-resolution input gradient through the
+        # pyramid's first convolution cost 0.16 s of a 1.5 s ViT-S step at batch 8 on an L40S)
+        self.bank_decoder_grad = bool((cfg.get("window_bank") or {}).get("decoder_grad", False))
         if self.tokens:
             self.register_buffer("tt_write", torch.zeros(n_tasks, dtype=torch.bool))
         qdim = d_enc if self.tokens else dim
@@ -287,9 +292,6 @@ class BrainQuery(nn.Module):
                 dense=False, conditioned=not self.seg_shared, n_tasks=n_tasks,
                 head_hidden=int(seg_cfg.get("head_hidden", 0)),
                 out_stride=tuple(int(v) for v in ng.get("seg_stride", (1, 4, 4))))
-        # ``window_bank`` (branch winbank): a module mapping native units -> in_chans channels, applied to the input
-        # first (``build_window_bank``); None = the input arrives windowed (``data.input_mode``)
-        self.window_bank = build_window_bank(cfg.get("window_bank"), in_chans)
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):
@@ -302,14 +304,33 @@ class BrainQuery(nn.Module):
         self.tt_write.zero_()
         self.tt_write[self.tok_of[torch.as_tensor(list(ids), dtype=torch.long, device=self.tt_write.device)]] = True
 
+    def window_input(self, x: torch.Tensor, modality: torch.Tensor | None, hide: torch.Tensor | None = None,
+                     study: dict | None = None) -> tuple[torch.Tensor, dict | None]:
+        """The encoder's window bank (``backbone.window_bank``, ``brain.models.window_bank``) on native-unit input
+        ``x`` (B, 1, Z, Y, X) and the study partners (``study["x"]`` by ``study["mod"]``), then the masked voxels
+        ``hide`` (B, Z, Y, X) blanked (0 in every channel). Without a bank, or for input already windowed to K
+        channels, ``x`` passes unchanged."""
+        bank = bank_of(self.backbone)
+        if bank is None:
+            return x, study
+        x = bank_input(bank, x, modality)
+        if hide is not None:
+            x = x.masked_fill(hide.unsqueeze(1), 0.0)
+        if study is not None and len(study["row"]):
+            study = {**study, "x": bank_input(bank, study["x"], study.get("mod"))}
+        return x, study
+
     def encode(self, x: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None = None,
-               task: torch.Tensor | None = None, study: dict | None = None, geo: dict | None = None) -> dict:
+               task: torch.Tensor | None = None, study: dict | None = None,
+               modality: torch.Tensor | None = None, geo: dict | None = None) -> dict:
         """Encoder outputs. With task tokens: every trained task's token, plus read-only tokens for the other tasks
         in ``task`` (held-out / few-shot), so an answer never depends on which other tasks were asked.
         ``study`` (R14-F): the anchors' co-registered partner scans, ``x`` (P, C, Z, Y, X), ``row`` (P,) their
         anchor, ``seq`` (B,) / ``pseq`` (P,) sequence types; fused inside the encoder (``SequenceFusion``).
+        With a window bank, native-unit ``x`` (B, 1, ...) needs ``modality`` (``window_input``).
         ``geo`` (native-geometry CT, ``data.prepare_ngeo``): ``x`` (B, C, S, R, C) goes through the encoder's ngeo
         stem, with per-row token centres ``coords`` (B, N, 3) in template mm and token sizes ``pmm`` (B, 3)."""
+        x, study = self.window_input(x, modality, study=study)
         b = x.shape[0]
         fuse = None
         if geo is not None and study is not None and len(study["row"]):
@@ -474,17 +495,19 @@ class BrainQuery(nn.Module):
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
                 encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None,
                 dense_pair: torch.Tensor | None = None, tok_pair: torch.Tensor | None = None,
-                study: dict | None = None, geo: dict | None = None, modality: torch.Tensor | None = None) -> dict:
+                study: dict | None = None, modality: torch.Tensor | None = None,
+                hide: torch.Tensor | None = None, geo: dict | None = None) -> dict:
         """Typed answers per slot; ``out["seg"]`` (segmentation slots, ``seg_pair`` order) and ``out["dense"]`` (dense
         slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``.
-        ``geo``: a native-geometry batch (``encode``); masks then come from ``seg_ngeo`` on its grid. ``modality``
-        (B,): for the window bank (``model.window_bank``) only."""
-        if self.window_bank is not None:
-            x = self.window_bank(x, modality)
+        With a window bank ``x`` is native units (B, 1, ...) and ``modality`` (B,) is required; the bank's K channels
+        feed the encoder and the decoder's image pyramid, and ``hide`` voxels are blanked after it (``window_input``).
+        ``geo``: a native-geometry batch (``encode``); masks then come from ``seg_ngeo`` on its grid (the bank is
+        applied first, so the ngeo stem takes its K channels too)."""
         # task tokens live inside the encoder, so their gradient has to pass through it even when the encoder is frozen
         # (few-shot fitting: its weights have requires_grad off and get none)
         with torch.set_grad_enabled(torch.is_grad_enabled() and (encoder_grad or self.tokens)):
-            enc = self.encode(x, keep, meta, task, study, geo)
+            x, study = self.window_input(x, modality, hide, study)
+            enc = self.encode(x, keep, meta, task, study, geo=geo)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         z = self.member(z, task)
         out = self.heads(z, task)
@@ -506,34 +529,14 @@ class BrainQuery(nn.Module):
             is_dense = torch.arange(n_seg + n_dense, device=x.device) >= n_seg
             cond = z[pairs[:, 0], pairs[:, 1]]
             chan = {"chan": task[pairs[:, 0], pairs[:, 1]]} if self.seg_shared else {}
+            img = x if self.bank_decoder_grad or bank_of(self.backbone) is None else x.detach()
             if geo is not None and geo.get("n_slices") is not None:
-                maps = self._decode_rows(decoder, grid, x, pairs[:, 0], cond, chan, geo["n_slices"], pz)
+                maps = self._decode_rows(decoder, grid, img, pairs[:, 0], cond, chan, geo["n_slices"], pz)
             else:
-                maps = decoder(grid, x, pairs[:, 0], cond, dense=is_dense if n_dense else None, **chan)
+                maps = decoder(grid, img, pairs[:, 0], cond, dense=is_dense if n_dense else None, **chan)
             out["seg"] = maps[:n_seg] if n_seg else None
             out["dense"] = maps[n_seg:] if n_dense else None
         return out
-
-
-def build_window_bank(spec: dict | None, in_chans: int):
-    """The learned window bank (contract s. 4, built on branch ``winbank``) from ``model.window_bank``: ``class``
-    ("module:Name", default ``brain.models.window_bank:WindowBank``) called with the other keys; it maps native-unit
-    input (B, 1, ...) and the modality (B,) to (B, K, ...), and K must equal the encoder's ``in_chans``. None: off."""
-    if not spec:
-        return None
-    import importlib
-
-    kw = dict(spec)
-    mod_name, _, cls_name = str(kw.pop("class", "brain.models.window_bank:WindowBank")).partition(":")
-    try:
-        cls = getattr(importlib.import_module(mod_name), cls_name)
-    except (ImportError, AttributeError) as e:
-        raise ImportError(f"model.window_bank: cannot load {mod_name}:{cls_name} (the bank lives on branch winbank)") from e
-    bank = cls(**kw)
-    k = getattr(bank, "out_chans", None)
-    if k is not None and int(k) != int(in_chans):
-        raise ValueError(f"model.window_bank gives {k} channels, the encoder takes in_chans={in_chans}")
-    return bank
 
 
 class TokenTraining:

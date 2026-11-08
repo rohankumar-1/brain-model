@@ -1,19 +1,12 @@
-# Native-geometry comparison (2026-11-07), arm 2 of 2: CT on its own slices (<case>.ngeo.zip, CONTRACT.md s. 2) with
-#   the same three fixed CT windows as hemorrhage_iso_fixed3 (model.in_chans 3, ROLES brain / subdural / bone) and the
-#   same recipe and steps (hemorrhage_scratch_hybrid.yaml). What changes with the geometry (docs/multitask.md, "Native
-#   geometry"):
-#   * data.ngeo: the scans volumes_ngeo.csv lists (CT only; same volume_ids, so the same label rows), batches padded
-#     to their longest scan (collate_ngeo);
-#   * model.ngeo: an in-plane-only stem (NgeoStemEmbed: (1, 3, 3) convolutions, two stride-2 stages 0.5 -> 1 -> 2 mm,
-#     then 1 x 8 x 8 patches = 16 x 16 mm tokens one native slice deep) into the same ViT-S; RoPE / slot positions from
-#     each token centre's template mm (affine_template), so both arms share one position frame; masks from a second
-#     decoder at stride (1, 4, 4) = native slices x 2 mm in-plane (the 1 mm arm's output is 2 mm isotropic);
-#   * augmentation: in-plane only (column flip, rotation about the slice normal = aug.affine.rot_deg[2], in-plane shift);
-#     no out-of-plane rotation, no through-plane blur (appearance.through_plane is ignored), the isotropic blur runs
-#     in-plane with the same mm sigma; the field-of-view cut in whole slices; RSNA slice labels map through the affine.
-#   The 1 mm arm's views.patch_xyz / decoder stay in the model (unused here: no gradient).
-#   Window-bank variants (branch winbank): model.window_bank {class, ...} with model.in_chans = K.
-#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:2 -c 24 --mem=180G -t 06:00:00 -J s-hem-ngeo3 \
+# Native-geometry CT (<case>.ngeo.zip), three fixed CT windows.
+#   The 2x2 set (2026-11-08): {iso, ngeo} grid x {fixed3, bank} windowing, all from scratch with the
+#   hemorrhage_scratch_hybrid recipe (ViT-S + conv stem, slot readout, token maps, HL-Gauss, 30k steps WSD 4e-4, batch
+#   8 x 2 GPUs). The four configs are identical except the grid (data.ngeo / model.ngeo) and the windowing
+#   (model.in_chans 3 = ROLES brain / subdural / bone, unjittered, vs model.window_bank: 6 learned asinh windows). Same
+#   augmentation in all four, CT physical ones included (ct_physical, kernel, noise.sigma_hu: native units, before
+#   the fixed windows or the bank). The ngeo arms keep it in-plane: no out-of-plane rotation, through_plane ignored,
+#   kernel / isotropic blur in-plane with the same mm sigma (data.prepare_ngeo; docs/multitask.md "Native geometry").
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:2 -c 24 --mem=180G -t 06:00:00 -x node3006 -J s-ngeo_fixed3 \
 #     --export=ALL,METHOD=multitask,EXPECT_GPUS=2,CONFIG=configs/single/hemorrhage_ngeo_fixed3.yaml jobs/train.sbatch
 seed: 42
 data:
@@ -42,14 +35,6 @@ model:
   init_from: null
   size: small
   conv_stem: [32, 64]
-  in_chans: 3                     # fixed windows: ROLES brain / subdural / bone
-  window_bank: null               # winbank hook: {class: module:Name, ...}; in_chans = K
-  ngeo:
-    enabled: true
-    stem: [32, 64]                # widths of the two in-plane stride-2 stages (as conv_stem)
-    patch_xyz: [32, 32, 1]        # input voxels (col, row, slice): 16 x 16 mm at 0.5 mm, one slice
-    seg_stride: [1, 4, 4]         # decoder output stride (slice, row, col): native slices, 2 mm in-plane
-    template_xyz: [256, 256, 160] # the 1 mm grid (data.volume_size_xyz): the slot readout's position statistics
   checkpoint: true
   taps: [3, 7]
   slot: {dim: 256, layers: 3, heads: 8}
@@ -59,8 +44,16 @@ model:
   fp32_residual: true
   meta: {enabled: false}
   task_tokens: {enabled: false}
+  ngeo:
+    enabled: true
+    stem: [32, 64]                # widths of the two in-plane stride-2 stages (as conv_stem)
+    patch_xyz: [32, 32, 1]        # input voxels (col, row, slice): 16 x 16 mm at 0.5 mm, one slice
+    seg_stride: [1, 4, 4]         # decoder output stride (slice, row, col): native slices, 2 mm in-plane
+    template_xyz: [256, 256, 160] # the 1 mm grid (data.volume_size_xyz): the slot readout's position statistics
   regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
   token_map: {enabled: true, dim: 64}
+  in_chans: 3                     # fixed windows: windowing.ROLES brain / subdural / bone
+  window_bank: {enabled: false}
 views:
   patch_xyz: [16, 16, 8]
   gate:
@@ -96,6 +89,9 @@ aug:
       kind: rician
       snr: [15, 100]
       sigma: [0.02, 0.1]
+      sigma_hu: [2.0, 15.0]       # CT rows (window bank: Gaussian noise in HU)
+    ct_physical: {p: 0.5, offset_hu: 10.0, scale: 0.03}
+    kernel: {p: 0.3, sigma_vox: [0.3, 1.0], sharpen: 0.5, amount: [0.2, 1.0]}
     blur:
       p: 0.2
       sigma_vox: [0.5, 1.0]

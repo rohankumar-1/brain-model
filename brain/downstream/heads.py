@@ -2,7 +2,10 @@
 
 - ``SklearnHead``: a linear probe on the mean token (logistic regression / ridge, C or alpha chosen on validation);
 - ``MLPProbe``: BrainDINO's frozen-feature MLP head on the mean token;
-- ``ProbeEnsemble``: seeds of a torch token-grid probe (``brain.downstream.token_probes.ConvProbe``), early-stopped.
+- ``ProbeEnsemble``: seeds of a torch token-grid probe (``brain.downstream.token_probes.ConvProbe``), early-stopped;
+- ``AttentiveProbe`` (``make_attn_probe``, head ``attn_probe``): learned queries cross-attending over a scan's foreground
+  tokens, then linear (or a small MLP), as a ProbeEnsemble. An EXTRA readout (``metrics.EXTRA_READOUTS``): reported
+  beside the benchmark, never pinned and never in a headline score.
 
 Every head has ``fit`` / ``predict_scores`` and a cross-fitted ``predict_val`` (``brain.downstream.cv``).
 """
@@ -23,7 +26,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from brain.common.optim import lr_at
-from brain.downstream.metrics import _safe_auc
+from brain.downstream.metrics import ATTN_PROBE, _safe_auc
 
 LOGREG_CS = np.logspace(-2, 2, 9)
 RIDGE_ALPHAS = np.logspace(-1, 4, 12)
@@ -140,8 +143,11 @@ class ProbeEnsemble:
 
     def __init__(self, model_factory, multilabel: bool, seed: int, *, name: str = "tok_conv", n_seeds: int = 5,
                  epochs: int = 100, patience: int = 15, lr: float = 1e-3, batch_size: int = 32,
-                 regression: bool = False, half: bool = False):
+                 regression: bool = False, half: bool = False, standardize: bool = False):
         self.model_factory, self.half, self.name = model_factory, bool(half), name
+        # ``standardize``: regression targets z-scored on train (scores mapped back); off for tok_conv (as pinned)
+        self.standardize = bool(standardize)
+        self.y_mu, self.y_sd = np.zeros(1, np.float32), np.ones(1, np.float32)
         self.multilabel, self.regression = multilabel, regression
         self.seed, self.n_seeds = seed, n_seeds
         self.epochs, self.patience, self.lr, self.bs = epochs, patience, lr, batch_size
@@ -222,6 +228,11 @@ class ProbeEnsemble:
         """``n_seeds`` probes early-stopped on validation; with ``val_half`` (0 / 1 per validation volume) seed i
         stops on half i % 2 only, so ``predict_val`` can score each half with the seeds that never saw it."""
         y, y_val = (np.asarray(a, dtype=np.float32).reshape(len(a), -1) for a in (y, y_val))
+        self.y_mu, self.y_sd = np.zeros(y.shape[1], np.float32), np.ones(y.shape[1], np.float32)
+        if self.regression and self.standardize:
+            self.y_mu, sd = y.mean(0), y.std(0)
+            self.y_sd = np.where(sd > 0, sd, 1.0).astype(np.float32)
+            y, y_val = (y - self.y_mu) / self.y_sd, (y_val - self.y_mu) / self.y_sd
         host = self._host(x)
         data = (
             self._t(x, torch.float16 if self.half else torch.float32, device=host), self._t(y, device=host),
@@ -250,6 +261,8 @@ class ProbeEnsemble:
 
     def _to_scores(self, logits: torch.Tensor) -> np.ndarray:
         p = (logits if self.regression else logits.sigmoid()).cpu().numpy()
+        if self.regression:
+            p = p * self.y_sd + self.y_mu
         return p.ravel() if self.regression or (not self.multilabel and p.shape[1] == 1) else p
 
     def predict_scores(self, x, mask, z=None) -> np.ndarray:
@@ -263,6 +276,53 @@ class ProbeEnsemble:
         own = torch.as_tensor(self.stop_half_)
         w = (own[:, None] != h[None, :]).to(lg.dtype).to(lg.device)               # (models, N): seeds blind to it
         return self._to_scores((lg * w[..., None]).sum(0) / w.sum(0)[:, None])
+
+
+class AttentiveProbe(nn.Module):
+    """Attentive probe: ``n_queries`` learned queries cross-attend (multi-head) over a scan's tokens, the padded and
+    gated-out (air) tokens masked, then a linear layer (``hidden`` 0) or the token probes' small MLP. Tokens are
+    LayerNorm-ed and projected to ``width`` first (a few hundred training scans: a full-width attention would overfit
+    and, at 5k tokens x D, cost more than the conv probe); the normalised token centres enter the keys through a
+    zero-initialised MLP (``pos``), so the probe can tell left from right (RoPE tokens carry no absolute position)."""
+
+    def __init__(self, dim: int, n_out: int, n_queries: int = 1, width: int = 256, heads: int = 8, hidden: int = 0,
+                 pos: bool = True, dropout: float = 0.1):
+        super().__init__()
+        self.norm, self.proj = nn.LayerNorm(dim), nn.Linear(dim, width)
+        self.pos = nn.Sequential(nn.Linear(3, 64), nn.GELU(), nn.Linear(64, width)) if pos else None
+        if self.pos is not None:
+            nn.init.zeros_(self.pos[-1].weight)
+            nn.init.zeros_(self.pos[-1].bias)
+        self.query = nn.Parameter(torch.randn(int(n_queries), width) * 0.02)
+        self.attn = nn.MultiheadAttention(width, int(heads), batch_first=True)
+        d = int(n_queries) * width
+        self.out_norm = nn.LayerNorm(d)
+        self.out = nn.Sequential(nn.Dropout(dropout), nn.Linear(d, n_out)) if not hidden else nn.Sequential(
+            nn.Dropout(dropout), nn.Linear(d, hidden), nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, n_out))
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, xyz: torch.Tensor | None = None,
+                return_attn: bool = False):
+        h = self.proj(self.norm(x.float()))
+        if self.pos is not None and xyz is not None:
+            h = h + self.pos(xyz.float())
+        pad = ~mask.bool()
+        empty = pad.all(1)
+        if bool(empty.any()):                      # a scan with no kept token attends its first one (zeros)
+            pad = pad.clone()
+            pad[empty, 0] = False
+        q = self.query.unsqueeze(0).expand(len(x), -1, -1)
+        o, w = self.attn(q, h, h, key_padding_mask=pad, need_weights=return_attn)
+        y = self.out(self.out_norm(o.reshape(len(x), -1)))
+        return (y, w) if return_attn else y
+
+
+def make_attn_probe(dim: int, n_out: int, multilabel: bool, seed: int, regression: bool, n_queries: int = 1,
+                    hidden: int = 0, n_seeds: int = 5) -> ProbeEnsemble:
+    """The attentive probe as the head ``attn_probe`` (``metrics.ATTN_PROBE``): ``n_seeds`` seeds trained like the conv
+    probe (AdamW, warmup + cosine, early stopping on the validation loss, seeds alternating validation halves so
+    ``predict_val`` is cross-fitted), regression targets z-scored on train."""
+    return ProbeEnsemble(lambda: AttentiveProbe(dim, n_out, n_queries=n_queries, hidden=hidden), multilabel, seed,
+                         name=ATTN_PROBE, n_seeds=n_seeds, regression=regression, half=True, standardize=True)
 
 
 class MLPProbe:
