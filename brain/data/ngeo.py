@@ -66,6 +66,9 @@ def read_ngeo(path: str | Path, brain: bool = True) -> dict:
         store.close()
     if img.ndim == 4:                                            # (S, 1, R, C) as written
         img = img[:, 0]
+    scale = attrs.get("scale")
+    if scale is not None and float(scale) != 1.0:                # store format 7 convention (CT HU: scale 1, none)
+        img = img.astype(np.float32) * float(scale)
     sp = attrs.get("spacing_mm") or [attrs.get("slice_mm", 5.0), 0.5, 0.5]
     return {"image": clamp_air(img), "brain": None if br is None else (br > 0).astype(np.uint8),
             "spacing": np.asarray(sp, dtype=np.float32).reshape(3),

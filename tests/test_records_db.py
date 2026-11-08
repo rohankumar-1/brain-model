@@ -39,7 +39,7 @@ def test_finalize_run_writes_one_complete_record_per_head(tmp_path, monkeypatch)
     rec = json.loads(paths[0].read_text())
     assert rec["model"]["step"] == 7 and rec["model"]["provenance"]["method"] == "lejepa3d"
     assert rec["model"]["model_id"].startswith("brainmodel_tiny/last@")
-    assert rec["data"]["store_format"] == 6 and rec["data"]["grid_xyz"] == [256, 256, 160]
+    assert rec["data"]["store_format"] == 7 and rec["data"]["grid_xyz"] == [256, 256, 160]
     assert rec["protocol"]["seed"] == 42 and "history" not in rec["metrics"]["test"]
     assert rec["metrics"]["val"]["auc_ovr_macro"] in (0.77, 0.9) and rec["env"]["git"]["commit"]
     assert Path(rec["artifacts"]["run_dir"]).is_dir()

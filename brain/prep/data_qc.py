@@ -66,9 +66,11 @@ def _open(path: Path):
 def _arr(g, name: str, z0: int | None = None, z1: int | None = None) -> np.ndarray | None:
     if name not in set(g.array_keys()):
         return None
+    from brain.prep.store import decode
+
     a = g[name]
     sl = slice(z0, z1) if z0 is not None else slice(None)
-    x = np.asarray(a[sl])
+    x = decode(np.asarray(a[sl]), a.attrs)                      # an image in native units (int16 + scale in format 7)
     if x.ndim == 4:
         x = x[:, 0] if x.shape[1] == 1 else x[..., 0]
     return x

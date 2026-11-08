@@ -160,7 +160,8 @@ class VolumeDataset(Dataset):
         skull = ((self.crop_cfg or {}).get("aug") or {}).get("skull") or {}
         per_view = bool(skull.get("per_view", False)) and not self.fixed_crops and self._skull_mask_ok(row)
         drop = not per_view and not self.fixed_crops and self._draw_skull_dropout(row, gen)
-        arrays = store.read_many(img_path, ("image", "brain") if (drop or per_view) else ("image",))  # one zip open
+        arrays = store.read_many(img_path, ("image", "brain") if (drop or per_view) else ("image",),  # one zip open
+                                 dtype=np.float16)                  # native units, half as in the format-6 store
         volume = torch.from_numpy(np.ascontiguousarray(store.squeeze_channel(arrays["image"])))  # (Z, Y, X)
         if volume.ndim != 3:
             raise ValueError(f"expected (Z,Y,X), got {tuple(volume.shape)}")

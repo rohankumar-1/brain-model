@@ -281,8 +281,9 @@ class MultitaskDataset(Dataset):
         if self.ngeo is not None:
             arrays, geo = self._read_ngeo(idx, vid, need_brain)
         else:
+            # float16 native units, as the format-6 store held them (batches, augmentation and grid_sample stay half)
             arrays = store.read_many(rel if rel.is_absolute() else self.store_root / rel,
-                                     ("image", "brain") if need_brain else ("image",))
+                                     ("image", "brain") if need_brain else ("image",), dtype=np.float16)
         img = store.squeeze_channel(arrays["image"])
         mod = self.mods[idx]
         live = None
@@ -336,7 +337,7 @@ class MultitaskDataset(Dataset):
                 dslot = RECON
             elif ref.startswith("@synth:"):
                 path, pmod = ref.split(":", 1)[1].rsplit("|", 1)
-                other = store.read_image(self.store_root / path)
+                other = store.read_image(self.store_root / path, dtype=np.float16)
                 if other.shape != img.shape:
                     continue
                 dslot = len(dense_raw)
@@ -393,7 +394,7 @@ class MultitaskDataset(Dataset):
             for _pvid, ppath, pmod, pseq in pick:
                 rel_p = Path(ppath)
                 arr = store.squeeze_channel(store.read_many(
-                    rel_p if rel_p.is_absolute() else self.store_root / rel_p, ("image",))["image"])
+                    rel_p if rel_p.is_absolute() else self.store_root / rel_p, ("image",), dtype=np.float16)["image"])
                 if arr.shape != img.shape:
                     continue
                 if brain is not None:              # the anchor's skull strip, on the same grid
@@ -405,7 +406,7 @@ class MultitaskDataset(Dataset):
         if synth_map is not None:                  # a synthetic contrast is no real sequence: metadata unknown
             meta_ = 0
         out = {
-            "image": torch.from_numpy(np.ascontiguousarray(img)),           # (Z, Y, X) raw, stored dtype
+            "image": torch.from_numpy(np.ascontiguousarray(img)),           # (Z, Y, X) native units (ngeo: int16 HU)
             "modality": 0 if mod.startswith("ct") else 1,
             "task": torch.tensor(tasks, dtype=torch.long),
             "y": torch.tensor(ys, dtype=torch.float32),
