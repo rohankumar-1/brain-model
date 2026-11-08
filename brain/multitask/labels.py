@@ -95,7 +95,7 @@ def live_targets(image: np.ndarray, brain: np.ndarray, modality: str) -> dict[st
 def _live_one(args) -> dict[str, float]:
     path, modality = args
     try:
-        a = store.read_many(STORE / path, ("image", "brain"))
+        a = store.read_many(STORE / path, ("image", "brain"), dtype=np.float16)   # as the training loader reads it
     except Exception:   # noqa: BLE001  a sample for statistics: skip unreadable volumes
         return {k: float("nan") for k in LIVE}
     return live_targets(store.squeeze_channel(a["image"]), a["brain"], modality)

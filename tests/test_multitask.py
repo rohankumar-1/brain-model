@@ -486,7 +486,7 @@ def test_skull_strip_never_touches_scans_asked_a_skull_task(tmp_path, monkeypatc
     brain[2:6, 3:9, 3:9] = True
     img = np.where(brain, 1.0, 5.0).astype(np.float32)      # "skull" brighter than brain
     img[0] = -6.0                                             # background floor
-    monkeypatch.setattr("brain.prep.store.read_many", lambda path, keys: {"image": img, "brain": brain.astype(np.uint8)})
+    monkeypatch.setattr("brain.prep.store.read_many", lambda path, keys, dtype=None: {"image": img, "brain": brain.astype(np.uint8)})
     rows = [("v_age", "age", 40.0, ""), ("v_mask", "brain_mask", np.nan, "@brain")]
     labels = pd.DataFrame([(v, t, y, r) for v, t, y, r in rows], columns=["volume_id", "task", "value", "ref"]) \
         .assign(split="train", use="train")

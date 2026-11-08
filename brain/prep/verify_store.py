@@ -1,6 +1,6 @@
 """Final check of a built store: every indexed volume is current-format, complete and traceable to its source.
 
-Per ``volumes.csv`` row: the image zip exists, is ``store.FORMAT_VERSION``, carries the registration transform and
+Per ``volumes.csv`` row: the image zip exists, is ``store.FORMAT_VERSION`` (after the re-encode: 7), carries the registration transform and
 geometry needed to map back to the source scan (``native.has_native``), has a ``brain`` array when ``mask_brain`` is
 set, and every referenced label-mask zip exists. Also writes ``excluded.csv``: cases whose latest manifest row is not
 ``ok`` (flagged or errored), with the reason. Exit status 1 if any indexed volume fails a check.
@@ -74,7 +74,7 @@ def excluded(root: Path, pattern: str) -> pd.DataFrame:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=Path, required=True)
-    ap.add_argument("--manifests", default=f"manifest_v{store.FORMAT_VERSION}_*.jsonl")
+    ap.add_argument("--manifests", default="manifest_v*_*.jsonl")  # prep manifests (format 7 re-encoded v6 zips)
     ap.add_argument("--workers", type=int, default=4)
     a = ap.parse_args()
 
