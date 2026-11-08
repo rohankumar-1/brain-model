@@ -110,6 +110,7 @@ class NgeoStemEmbed(nn.Module):
                                   conv3(w1, w2, stride=s, kernel=k), Res(w2, w2, kernel=k))
         self.proj = nn.Conv3d(w2, dim, kernel_size=(pz, py // 4, px // 4), stride=(pz, py // 4, px // 4))
         self.checkpoint = bool(checkpoint)
+        self.chunk_rows = 64          # slabs per stem pass (memory bound; results identical for any value)
 
     def forward(self, x: torch.Tensor, patch_xyz: Sequence[int] | None = None, zyx: bool = False):
         if x.ndim != 5:
@@ -125,10 +126,15 @@ class NgeoStemEmbed(nn.Module):
         # token never depends on other slices, nor on how many padded slices its batch carries
         rows = vol.reshape(b, c, s // pz, pz, *vol.shape[3:]).transpose(1, 2).reshape(b * (s // pz), c, pz,
                                                                                       *vol.shape[3:])
-        if self.checkpoint and self.training:        # full in-plane resolution activations: recomputed in backward
-            feats = checkpoint(self.stem, rows, use_reentrant=False)
-        else:
-            feats = self.stem(rows)
+        # chunks of ``chunk_rows`` slabs, each checkpointed in training (full in-plane resolution activations are
+        # recomputed in backward): the stem's peak memory stays bounded however many slices a batch carries
+        parts = []
+        for part in rows.split(self.chunk_rows):
+            if self.checkpoint and self.training:
+                parts.append(checkpoint(self.stem, part, use_reentrant=False))
+            else:
+                parts.append(self.stem(part))
+        feats = parts[0] if len(parts) == 1 else torch.cat(parts)
         y = self.proj(feats)                                              # (B * S / pz, D, 1, ny, nx)
         y = y.reshape(b, s // pz, *y.shape[1:]).squeeze(3).transpose(1, 2)   # (B, D, nz, ny, nx)
         nz, ny, nx = y.shape[2:]

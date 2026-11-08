@@ -123,7 +123,10 @@ def _multitask_defaults() -> dict[str, Any]:
                  "fastmri_boxes": None,
                  # the BraTS re-releases count as one family for sampling
                  "balance_groups": {"brats": ["brats_gli", "brats_men", "brats_ped", "brats_goat"]},
-                 "val_per_task": 64, "val_max_seg": 4},
+                 "val_per_task": 64, "val_max_seg": 4,
+                 # native-geometry CT rows (needs model.ngeo): {enabled, index_name volumes_ngeo.csv, require [QC columns],
+                 # pad_multiple 4, max_slices null}; None = the 1 mm grid
+                 "ngeo": None},
         "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
                   # task tokens in the encoder (OMNI); the patches' attention to them opens over write_ramp_steps
                   # from write_bias logits so a warm-started encoder is not shifted at step 0
@@ -143,12 +146,20 @@ def _multitask_defaults() -> dict[str, Any]:
                   # from-scratch ViT only: widths of a two-stage convolution stem before the token grid
                   # (patch_embed.ConvStemEmbed3D, e.g. [32, 64]); None = the plain linear patch embedding
                   "conv_stem": None,
+                  # input channels: 1 = the canonical window, 3 = the role windows (CT brain / subdural / bone), K with
+                  # window_bank; an init_from encoder's own value replaces it
+                  "in_chans": 1,
                   # ``dim``: the heads' width. layers / heads: the slot readout (task_tokens.enabled: false)
                   "slot": {"dim": 256, "layers": 3, "heads": 8},
                   # shared: decode once per volume with a 1x1 output per task (SegDecoder unconditioned; tasks.all_seg asks
                   # every mask), instead of once per segmentation slot
                   # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout
-                  "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0}},
+                  "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0},
+                  # native-geometry CT (docs/multitask.md): {enabled, stem [w1, w2], patch_xyz [32, 32, 1] (input voxels),
+                  # seg_stride [1, 4, 4] (z, y, x), template_xyz [256, 256, 160]}; None = 1 mm grid only
+                  "ngeo": None,
+                  # learned input windows (branch winbank): {class: "module:Name", ...}, in_chans = its K channels
+                  "window_bank": None},
         # gate mode: "center" (a token's centre voxel) or "frac" (>= min_frac of its voxels; data.gate.token_keep)
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
                                                      "min_frac": 0.25}},

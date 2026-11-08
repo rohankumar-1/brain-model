@@ -165,6 +165,8 @@ def test_stem_is_in_plane_only():
     b, _ = stem(y, zyx=True)
     per = (a - b).abs().sum(-1).view(4, 4)                                   # (slices, tokens per slice)
     assert per[2].min() > 0 and per[[0, 1, 3]].max() == 0
+    stem.chunk_rows = 1                                                      # chunked stem passes: same tokens
+    assert torch.allclose(stem(x, zyx=True)[0], a, atol=1e-5)
 
 
 def test_position_encoding_matches_across_frames():
