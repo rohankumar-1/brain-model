@@ -4,7 +4,8 @@
 # pilot_cq500_thin) and the RSNA cases with SimpleITK's store frame ignored (pilot_noframe). Then overlays, QC table,
 # index and the size / time estimate.
 #   sbatch --dependency=afterok:<cq500 thick download> jobs/archive/ngeo_pilot.sbatch
-#SBATCH -p mit_normal
+#SBATCH -p mit_normal,mit_preemptable
+#SBATCH --requeue
 #SBATCH --job-name=ngeo-pilot
 #SBATCH -N 1
 #SBATCH --ntasks=1

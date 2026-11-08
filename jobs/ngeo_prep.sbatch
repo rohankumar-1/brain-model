@@ -5,20 +5,21 @@
 # The driver checks the space left before every case (statvfs + quota cache - ngeo bytes since) and exits 3 when it
 # drops below NGEO_MIN_FREE_GB (default 20).
 #
-#   # DICOM datasets, 32 shards, at most 8 at a time
-#   DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=32 sbatch --export=ALL --array=0-31%8 jobs/ngeo_prep.sbatch
+#   # DICOM datasets, 48 shards, at most 24 at a time
+#   DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=48 sbatch --export=ALL --array=0-47%24 jobs/ngeo_prep.sbatch
 #   # NIfTI datasets (each task stages them all, ~10 GB local): 2 shards
 #   DATASETS=bhsd,aisd,instance,seg_cq500,isles24_ncct,isles24_cta,pedi_cranial_ct,synthrad_ct,synthrad_cbct \
 #     SHARD_N=2 sbatch --export=ALL --array=0-1 jobs/ngeo_prep.sbatch
 #   # then: python -m brain.prep.ngeo_run index   (volumes_ngeo.csv in the store root)
 # Pilot into another root: OUT_ROOT=runs/diagnostics/ngeo/pilot CASES=<csv> SHARD_N=1 sbatch --array=0 ...
-#SBATCH -p mit_normal
+#SBATCH -p mit_normal,mit_preemptable
 #SBATCH --job-name=ngeo-prep
 #SBATCH -N 1
 #SBATCH --ntasks=1
-#SBATCH -c 12
-#SBATCH --mem=48G
-#SBATCH -t 12:00:00
+#SBATCH -c 6
+#SBATCH --mem=24G
+#SBATCH -t 06:00:00
+#SBATCH --requeue
 #SBATCH --open-mode=append
 #SBATCH -o logs/ngeo_prep_%A_%a.out
 #SBATCH -e logs/ngeo_prep_%A_%a.out
@@ -33,7 +34,7 @@ SHARD_N="${SHARD_N:-${SLURM_ARRAY_TASK_COUNT:-1}}"
 I="${SLURM_ARRAY_TASK_ID:-0}"
 TAG="${TAG:-v1}"
 LOCAL="/tmp/${USER}_ngeo_${SLURM_JOB_ID:-local}_${I}"
-W=$(( ${SLURM_CPUS_PER_TASK:-12} - 1 ))
+W=$(( ${SLURM_CPUS_PER_TASK:-6} - 1 ))
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 cleanup() { rm -rf "$LOCAL"; }
 trap cleanup EXIT
