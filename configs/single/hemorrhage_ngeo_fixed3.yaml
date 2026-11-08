@@ -1,0 +1,122 @@
+# Native-geometry comparison (2026-11-07), arm 2 of 2: CT on its own slices (<case>.ngeo.zip, CONTRACT.md s. 2) with
+#   the same three fixed CT windows as hemorrhage_iso_fixed3 (model.in_chans 3, ROLES brain / subdural / bone) and the
+#   same recipe and steps (hemorrhage_scratch_hybrid.yaml). What changes with the geometry (docs/multitask.md, "Native
+#   geometry"):
+#   * data.ngeo: the scans volumes_ngeo.csv lists (CT only; same volume_ids, so the same label rows), batches padded
+#     to their longest scan (collate_ngeo);
+#   * model.ngeo: an in-plane-only stem (NgeoStemEmbed: (1, 3, 3) convolutions, two stride-2 stages 0.5 -> 1 -> 2 mm,
+#     then 1 x 8 x 8 patches = 16 x 16 mm tokens one native slice deep) into the same ViT-S; RoPE / slot positions from
+#     each token centre's template mm (affine_template), so both arms share one position frame; masks from a second
+#     decoder at stride (1, 4, 4) = native slices x 2 mm in-plane (the 1 mm arm's output is 2 mm isotropic);
+#   * augmentation: in-plane only (column flip, rotation about the slice normal = aug.affine.rot_deg[2], in-plane shift);
+#     no out-of-plane rotation, no through-plane blur (appearance.through_plane is ignored), the isotropic blur runs
+#     in-plane with the same mm sigma; the field-of-view cut in whole slices; RSNA slice labels map through the affine.
+#   The 1 mm arm's views.patch_xyz / decoder stay in the model (unused here: no gradient).
+#   Window-bank variants (branch winbank): model.window_bank {class, ...} with model.in_chans = K.
+#   sbatch -p pi_dbertsim,mit_normal_gpu -G l40s:2 -c 24 --mem=180G -t 06:00:00 -J s-hem-ngeo3 \
+#     --export=ALL,METHOD=multitask,EXPECT_GPUS=2,CONFIG=configs/single/hemorrhage_ngeo_fixed3.yaml jobs/train.sbatch
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v10
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 10
+  balance_alpha: 0.5
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets: [rsna_ica]    # RSNA-ICA out of training for now (user, 2026-11-01)
+  ngeo:
+    enabled: true
+    index_name: volumes_ngeo.csv  # store root; volume_id, path, S, slice_mm, thick_mm, synth_thick, qc flags
+    require: []                   # boolean QC columns of volumes_ngeo.csv a scan must pass (names TBD by the prep)
+    pad_multiple: 4               # batch slice count: the longest scan rounded up to this
+    max_slices: null              # cap (consecutive window) for very thin thick-series; null = whole scan
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: null
+  size: small
+  conv_stem: [32, 64]
+  in_chans: 3                     # fixed windows: ROLES brain / subdural / bone
+  window_bank: null               # winbank hook: {class: module:Name, ...}; in_chans = K
+  ngeo:
+    enabled: true
+    stem: [32, 64]                # widths of the two in-plane stride-2 stages (as conv_stem)
+    patch_xyz: [32, 32, 1]        # input voxels (col, row, slice): 16 x 16 mm at 0.5 mm, one slice
+    seg_stride: [1, 4, 4]         # decoder output stride (slice, row, col): native slices, 2 mm in-plane
+    template_xyz: [256, 256, 160] # the 1 mm grid (data.volume_size_xyz): the slot readout's position statistics
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: true
+  fp32_residual: true
+  meta: {enabled: false}
+  task_tokens: {enabled: false}
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac            # a token counts when >= 25% of its voxels are foreground (centre mode lost 1.2% of brain)
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  group_weights: {}
+  groups: null
+  ids: [hemorrhage_any, hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular, hemorrhage_subarachnoid, hemorrhage_subdural, hemorrhage_segmentation]
+  exclude: []
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3}
+  task_aware: true
+loss: {seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5}
+optim:
+  lr: 0.0004
+  enc_lr_mult: 1.0
+  layer_decay: 1.0
+  weight_decay: 0.05
+  warmup_steps: 2000
+  clip_grad: 1.0
+  batch_size: 8
+  schedule: wsd
+  decay_steps: 6000
+  betas: [0.9, 0.999]
+train: {max_steps: 30000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false}
+output: {out_dir: runs/single/hemorrhage_ngeo_fixed3, resume_from: null}

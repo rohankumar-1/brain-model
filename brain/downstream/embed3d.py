@@ -10,7 +10,7 @@ import torch
 from brain.data.gate import token_keep
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.data.volumes import meta_id, n_meta
-from brain.models.vit3d import VIT_SIZES, BrainEncoder
+from brain.models.vit3d import VIT_SIZES, BrainEncoder, ngeo_kwargs
 from brain.common.windowing import asinh_window, role_windows, windows_for
 from brain.common.grid import GRID_XYZ
 
@@ -208,6 +208,8 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         rope_min_period_mm=m.get("rope_min_period_mm"),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
         n_meta=n_meta(m), conv_stem=m.get("conv_stem") or None,
+        **ngeo_kwargs({**m, "ngeo": {**(m.get("ngeo") or {}),
+                                     "enabled": any(str(k).startswith("ngeo_embed.") for k in state)}}),
     ).to(device)
     if any(str(k).startswith("fusion.") for k in state):     # study-level input (R14-F): rebuild before loading
         fu = m.get("fusion") or {}

@@ -19,9 +19,11 @@ import torch.nn.functional as F
 from brain.multitask.data import TYPE_ID
 
 
-def seg_target(seg: torch.Tensor, stride: int = 2) -> torch.Tensor:
-    """(P, 1, Z, Y, X) full-resolution {0, 1} (or soft, after rotation) -> fraction per output voxel."""
-    return F.avg_pool3d(seg, stride) if stride > 1 else seg
+def seg_target(seg: torch.Tensor, stride=2) -> torch.Tensor:
+    """(P, 1, Z, Y, X) full-resolution {0, 1} (or soft, after rotation) -> fraction per output voxel. ``stride`` an
+    int or (z, y, x) (native geometry: (1, 4, 4))."""
+    k = tuple(int(v) for v in stride) if isinstance(stride, (tuple, list)) else (int(stride),) * 3
+    return F.avg_pool3d(seg, k) if max(k) > 1 else seg
 
 
 DIMS = (1, 2, 3, 4)
@@ -158,7 +160,7 @@ def slab_mil_loss(logits: torch.Tensor, lab: torch.Tensor, keep: torch.Tensor) -
 
 
 def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch.Tensor, seg: torch.Tensor,
-                seg_pair: torch.Tensor, stride: int = 2, dense: dict | None = None, sparse: torch.Tensor | None = None,
+                seg_pair: torch.Tensor, stride=2, dense: dict | None = None, sparse: torch.Tensor | None = None,
                 cell_zyx: tuple[int, int, int] | None = None, pos_weight: float = 20.0,
                 negatives: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-slot loss (B, K) and a mask of slots that carry one. ``dense``: the prepared batch (``dense_pair``,

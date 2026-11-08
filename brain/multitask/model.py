@@ -82,22 +82,33 @@ class SegDecoder(nn.Module):
     """
 
     def __init__(self, in_dim: int, cond_dim: int, patch_zyx, widths=(128, 64, 32, 16), in_chans: int = 1,
-                 dense: bool = False, conditioned: bool = True, n_tasks: int = 1, head_hidden: int = 0):
+                 dense: bool = False, conditioned: bool = True, n_tasks: int = 1, head_hidden: int = 0,
+                 out_stride=(2, 2, 2)):
+        """``out_stride`` (z, y, x): the output's stride in input voxels (2 everywhere for the 1 mm grid; the
+        native-geometry decoder ``BrainQuery.seg_ngeo`` uses (1, 4, 4): native slices, 2 mm in-plane). A stride above
+        2 on an axis average-pools the image before the pyramid (``pyr_pre``)."""
         super().__init__()
         pz, py, px = patch_zyx
-        n_z, n_xy = int(math.log2(pz)) - 1, int(math.log2(py)) - 1  # upsamplings to stride 2 per axis
+        sz, sy, sx = (int(v) for v in out_stride)
+        if sy != sx or sz > sy:
+            raise ValueError(f"out_stride {tuple(out_stride)}: equal in-plane, through-plane no coarser")
+        n_z, n_xy = int(math.log2(pz // sz)), int(math.log2(py // sy))   # upsamplings to the output stride per axis
         if n_xy > len(widths) - 1 or n_z > n_xy:
             raise ValueError(f"patch {patch_zyx} needs {n_xy} upsamplings, decoder has {len(widths) - 1}")
         widths = tuple(widths[len(widths) - 1 - n_xy:])                # the finest n_xy + 1 widths
         n_up = n_xy
         self.conditioned = bool(conditioned)
+        self.out_stride = (sz, sy, sx)
         self.steps = [(2 if i < n_z else 1, 2, 2) for i in range(n_up)]
         self.stem = nn.Sequential(nn.Conv3d(in_dim, widths[0], 1, bias=False), group_norm(widths[0]), nn.GELU(),
                                   Res(widths[0], widths[0]))
-        # image pyramid, finest first: stride 2 then the decoder's steps in reverse
+        # image pyramid, finest first: stride 2 (per axis at most the output stride) then the decoder's steps in reverse
+        first = tuple(min(v, 2) for v in self.out_stride)
+        pre = tuple(v // f for v, f in zip(self.out_stride, first))
+        self.pyr_pre = nn.AvgPool3d(pre) if pre != (1, 1, 1) else None
         pyr, cin = [], int(in_chans)                                  # the encoder's input channels
         for i in range(n_up):
-            stride = (2, 2, 2) if i == 0 else self.steps[n_up - i]
+            stride = first if i == 0 else self.steps[n_up - i]
             pyr.append(nn.Sequential(conv3(cin, widths[n_up - i], stride), conv3(widths[n_up - i], widths[n_up - i])))
             cin = widths[n_up - i]
         self.pyramid = nn.ModuleList(pyr)
@@ -128,7 +139,7 @@ class SegDecoder(nn.Module):
 
     def _pyramid(self, image: torch.Tensor) -> list[torch.Tensor]:
         """Image features, coarse to fine: one per decoder stage."""
-        feats, h = [], image
+        feats, h = [], image if self.pyr_pre is None else self.pyr_pre(image)
         for p in self.pyramid:
             h = p(h)
             feats.append(h)
@@ -255,11 +266,30 @@ class BrainQuery(nn.Module):
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
         # ``seg.shared``: decode once per volume, an output per task (SegDecoder unconditioned); else once per slot
         self.seg_shared = bool(seg_cfg.get("shared", False))
+        in_chans = getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels
         self.seg = SegDecoder(
             d_enc * (len(self.taps) + 1), dim, patch_zyx, tuple(seg_cfg.get("widths", (128, 64, 32, 16))),
-            in_chans=getattr(backbone, "in_chans", None) or backbone.patch_embed.proj.in_channels,
+            in_chans=in_chans,
             dense=any(t.type == "dense" for t in reg.tasks), conditioned=not self.seg_shared, n_tasks=n_tasks,
             head_hidden=int(seg_cfg.get("head_hidden", 0)))
+        # native-geometry CT (``model.ngeo``; the encoder's ``ngeo_embed``): a second decoder on the ngeo grid, output
+        # stride ``ngeo.seg_stride`` (z, y, x); ``ngeo.template_xyz``: the 1 mm grid, whose token-coordinate
+        # statistics normalise the slot readout's position code for per-row (ngeo) coordinates
+        ng = cfg.get("ngeo") or {}
+        self.seg_ngeo = None
+        self.template_xyz = tuple(int(v) for v in ng.get("template_xyz", (256, 256, 160)))
+        if ng.get("enabled"):
+            if getattr(backbone, "ngeo_embed", None) is None:
+                raise ValueError("model.ngeo.enabled needs an encoder with an ngeo stem (BrainEncoder ngeo_stem)")
+            self.seg_ngeo = SegDecoder(
+                d_enc * (len(self.taps) + 1), dim, tuple(int(p) for p in reversed(backbone.ngeo_patch_xyz)),
+                tuple(ng.get("seg_widths") or seg_cfg.get("widths", (128, 64, 32, 16))), in_chans=in_chans,
+                dense=False, conditioned=not self.seg_shared, n_tasks=n_tasks,
+                head_hidden=int(seg_cfg.get("head_hidden", 0)),
+                out_stride=tuple(int(v) for v in ng.get("seg_stride", (1, 4, 4))))
+        # ``window_bank`` (branch winbank): a module mapping native units -> in_chans channels, applied to the input
+        # first (``build_window_bank``); None = the input arrives windowed (``data.input_mode``)
+        self.window_bank = build_window_bank(cfg.get("window_bank"), in_chans)
 
     # -- encoder ---------------------------------------------------------------------------------------
     def _coords(self, shape_zyx, device):
@@ -273,13 +303,17 @@ class BrainQuery(nn.Module):
         self.tt_write[self.tok_of[torch.as_tensor(list(ids), dtype=torch.long, device=self.tt_write.device)]] = True
 
     def encode(self, x: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None = None,
-               task: torch.Tensor | None = None, study: dict | None = None) -> dict:
+               task: torch.Tensor | None = None, study: dict | None = None, geo: dict | None = None) -> dict:
         """Encoder outputs. With task tokens: every trained task's token, plus read-only tokens for the other tasks
         in ``task`` (held-out / few-shot), so an answer never depends on which other tasks were asked.
         ``study`` (R14-F): the anchors' co-registered partner scans, ``x`` (P, C, Z, Y, X), ``row`` (P,) their
-        anchor, ``seq`` (B,) / ``pseq`` (P,) sequence types; fused inside the encoder (``SequenceFusion``)."""
+        anchor, ``seq`` (B,) / ``pseq`` (P,) sequence types; fused inside the encoder (``SequenceFusion``).
+        ``geo`` (native-geometry CT, ``data.prepare_ngeo``): ``x`` (B, C, S, R, C) goes through the encoder's ngeo
+        stem, with per-row token centres ``coords`` (B, N, 3) in template mm and token sizes ``pmm`` (B, 3)."""
         b = x.shape[0]
         fuse = None
+        if geo is not None and study is not None and len(study["row"]):
+            raise ValueError("study-level input is not supported on native-geometry scans")
         if study is not None and len(study["row"]) and getattr(self.backbone, "fusion", None) is not None:
             row = study["row"]
             s_max = 1 + int(torch.bincount(row, minlength=b).max())
@@ -300,7 +334,10 @@ class BrainQuery(nn.Module):
             keep = torch.cat([keep, keep[row]])
             meta = None if meta is None else torch.cat([meta, meta[row]])
         n_rows = x.shape[0]
-        coords, pmm = self._coords(x.shape[2:], x.device)
+        if geo is not None:
+            coords, pmm = geo["coords"].to(x.device), geo["pmm"].to(x.device)
+        else:
+            coords, pmm = self._coords(x.shape[2:], x.device)
         tt = write = ids = None
         if self.tokens:
             asked = torch.zeros_like(self.tt_write)
@@ -310,9 +347,10 @@ class BrainQuery(nn.Module):
             if ids.numel() == 0:
                 raise ValueError("task tokens: no trained tasks set (set_token_tasks) and none asked")
             tt, write = self.task_queries(ids), self.tt_write[ids]
-        out = self.backbone(x.permute(0, 1, 4, 3, 2), coords.unsqueeze(0).expand(n_rows, -1, -1),
-                            pmm.unsqueeze(0).expand(n_rows, -1), keep=keep, taps=self.taps, meta=meta,
-                            task_tokens=tt, task_write=write, **({"fuse": fuse} if fuse is not None else {}))
+        rows = (lambda t: t) if geo is not None else (lambda t: t.unsqueeze(0).expand(n_rows, *t.shape))  # noqa: E731
+        out = self.backbone(x.permute(0, 1, 4, 3, 2), rows(coords), rows(pmm), keep=keep, taps=self.taps, meta=meta,
+                            task_tokens=tt, task_write=write, **({"fuse": fuse} if fuse is not None else {}),
+                            **({"stem": "ngeo"} if geo is not None else {}))
         out["coords"] = coords
         if self.tokens:
             out["tt_ids"] = ids
@@ -335,11 +373,19 @@ class BrainQuery(nn.Module):
         t = task.clamp_min(0)
         return self.task_emb(t) + self.type_emb(self.task_type[t])
 
+    def position_code(self, coords: torch.Tensor) -> torch.Tensor:
+        """The slot readout's absolute position code. ``coords`` (N, 3), one grid shared by the batch (1 mm), are
+        standardised by their own statistics (as always); per-row coordinates (B, N, 3) (native geometry) by the 1 mm
+        template grid's (``template_xyz``), which equal the former for a whole stored volume, so both frames agree."""
+        if coords.dim() == 2:
+            return self.pos((coords - coords.mean(0)) / coords.std(0).clamp_min(1e-6))
+        t = self._coords(tuple(reversed(self.template_xyz)), coords.device)[0]
+        return self.pos((coords - t.mean(0)) / t.std(0).clamp_min(1e-6))
+
     def _kv(self, enc: dict, keep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if "_kv" not in enc:
-            c = enc["coords"]
-            cn = (c - c.mean(0)) / c.std(0).clamp_min(1e-6)
-            kv = self.kv(self.kv_norm(enc["tokens"])) + self.pos(cn).unsqueeze(0)
+            pos = self.position_code(enc["coords"])
+            kv = self.kv(self.kv_norm(enc["tokens"])) + (pos.unsqueeze(0) if pos.dim() == 2 else pos)
             pad = ~keep
             if enc.get("cls") is not None:
                 kv = torch.cat([self.kv(self.kv_norm(enc["cls"])).unsqueeze(1) + self.cls_pos, kv], 1)
@@ -406,16 +452,39 @@ class BrainQuery(nn.Module):
         q = self.tok_q(z[pairs[:, 0], pairs[:, 1]])                                # (Q, dk)
         return torch.einsum("qd,qnd->qn", q, k[pairs[:, 0]]) / math.sqrt(q.shape[-1]) + self.tok_bias
 
+    @staticmethod
+    def _decode_rows(decoder: SegDecoder, grid: torch.Tensor, x: torch.Tensor, rows: torch.Tensor, cond: torch.Tensor,
+                     chan: dict, n_slices, pz: int) -> torch.Tensor:
+        """Native-geometry masks decoded scan by scan on each scan's real slices only (``n_slices``, CPU), so
+        GroupNorm statistics and border padding never see the batch's padded slices: a scan's masks do not depend on
+        what it was batched with. Padded slices get a background logit (-20; their targets are 0)."""
+        sz = decoder.out_stride[0]
+        counts = [int(v) for v in (n_slices.tolist() if torch.is_tensor(n_slices) else n_slices)]
+        out = None
+        for r in torch.unique(rows).tolist():
+            sel = (rows == r).nonzero(as_tuple=True)[0]
+            n = counts[r]
+            m = decoder(grid[r:r + 1, :, : n // pz], x[r:r + 1, :, :n], torch.zeros_like(sel), cond[sel],
+                        **({"chan": chan["chan"][sel]} if chan else {}))
+            if out is None:
+                out = m.new_full((len(rows), 1, x.shape[2] // sz, *m.shape[3:]), -20.0)
+            out[sel, :, : m.shape[2]] = m
+        return out
+
     def forward(self, x: torch.Tensor, keep: torch.Tensor, task: torch.Tensor, seg_pair: torch.Tensor,
                 encoder_grad: bool = True, alone: bool = False, meta: torch.Tensor | None = None,
                 dense_pair: torch.Tensor | None = None, tok_pair: torch.Tensor | None = None,
-                study: dict | None = None) -> dict:
+                study: dict | None = None, geo: dict | None = None, modality: torch.Tensor | None = None) -> dict:
         """Typed answers per slot; ``out["seg"]`` (segmentation slots, ``seg_pair`` order) and ``out["dense"]`` (dense
-        slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``."""
+        slots, ``dense_pair`` order) come from one decoder pass; ``out["tok"]`` the token maps of ``tok_pair``.
+        ``geo``: a native-geometry batch (``encode``); masks then come from ``seg_ngeo`` on its grid. ``modality``
+        (B,): for the window bank (``model.window_bank``) only."""
+        if self.window_bank is not None:
+            x = self.window_bank(x, modality)
         # task tokens live inside the encoder, so their gradient has to pass through it even when the encoder is frozen
         # (few-shot fitting: its weights have requires_grad off and get none)
         with torch.set_grad_enabled(torch.is_grad_enabled() and (encoder_grad or self.tokens)):
-            enc = self.encode(x, keep, meta, task, study)
+            enc = self.encode(x, keep, meta, task, study, geo)
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         z = self.member(z, task)
         out = self.heads(z, task)
@@ -425,18 +494,46 @@ class BrainQuery(nn.Module):
         n_seg, n_dense = len(seg_pair), 0 if dense_pair is None else len(dense_pair)
         if n_seg or n_dense:
             b = x.shape[0]
-            pz, py, px = reversed(self.backbone.patch_xyz)
+            if geo is not None and self.seg_ngeo is None:
+                raise ValueError("masks on native geometry need model.ngeo.enabled (the ngeo decoder)")
+            decoder = self.seg_ngeo if geo is not None else self.seg
+            pz, py, px = reversed(self.backbone.ngeo_patch_xyz if geo is not None else self.backbone.patch_xyz)
             g = (x.shape[2] // pz, x.shape[3] // py, x.shape[4] // px)
             taps = [F.layer_norm(t, t.shape[-1:]) for t in enc["taps"]]       # pre-norm residual stream -> unit scale
             feats = torch.cat([*taps, enc["tokens"]], -1)                    # (B, N, D * (taps + 1))
             grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g).contiguous()   # DDP grad layout
             pairs = torch.cat([seg_pair, dense_pair]) if n_dense else seg_pair
             is_dense = torch.arange(n_seg + n_dense, device=x.device) >= n_seg
-            maps = self.seg(grid, x, pairs[:, 0], z[pairs[:, 0], pairs[:, 1]], dense=is_dense if n_dense else None,
-                            **({"chan": task[pairs[:, 0], pairs[:, 1]]} if self.seg_shared else {}))
+            cond = z[pairs[:, 0], pairs[:, 1]]
+            chan = {"chan": task[pairs[:, 0], pairs[:, 1]]} if self.seg_shared else {}
+            if geo is not None and geo.get("n_slices") is not None:
+                maps = self._decode_rows(decoder, grid, x, pairs[:, 0], cond, chan, geo["n_slices"], pz)
+            else:
+                maps = decoder(grid, x, pairs[:, 0], cond, dense=is_dense if n_dense else None, **chan)
             out["seg"] = maps[:n_seg] if n_seg else None
             out["dense"] = maps[n_seg:] if n_dense else None
         return out
+
+
+def build_window_bank(spec: dict | None, in_chans: int):
+    """The learned window bank (contract s. 4, built on branch ``winbank``) from ``model.window_bank``: ``class``
+    ("module:Name", default ``brain.models.window_bank:WindowBank``) called with the other keys; it maps native-unit
+    input (B, 1, ...) and the modality (B,) to (B, K, ...), and K must equal the encoder's ``in_chans``. None: off."""
+    if not spec:
+        return None
+    import importlib
+
+    kw = dict(spec)
+    mod_name, _, cls_name = str(kw.pop("class", "brain.models.window_bank:WindowBank")).partition(":")
+    try:
+        cls = getattr(importlib.import_module(mod_name), cls_name)
+    except (ImportError, AttributeError) as e:
+        raise ImportError(f"model.window_bank: cannot load {mod_name}:{cls_name} (the bank lives on branch winbank)") from e
+    bank = cls(**kw)
+    k = getattr(bank, "out_chans", None)
+    if k is not None and int(k) != int(in_chans):
+        raise ValueError(f"model.window_bank gives {k} channels, the encoder takes in_chans={in_chans}")
+    return bank
 
 
 class TokenTraining:

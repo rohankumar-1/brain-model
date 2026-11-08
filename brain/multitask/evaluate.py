@@ -47,8 +47,11 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
             out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
-                        dense_pair=b.get("dense_pair"), study=b.get("study"))
-        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b,
+                        dense_pair=b.get("dense_pair"), study=b.get("study"),
+                        **({"geo": b["geo"]} if b.get("geo") is not None else {}),
+                        **({"modality": b["modality"]} if getattr(model, "window_bank", None) is not None else {}))
+        stride = b.get("seg_stride", 2)                     # native geometry: (z, y, x) of its decoder
+        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], stride, dense=b,
                                 negatives=negatives)
         task, y = b["task"], b["y"]
         for i, j in has.nonzero().tolist():
@@ -64,7 +67,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             elif kind == "multiclass":
                 preds[t].append((float(y[i, j]), int(out["multiclass"][i, j].float().argmax()), vid))
         if out.get("seg") is not None:
-            t = seg_target(b["seg"])
+            t = seg_target(b["seg"], stride)
             d = dice(out["seg"].float().masked_fill(t[:, -1:] < 0.5, -1.0) if t.shape[1] == 2 else out["seg"].float(),
                      t[:, :1])                                    # ignored voxels count as predicted background
             # y 1: a target Dice can see (> half an output voxel, dice's threshold); 0: empty (a true negative,

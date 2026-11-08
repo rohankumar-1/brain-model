@@ -29,7 +29,7 @@ GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich",
                  "derived": "derived", "anatomy_seg": "aseg", "anatomy_volume": "avol", "lesion": "lesion",
                  "ssl_recon": "recon", "synthesis": "synth"}
 # heads a resumed run may add (absent from its checkpoint): HL-Gauss bins, the token map
-NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.")
+NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.", "backbone.ngeo_embed.", "seg_ngeo.")
 TYPE_COLUMNS = {"binary": "t_bin", "regression": "t_reg", "multiclass": "t_cls", "segmentation": "t_seg",
                 "dense": "t_dense"}
 
@@ -71,8 +71,12 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         if n_meta(m) and enc.meta_emb is None:                # metadata on an encoder trained without it
             enc.enable_meta(n_meta(m))
     enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
-    if hasattr(enc.patch_embed, "checkpoint"):                       # a conv stem follows the encoder's setting
-        enc.patch_embed.checkpoint = enc.checkpoint_blocks
+    ng = m.get("ngeo") or {}
+    if ng.get("enabled") and enc.ngeo_embed is None:          # warm start from a 1 mm encoder: a fresh ngeo stem
+        enc.enable_ngeo(ng.get("stem", (32, 64)), ng.get("patch_xyz", (32, 32, 1)))
+    for emb in (enc.patch_embed, getattr(enc, "ngeo_embed", None)):   # conv stems follow the encoder's setting
+        if hasattr(emb, "checkpoint"):
+            emb.checkpoint = enc.checkpoint_blocks
     fu = m.get("fusion") or {}
     if fu.get("after_block"):                 # study-level input (R14-F): sequence fusion inside the encoder
         enc.enable_fusion(int(fu["after_block"]), fu.get("heads"))
@@ -139,7 +143,11 @@ class Trainer(engine.Trainer):
         if not self.train_ids:
             raise SystemExit(f"tasks {tk} selects no trained task (groups: {self.reg.groups})")
         enc = self.build_encoder(cfg, dev, args.synthetic)
-        self.patch = tuple(enc.patch_xyz)
+        # native-geometry CT (data.ngeo): tokens and masks on the ngeo grid (model.ngeo: stem, patch, decoder stride)
+        self.ngeo = bool((d.get("ngeo") or {}).get("enabled"))
+        if self.ngeo and not (cfg["model"].get("ngeo") or {}).get("enabled"):
+            raise SystemExit("data.ngeo.enabled needs model.ngeo.enabled (the in-plane stem and the ngeo decoder)")
+        self.patch = tuple(enc.ngeo_patch_xyz) if self.ngeo else tuple(enc.patch_xyz)
         self.raw = BrainQuery(enc, self.reg, cfg["model"]).to(dev)
         self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids])
         groups = self.reg.groups
@@ -164,8 +172,11 @@ class Trainer(engine.Trainer):
         # tiny targets (registry ``sparse``): losses.sparse_seg_loss, with the token grid in output voxels
         self.sparse = torch.tensor([t.sparse for t in self.reg.tasks], device=dev) \
             if any(t.sparse for t in self.reg.tasks) else None
+        if self.ngeo:                            # the ngeo decoder's (z, y, x) output stride
+            self.stride = tuple(int(v) for v in (cfg["model"]["ngeo"].get("seg_stride") or (1, 4, 4)))
         px, py, pz = (int(v) for v in self.patch)
-        self.cell_zyx = tuple(max(1, v // self.stride) for v in (pz, py, px))
+        st = self.stride if isinstance(self.stride, tuple) else (self.stride,) * 3
+        self.cell_zyx = tuple(max(1, v // s) for v, s in zip((pz, py, px), st))
         self.pos_weight = float(cfg["loss"].get("sparse_pos_weight", 20.0))
         # lesion tasks with true negatives (labels v11 empty masks): losses.negative_seg_loss
         neg = set(cfg["loss"].get("negative_tasks") or [])
@@ -279,12 +290,17 @@ class Trainer(engine.Trainer):
         tok_pair = torch.cat([seg_tok, slab_pair]) if len(seg_tok) or len(slab_pair) else None
         kw = dict(meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
                   study=b.get("study"))
+        if b.get("geo") is not None:                   # native geometry: per-row template-mm token centres
+            kw["geo"] = b["geo"]
+        if self.raw.window_bank is not None:
+            kw["modality"] = b["modality"]
         return (b["x"], b["keep"], b["task"], b["seg_pair"]), kw, (seg_tok, slab_pair)
 
     def task_loss(self, out: dict, b: dict, pairs: tuple) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """(balanced total, per-task losses, has) of one task batch."""
         seg_tok, slab_pair = pairs
-        loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride,
+        loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"],
+                                b.get("seg_stride", self.stride),
                                 dense=b, sparse=self.sparse, cell_zyx=self.cell_zyx, pos_weight=self.pos_weight,
                                 negatives=self.negatives)
         if out.get("tok") is not None:

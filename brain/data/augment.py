@@ -241,7 +241,8 @@ def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None,
         if skip_blur is not None:
             on &= ~skip_blur.to(device)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
-        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)),
+                           dims=tuple(bl.get("dims", (2, 3, 4))))
     if dr and float(dr.get("p", 0)) > 0:
         on = torch.rand(r, device=device) < float(dr["p"])
         if skip_drift is not None:
@@ -289,8 +290,10 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
                quant: torch.Tensor | None = None, protect: torch.Tensor | None = None,
                sharp: torch.Tensor | None = None, tie_seed: int | None = None) -> torch.Tensor:
     """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
-    ``window.mode`` is ``fixed`` (one canonical window; bias, through-plane, noise, blur and drift only) or ``roles``
-    (``_appearance_roles``). ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching (roles) against
+    ``window.mode`` is ``fixed`` (one canonical window; bias, through-plane, noise, blur and drift only), ``roles``
+    (``_appearance_roles``) or ``raw`` (the roles pipeline in native units without the final windowing: the input of
+    a learned window bank, ``model.window_bank``). ``blur.dims``: the axes the isotropic blur runs along (default
+    (2, 3, 4); (3, 4) in-plane only, native-geometry CT). ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching (roles) against
     another volume of the same contrast group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
     measured on the unaugmented intensities); ``sharp`` rows no through-plane or isotropic blur (small targets).
     ``tie_seed`` (roles mode): the contrast draws come from that seed (``_Seeded``), so calls with the same seed and
@@ -298,10 +301,10 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
     x = x.float().clone() if x.dtype == torch.float32 else x.float()
     fg = _foreground(x, modality)
     mode = (aug.get("window") or {}).get("mode", "fixed")
-    if mode == "roles":
+    if mode in ("roles", "raw"):
         return _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect, sharp, tie_seed)
     if mode != "fixed":
-        raise ValueError(f"window.mode {mode!r}: fixed or roles")
+        raise ValueError(f"window.mode {mode!r}: fixed, roles or raw")
     if tie_seed is not None:
         raise ValueError("tie_seed needs window.mode roles")
     if _enabled(aug.get("bias")):
@@ -347,8 +350,11 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
         if sharp is not None:
             on &= ~sharp.to(dev)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
-        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)),
+                           dims=tuple(bl.get("dims", (2, 3, 4))))
     win = aug.get("window") or {}
+    if win.get("mode") == "raw":                       # native units: the model's window bank windows them
+        return x
     with _Seeded(tie_seed, 3, dev):
         y = role_windows(x, modality, float(win.get("jitter", 0.0)))
     if int(win.get("channels", 3)) == 1:
