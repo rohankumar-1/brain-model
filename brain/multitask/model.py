@@ -194,6 +194,10 @@ class BrainQuery(nn.Module):
         # each other and read by the patch tokens; a task's answer is its token's output. Identity lives in the
         # encoder's width then.
         self.tokens = bool((cfg.get("task_tokens") or {}).get("enabled", False))
+        # window bank (``window_bank.decoder_grad``, default false): the decoder's image pyramid reads the learned
+        # windows but does not train them (the bank serves the encoder; the full-resolution input gradient through the
+        # pyramid's first convolution cost 0.16 s of a 1.5 s ViT-S step at batch 8 on an L40S)
+        self.bank_decoder_grad = bool((cfg.get("window_bank") or {}).get("decoder_grad", False))
         if self.tokens:
             self.register_buffer("tt_write", torch.zeros(n_tasks, dtype=torch.bool))
         qdim = d_enc if self.tokens else dim
@@ -456,7 +460,8 @@ class BrainQuery(nn.Module):
             grid = feats.transpose(1, 2).reshape(b, feats.shape[-1], *g).contiguous()   # DDP grad layout
             pairs = torch.cat([seg_pair, dense_pair]) if n_dense else seg_pair
             is_dense = torch.arange(n_seg + n_dense, device=x.device) >= n_seg
-            maps = self.seg(grid, x, pairs[:, 0], z[pairs[:, 0], pairs[:, 1]], dense=is_dense if n_dense else None,
+            img = x if self.bank_decoder_grad or bank_of(self.backbone) is None else x.detach()
+            maps = self.seg(grid, img, pairs[:, 0], z[pairs[:, 0], pairs[:, 1]], dense=is_dense if n_dense else None,
                             **({"chan": task[pairs[:, 0], pairs[:, 1]]} if self.seg_shared else {}))
             out["seg"] = maps[:n_seg] if n_seg else None
             out["dense"] = maps[n_seg:] if n_dense else None

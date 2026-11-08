@@ -32,7 +32,7 @@ INITS = {
 }
 C_RANGE = (-8.0, 16.0)          # u: CT -280 .. 680 HU, MRI z -11.5 .. 24.5
 W_RANGE = (0.05, 25.0)          # u: CT 2 .. 1000 HU, MRI z 0.075 .. 37.5
-DEFAULTS = {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1}
+DEFAULTS = {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1, "decoder_grad": False}
 
 
 def bank_cfg(model_cfg: dict | None) -> dict | None:

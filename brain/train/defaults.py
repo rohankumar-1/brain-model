@@ -135,6 +135,10 @@ def _multitask_defaults() -> dict[str, Any]:
                   "regression": {"kind": "scalar", "bins": 80, "range": [-5.0, 5.0], "sigma_ratio": 0.75},
                   # a logit per encoder token for a slot (BrainQuery.token_logits), for loss.token_weight / slice_weight
                   "token_map": {"enabled": False, "dim": 64},
+                  # shared learned window bank (brain.models.window_bank; CONTRACT 4): the encoder takes native units and
+                  # windows them through k learnable asinh windows (k input channels); off = the fixed windows
+                  "window_bank": {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1,
+                                  "decoder_grad": False},
                   # encoder: the ViT (init_from an SSL checkpoint, or ``size`` from scratch) or ``resnet3d``
                   # (brain.models.resnet3d, from scratch; ``resnet`` its widths / blocks)
                   "arch": "vit", "resnet": {"widths": [64, 128, 240, 384], "blocks": [2, 2, 2, 2]},
@@ -167,8 +171,13 @@ def _multitask_defaults() -> dict[str, Any]:
                 # brain.data.augment.appearance with the canonical window (CT density targets live in it); p 0 = off
                 # bias is MRI only and mild (intensity asymmetry is a target); noise is Rician on MRI, Gaussian on CT
                 "appearance": {"bias": {"p": 0.3, "amp": 0.2}, "through_plane": {"p": 0.3, "fwhm_vox": [2.0, 6.0]},
-                               "noise": {"p": 0.5, "kind": "rician", "snr": [15.0, 100.0], "sigma": [0.02, 0.1]},
-                               "blur": {"p": 0.2, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.2, "amp": 0.1}},
+                               "noise": {"p": 0.5, "kind": "rician", "snr": [15.0, 100.0], "sigma": [0.02, 0.1],
+                                         "sigma_hu": [2.0, 15.0]},
+                               "blur": {"p": 0.2, "sigma_vox": [0.5, 1.0]}, "drift": {"p": 0.2, "amp": 0.1},
+                               # window bank only (augment native path; ignored by the fixed / roles windows): CT
+                               # calibration offset / scale and reconstruction-kernel blur / sharpen, p 0 = off
+                               "ct_physical": {"p": 0.0, "offset_hu": 10.0, "scale": 0.03},
+                               "kernel": {"p": 0.0, "sigma_vox": [0.3, 1.0], "sharpen": 0.5, "amount": [0.2, 1.0]}},
                 # blank a random inferior slab (truncated coverage) on rows asking no whole-brain target; p 0 = off
                 "fov_cut": {"p": 0.2, "mm": [10, 40]},
                 # skull-strip skull-on MRI with its SynthStrip mask (never rows asking a needs_skull task): the tumour

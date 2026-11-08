@@ -294,3 +294,27 @@ def test_trainer_saves_the_bank_with_the_encoder_and_frozen_eval_loads_it(tmp_pa
     assert bank_cfg(ck["config"]["model"]) is not None
     frozen = load_brain3d(ck, CPU)
     assert frozen.bank is not None and torch.equal(frozen.bank.c_raw, ck["model"]["window_bank.c_raw"])
+
+
+def test_decoder_pyramid_does_not_train_the_bank_unless_asked():
+    """window_bank.decoder_grad false (default): a segmentation-only loss reaches the bank through the encoder only;
+    with decoder_grad true the pyramid adds its gradient."""
+    from brain.multitask.data import prepare
+    from brain.multitask.model import BrainQuery
+    from brain.multitask.registry import load_registry
+    from brain.train.multitask import build_encoder
+
+    reg = load_registry()
+    b = prepare(_raw(), _mt_cfg(dict(BANK)), CPU, (8, 8, 4), train=False)
+    if not len(b["seg_pair"]):
+        pytest.skip("no segmentation slot in the phantom batch")
+    grads = []
+    for dec in (False, True):
+        cfg = _mt_cfg({**BANK, "decoder_grad": dec})
+        torch.manual_seed(0)
+        model = BrainQuery(build_encoder(cfg, CPU, synthetic=True), reg, cfg["model"]).train()
+        model.set_token_tasks([reg.index[t] for t in reg.train_ids(cfg["tasks"])])
+        out = model(b["x"], b["keep"], b["task"], b["seg_pair"], modality=b["modality"])
+        out["seg"].float().mean().backward()
+        grads.append(model.backbone.window_bank.c_raw.grad.clone())
+    assert grads[0].abs().sum() > 0 and not torch.allclose(grads[0], grads[1])

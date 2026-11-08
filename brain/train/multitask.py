@@ -61,9 +61,10 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         for k, v in (scfg.get("model") or {}).items():
             if k not in ("checkpoint",) and k not in m:
                 m[k] = v
+        if bank_of(enc) is not None:            # the encoder's own windows: its bank's config, whatever this one says
+            m["window_bank"] = {**(scfg.get("model") or {}).get("window_bank", {}), "enabled": True}
         if (bank_cfg(m) is None) != (bank_of(enc) is None):
-            raise SystemExit("model.window_bank must match the init_from encoder's (a bank cannot be added to or "
-                             "removed from a trained encoder)")
+            raise SystemExit("model.window_bank: a bank cannot be added to a trained encoder without one (init_from)")
         cfg["views"] = {**(scfg.get("views") or {}), "gate": cfg["views"].get("gate")}
         cfg["views"]["patch_xyz"] = list(enc.patch_xyz)
         m["size"] = enc.size

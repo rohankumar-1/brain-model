@@ -40,7 +40,7 @@ model:
   task_tokens: {enabled: false}
   regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
   token_map: {enabled: true, dim: 64}
-  window_bank: {enabled: true, k: 6, init: contract6, per_modality: false, lr_mult: 0.1}
+  window_bank: {enabled: true, k: 6, init: contract6, per_modality: false, lr_mult: 0.1, decoder_grad: false}
 views:
   patch_xyz: [16, 16, 8]
   gate:
