@@ -172,7 +172,7 @@ def test_sitk_store_origins_recovered(sheared):
     st = _tilted_stack(K=14, sheared=sheared)
     shuffled = st.take(np.random.default_rng(1).permutation(st.K))
     attrs, expected = _sitk_native_attrs(shuffled)
-    q, info = ngeo.sitk_store_origins(shuffled.p, shuffled.a, shuffled.b, attrs)
+    q, info = ngeo.sitk_store_origins(shuffled.p, shuffled.a, shuffled.b, attrs, np.arange(shuffled.K))
     assert q is not None and info["store_frame_check_mm"] < 1e-6
     np.testing.assert_allclose(q, expected, atol=1e-6)
     if not sheared:
@@ -208,7 +208,7 @@ def test_affine_template_round_trip_and_matches_per_slice_chain(sheared):
         tp = A @ vox                                                # ngeo voxel -> template point
         np.testing.assert_allclose(np.linalg.solve(A, tp), vox, atol=1e-9)   # template point -> the same voxel
         s, r, c = vox[:3]
-        store_pt = res.Q[int(s)] + r * 0.5 * res.grid.u_r + c * 0.5 * res.grid.u_c
+        store_pt = res.Q[int(s)] + r * res.Ur + c * res.Uc
         chain = np.linalg.inv(R) @ np.r_[store_pt, 1.0]
         np.testing.assert_allclose(chain, tp, atol=1e-6)
     # per-slice template origins agree with the affine
@@ -242,13 +242,13 @@ def test_template_mask_maps_back_exactly():
     attrs = _attrs(R) | attrs_nat
     res = ngeo.build(st, attrs, None)
     s, r, c = 6, 260, 250
-    store_pt = res.Q[s] + r * 0.5 * res.grid.u_r + c * 0.5 * res.grid.u_c
+    store_pt = res.Q[s] + r * res.Ur + c * res.Uc
     tp = np.linalg.inv(R) @ np.r_[store_pt, 1.0]
     xyz = np.linalg.inv(ngeo.grid_affine(attrs)) @ tp
     lab = np.zeros((160, 256, 256), np.uint8)
     x, y, z = (int(round(v)) for v in xyz[:3])
     lab[z - 1:z + 2, y - 1:y + 2, x - 1:x + 2] = 7
-    m = ngeo.map_template_array(lab, attrs, res.Q, res.grid)
+    m = ngeo.map_template_array(lab, attrs, res.Q, res.Ur, res.Uc, res.grid)
     assert m[s, r, c] == 7
 
 
@@ -270,3 +270,63 @@ def test_label_vote_in_thin_slabs():
 def test_hu_int16_air_clamp():
     v = np.array([-3000.0, -600.0, -499.6, 40.4, 5000.0])
     np.testing.assert_array_equal(ngeo.to_hu_int16(v), np.array([-1024, -1024, -500, 40, 3071], np.int16))
+
+
+def test_sitk_store_origins_instance_order_fallback():
+    """With repeated positions GDCM orders files by instance number: the order whose first IPP and spacing reproduce
+    the stored grid wins."""
+    st = _tilted_stack(K=12, tilt_deg=0.0)
+    files = st.take(np.r_[np.arange(12), [4, 7]])                   # two repeats, instance = member order
+    rowc, colc = ngeo.unit(files.b), ngeo.unit(files.a)
+    n0 = np.cross(rowc, colc)
+    p = files.p                                                     # ITK in member (instance) order
+    dz = np.linalg.norm(p[-1] - p[0]) / (len(p) - 1)
+    img = sitk.Image([64, 64, len(p)], sitk.sitkUInt8)
+    img.SetOrigin(tuple(p[0]))
+    img.SetSpacing((0.5, 0.5, float(dz)))
+    img.SetDirection(tuple(np.stack([rowc, colc, n0], axis=1).ravel()))
+    o = sitk.DICOMOrient(img, "RAS")
+    attrs = {"native_origin": list(o.GetOrigin()), "native_spacing": list(o.GetSpacing()),
+             "native_direction": list(o.GetDirection()), "native_size": list(o.GetSize())}
+    q, info = ngeo.sitk_store_origins(files.p, files.a, files.b, attrs, np.arange(len(p)))
+    assert q is not None and info["store_frame_order"].startswith(("instance", "member"))
+    exp = np.array([img.TransformContinuousIndexToPhysicalPoint((0.0, 0.0, float(k))) for k in range(len(p))])
+    np.testing.assert_allclose(q, exp, atol=1e-6)
+
+
+def test_plan_prefers_coarse_class_in_mixed_series():
+    """Mostly 2.5 mm slices by count but a long 5 mm part: 5 mm grid, 5 mm slices copied, no interpolated holes."""
+    t = np.r_[np.arange(20) * 2.5, 47.5 + 2.5 + np.arange(19) * 5.0]
+    pl = ngeo.plan(t)
+    assert pl.D == pytest.approx(5.0) and pl.n_gaps == 0
+
+
+def test_nifti_store_frame_flip_recovered():
+    """A 1 mm store written in a flipped frame (old nibabel fallback): the flip is found by correlation and the
+    template mapping lands."""
+    rng = np.random.default_rng(0)
+    vol = np.full((20, 64, 64), -1024.0, np.float32)
+    zz, yy, xx = np.mgrid[:20, :64, :64]
+    vol[((yy - 30) ** 2 + (xx - 26) ** 2 < 400)] = 40.0
+    vol[((yy - 20) ** 2 + (xx - 40) ** 2 < 30)] = 80.0
+    vol += rng.normal(0, 3, vol.shape).astype(np.float32)
+    img = sitk.GetImageFromArray(vol)
+    img.SetSpacing((1.0, 1.0, 5.0))
+    img.SetOrigin((-32.0, -32.0, -50.0))
+    st = ngeo.stack_from_sitk(img)
+    # the store: same voxels, x and y index flipped, identity frame elsewhere (what the old fallback did)
+    stored = sitk.GetImageFromArray(vol[:, ::-1, ::-1].copy())
+    stored.SetSpacing((1.0, 1.0, 5.0))
+    stored.SetOrigin((-20.0, -12.0, -50.0))                         # the old reader's (wrong) origin
+    attrs = _attrs() | {"native_origin": list(stored.GetOrigin()), "native_spacing": list(stored.GetSpacing()),
+                        "native_direction": list(stored.GetDirection()), "native_size": list(stored.GetSize()),
+                        "grid_origin": [-80.0, -80.0, -80.0], "grid_direction": [1, 0, 0, 0, 1, 0, 0, 0, 1]}
+    # the 1 mm image: the stored volume resampled onto the grid (identity registration)
+    ref = sitk.Image([256, 256, 160], sitk.sitkFloat32)
+    ref.SetOrigin((-80.0, -80.0, -80.0))
+    one = sitk.GetArrayFromImage(sitk.Resample(sitk.Cast(stored, sitk.sitkFloat32), ref, sitk.Transform(),
+                                               sitk.sitkLinear, -1024.0))
+    info = ngeo.nifti_store_frame(st, img, attrs, one)
+    assert info["store_frame"] == "native_flip_xy" and info["store_frame_corr"] > 0.9
+    res = ngeo.build(st, attrs, None, image_1mm_zyx=one)
+    assert res.attrs["qc_corr_1mm"] > 0.9

@@ -63,6 +63,8 @@ class SliceStack:
     thick: float = 0.0                      # nominal SliceThickness from the header (0: unknown)
     info: dict = field(default_factory=dict)
     src: np.ndarray | None = None           # (K,) index of each slice in its source (DICOM member), kept by ``take``
+    aq: np.ndarray | None = None            # in-plane steps in the store frame (None: = a, b)
+    bq: np.ndarray | None = None
 
     @property
     def K(self) -> int:
@@ -76,11 +78,19 @@ class SliceStack:
     def qq(self) -> np.ndarray:
         return self.p if self.q is None else self.q
 
+    @property
+    def aqq(self) -> np.ndarray:
+        return self.a if self.aq is None else self.aq
+
+    @property
+    def bqq(self) -> np.ndarray:
+        return self.b if self.bq is None else self.bq
+
     def take(self, idx) -> "SliceStack":
         idx = np.asarray(idx, dtype=int)
         return SliceStack(self.pix[idx] if len(self.pix) else self.pix, self.p[idx], self.a, self.b,
                           None if self.q is None else self.q[idx], self.thick, dict(self.info),
-                          None if self.src is None else self.src[idx])
+                          None if self.src is None else self.src[idx], self.aq, self.bq)
 
 
 def unit(v) -> np.ndarray:
@@ -147,7 +157,15 @@ def plan(t, lo: float = -np.inf, hi: float = np.inf, slab_mm: float = SLAB_MM, t
         D = n * d
         uneven = bool(np.any(np.abs(dt - d) > 0.1 * d))
     else:
-        D = float(np.median(dt[cls]))
+        # the coarsest spacing class covering >= 25% of the length (2.5 mm + 5 mm series: 5 mm, the 2.5 mm part is
+        # box-averaged onto it rather than the 5 mm part interpolated)
+        dtt = dt[cls]
+        D = float(np.median(dtt))
+        for c in sorted(set(np.round(dtt / 0.25) * 0.25), reverse=True):
+            near = np.abs(dtt - c) <= 0.1 * c
+            if dtt[near].sum() >= 0.25 * dt.sum():
+                D = float(np.median(dtt[near]))
+                break
         uneven = bool(np.any(np.abs(dt - D) > 0.1 * D))
     left, right = np.r_[dt[0], dt], np.r_[dt, dt[-1]]
     s_lo, s_hi = t - np.minimum(left, D) / 2, t + np.minimum(right, D) / 2
@@ -338,20 +356,24 @@ def store_to_template(attrs: dict) -> np.ndarray:
     return np.linalg.inv(reg_matrix(attrs))
 
 
-def sitk_store_origins(p_files: np.ndarray, a: np.ndarray, b: np.ndarray, attrs: dict) -> tuple[np.ndarray | None, dict]:
+def sitk_store_origins(p_files: np.ndarray, a: np.ndarray, b: np.ndarray, attrs: dict,
+                       instance: np.ndarray | None = None) -> tuple[np.ndarray | None, dict]:
     """Origins of each file's slice in the frame SimpleITK's series reader gave it (the 1 mm store's source frame).
 
-    ``p_files`` are the IPPs of exactly the files SimpleITK read (one series, duplicates included). ITK sorts them along
-    the normal n0 = row x col, puts the first file's IPP at the origin and steps by a constant spacing along n0; prep
-    then reoriented that grid to RAS (``native_*`` attrs). The axis permutation / flips come from matching the stored
-    direction columns to the DICOM axes, the sort sense from which end's IPP lands on its stored position."""
+    ``p_files`` are the IPPs of exactly the files SimpleITK read (one series, duplicates included), in member order.
+    ITK orders the files (GDCM sorts along the normal n0 = row x col, but falls back to instance / file order when
+    positions repeat), puts the first file's IPP at the origin and steps by |IPP_last - IPP_first| / (N - 1) along
+    n0; prep then reoriented that grid to RAS (``native_*`` attrs). The axis permutation / flips come from matching the
+    stored direction columns to the DICOM axes; the file order is the candidate whose first IPP and spacing reproduce
+    the stored grid."""
     K = len(p_files)
     size = np.asarray(attrs.get("native_size", [0, 0, 0]), dtype=int)
+    sp_nat = np.asarray(attrs["native_spacing"], dtype=np.float64)
     Dn = np.asarray(attrs["native_direction"], dtype=np.float64).reshape(3, 3)
     A = _affine_from(attrs["native_origin"], attrs["native_spacing"], attrs["native_direction"])
     rowc, colc = unit(b), unit(a)                       # DICOM row cosine (along columns j), column cosine (rows i)
     n0 = unit(np.cross(rowc, colc))
-    axes = [colc, rowc, n0]                             # orig ITK axes: y = i, x = j, z = slice; matched below by role
+    axes = [colc, rowc, n0]
     match = []
     for m in range(3):
         dots = np.array([Dn[:, m] @ v for v in axes])
@@ -365,7 +387,9 @@ def sitk_store_origins(p_files: np.ndarray, a: np.ndarray, b: np.ndarray, attrs:
     if size[slice_ax] != K:
         return None, {"store_frame": f"slice_count_{size[slice_ax]}_vs_{K}"}
     t0 = p_files @ n0
-    order = np.argsort(t0, kind="stable")
+    inst = np.arange(K) if instance is None else np.asarray(instance)
+    cands = {"position": np.lexsort((inst, t0)), "instance": np.lexsort((np.arange(K), inst)),
+             "member": np.arange(K)}
 
     def origins(kz_of_file):
         idx = np.zeros((K, 3))
@@ -377,79 +401,89 @@ def sitk_store_origins(p_files: np.ndarray, a: np.ndarray, b: np.ndarray, attrs:
         return (A[:3, :3] @ idx.T).T + A[:3, 3]
 
     best = None
-    for asc in (True, False):
-        kz = np.empty(K)
-        kz[order] = np.arange(K) if asc else np.arange(K)[::-1]
-        q = origins(kz)
-        first = int(np.flatnonzero(kz == 0)[0])
-        err = float(np.linalg.norm(q[first] - p_files[first]))
-        if best is None or err < best[1]:
-            best = (q, err, asc)
-    q, err, asc = best
-    info = {"store_frame": "sitk_series", "store_frame_check_mm": err, "store_frame_asc": asc}
+    for name, order in cands.items():
+        for rev in (False, True):
+            o = order[::-1] if rev else order
+            dz = np.linalg.norm(p_files[o[-1]] - p_files[o[0]]) / max(K - 1, 1)
+            kz = np.empty(K)
+            kz[o] = np.arange(K)
+            q = origins(kz)
+            err = float(np.linalg.norm(q[o[0]] - p_files[o[0]])) + abs(dz - sp_nat[slice_ax])
+            if best is None or err < best[1] - 1e-6:
+                best = (q, err, f"{name}_{'desc' if rev else 'asc'}")
+    q, err, how = best
+    info = {"store_frame": "sitk_series", "store_frame_check_mm": err, "store_frame_order": how}
     if err > 1.0:
         return None, info | {"store_frame": "origin_mismatch"}
     return q, info
 
 
 def store_to_true_fn(st: SliceStack):
-    """A function mapping store-frame points (N, 3) to the true scanner frame (identity when the frames agree):
-    a point's offset along the normal picks its (fractional) slice; it moves by that slice's p - q."""
-    if st.q is None or np.allclose(st.q, st.p, atol=1e-3):
+    """A function mapping store-frame points (N, 3) to the true scanner frame (identity when the frames agree): a
+    point's offset along the store-frame normal picks its (fractional) slice, its in-plane coordinates on that slice
+    carry over."""
+    if (st.q is None or np.allclose(st.q, st.p, atol=1e-3)) and st.aq is None and st.bq is None:
         return lambda X: np.asarray(X, dtype=np.float64)
-    n = st.normal
-    tau = st.q @ n
+    nq = unit(np.cross(st.aqq, st.bqq))
+    tau = st.qq @ nq
     o = np.argsort(tau)
-    tau, dp = tau[o], (st.p - st.q)[o]
+    tau, P, Qo = tau[o], st.p[o], st.qq[o]
+    Lq = np.linalg.pinv(np.stack([st.aqq, st.bqq], axis=1))
+    ab = np.stack([st.a, st.b], axis=1)
+    K = len(tau)
 
     def f(X):
         X = np.asarray(X, dtype=np.float64)
-        x = X @ n
-        k = np.interp(x, tau, np.arange(len(tau)), left=np.nan, right=np.nan)
-        # outside the stack: extrapolate the end slices' shift linearly in the slice index
-        k = np.where(np.isnan(k), np.where(x < tau[0], (x - tau[0]) / max(tau[1] - tau[0], 1e-6),
-                                           len(tau) - 1 + (x - tau[-1]) / max(tau[-1] - tau[-2], 1e-6)), k)
-        lo = np.clip(np.floor(k).astype(int), 0, len(tau) - 2)
-        f_ = (k - lo)[:, None]
-        return X + dp[lo] * (1 - f_) + dp[lo + 1] * f_
+        x = X @ nq
+        d0, d1 = max(tau[1] - tau[0], 1e-6) if K > 1 else 1.0, max(tau[-1] - tau[-2], 1e-6) if K > 1 else 1.0
+        k = np.interp(x, tau, np.arange(K))
+        k = np.where(x < tau[0], (x - tau[0]) / d0, np.where(x > tau[-1], K - 1 + (x - tau[-1]) / d1, k))
+        lo = np.clip(np.floor(k).astype(int), 0, max(K - 2, 0))
+        fr = (k - lo)[:, None]
+        hi = np.minimum(lo + 1, K - 1)
+        pk = P[lo] * (1 - fr) + P[hi] * fr
+        qk = Qo[lo] * (1 - fr) + Qo[hi] * fr
+        ij = (Lq @ (X - qk).T).T
+        return pk + ij @ ab.T
 
     return f
 
 
-def store_slice_origins(st: SliceStack, pl: Plan, g: NGrid) -> np.ndarray:
-    """(S, 3): store-frame position of pixel (0, 0) of every target slice. Store-frame in-plane axes equal the true
-    ones, so a target pixel (r, c) is at ``Q[s] + r * h * u_r + c * h * u_c`` in the store frame."""
-    n = st.normal
+def store_slice_origins(st: SliceStack, pl: Plan, g: NGrid) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(Q (S, 3), Ur, Uc): target pixel (s, r, c) sits at ``Q[s] + r * Ur + c * Uc`` in the store frame. A true point
+    X on source slice k has in-plane coordinates L (X - p_k) and store position q_k + [aq bq] L (X - p_k)."""
+    L = _pinv_ab(st.a, st.b)
+    Bq = np.stack([st.aqq, st.bqq], axis=1)
+    BL = Bq @ L
     Q = np.empty((g.S, 3))
     for s, wk in enumerate(pl.weights):
         o = g.slice_origin(s)
         pw = sum(w * st.p[k] for k, w in wk)
         qw = sum(w * st.qq[k] for k, w in wk)
-        d = o - pw
-        Q[s] = qw + d - (d @ n) * n
-    return Q
+        Q[s] = qw + BL @ (o - pw)
+    return Q, BL @ (g.h * g.u_r), BL @ (g.h * g.u_c)
 
 
-def fit_slice_affine(Q: np.ndarray, g: NGrid) -> tuple[np.ndarray, float]:
+def fit_slice_affine(Q: np.ndarray, Ur: np.ndarray, Uc: np.ndarray) -> tuple[np.ndarray, float]:
     """Least-squares affine voxel -> store-frame mm of a per-slice origin list, and its worst residual (mm)."""
     s = np.arange(len(Q), dtype=np.float64)
     X = np.stack([s, np.ones_like(s)], axis=1)
     coef, *_ = np.linalg.lstsq(X, Q, rcond=None)              # (2, 3): slope, intercept
     resid = float(np.linalg.norm(X @ coef - Q, axis=1).max()) if len(Q) else 0.0
     A = np.eye(4)
-    A[:3, 0], A[:3, 1], A[:3, 2], A[:3, 3] = coef[0], g.h * g.u_r, g.h * g.u_c, coef[1]
+    A[:3, 0], A[:3, 1], A[:3, 2], A[:3, 3] = coef[0], Ur, Uc, coef[1]
     return A, resid
 
 
-def map_template_array(arr_zyx: np.ndarray, attrs: dict, Q: np.ndarray, g: NGrid, order: int = 0,
-                       stride: int = 1, cval: float = 0.0) -> np.ndarray:
+def map_template_array(arr_zyx: np.ndarray, attrs: dict, Q: np.ndarray, Ur: np.ndarray, Uc: np.ndarray, g: NGrid,
+                       order: int = 0, stride: int = 1, cval: float = 0.0) -> np.ndarray:
     """A 1 mm stored-grid array (Z, Y, X) sampled at every ngeo voxel through the exact per-slice store-frame map
     (``stride``: every n-th row / column only)."""
     M = np.linalg.inv(grid_affine(attrs)) @ store_to_template(attrs)        # store phys -> 1 mm grid index (x, y, z)
     ax = np.arange(0, g.rc, stride, dtype=np.float64)
     rr, cc = np.meshgrid(ax, ax, indexing="ij")
     out = np.zeros((g.S, len(ax), len(ax)), dtype=arr_zyx.dtype if order == 0 else np.float32)
-    du, dc = M[:3, :3] @ (g.h * g.u_r), M[:3, :3] @ (g.h * g.u_c)
+    du, dc = M[:3, :3] @ Ur, M[:3, :3] @ Uc
     for s in range(g.S):
         base = M[:3, :3] @ Q[s] + M[:3, 3]
         xyz = base[:, None, None] + du[:, None, None] * rr + dc[:, None, None] * cc
@@ -458,11 +492,11 @@ def map_template_array(arr_zyx: np.ndarray, attrs: dict, Q: np.ndarray, g: NGrid
     return out
 
 
-def corr_with_1mm(img: np.ndarray, image_1mm_zyx: np.ndarray, attrs: dict, Q: np.ndarray, g: NGrid,
+def corr_with_1mm(img: np.ndarray, image_1mm_zyx: np.ndarray, attrs: dict, Q: np.ndarray, Ur, Uc, g: NGrid,
                   stride: int = 4) -> float:
     """Frame check: correlation of the ngeo image with the 1 mm stored image sampled at the same voxels (through the
     per-slice map), in a soft-tissue window over the head. A wrong frame (offset, mirror, shear) drops it."""
-    ref = map_template_array(np.asarray(image_1mm_zyx, dtype=np.float32), attrs, Q, g, order=1, stride=stride,
+    ref = map_template_array(np.asarray(image_1mm_zyx, dtype=np.float32), attrs, Q, Ur, Uc, g, order=1, stride=stride,
                              cval=FLOOR_HU)
     x = img[:, ::stride, ::stride].astype(np.float32)
     head = (x > AIR_HU) | (ref > AIR_HU)
@@ -484,14 +518,14 @@ def mask_stack(mask_img, st: SliceStack) -> SliceStack:
     Ai = np.linalg.inv(A)
     H, W = st.pix.shape[1:]
     ii, jj = np.meshgrid(np.arange(H, dtype=np.float64), np.arange(W, dtype=np.float64), indexing="ij")
-    da, db = Ai[:3, :3] @ st.a, Ai[:3, :3] @ st.b
+    da, db = Ai[:3, :3] @ st.aqq, Ai[:3, :3] @ st.bqq
     out = np.zeros(st.pix.shape, dtype=np.uint8)
     for k in range(st.K):
         base = Ai[:3, :3] @ st.qq[k] + Ai[:3, 3]
         xyz = base[:, None, None] + da[:, None, None] * ii + db[:, None, None] * jj
         out[k] = ndimage.map_coordinates(arr, [np.rint(xyz[2]), np.rint(xyz[1]), np.rint(xyz[0])], order=0,
                                          mode="constant", cval=0, prefilter=False)
-    return SliceStack(out, st.p, st.a, st.b, st.q, st.thick, {})
+    return SliceStack(out, st.p, st.a, st.b, st.q, st.thick, {}, None, st.aq, st.bq)
 
 
 def sample_physical(img, g: NGrid, order: int = 1, nsub: int = 1, cval: float = 0.0) -> np.ndarray:
@@ -563,7 +597,9 @@ class NgeoResult:
     attrs: dict
     grid: NGrid
     plan: Plan
-    Q: np.ndarray
+    Q: np.ndarray                           # (S, 3) store-frame position of pixel (0, 0) of every slice
+    Ur: np.ndarray                          # store-frame step per row / column
+    Uc: np.ndarray
 
 
 def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, native_masks: dict | None = None,
@@ -582,19 +618,19 @@ def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, nati
     pl = plan(t, lo, hi, thick_hint=st.thick)
     g = make_grid(st_s, pl, center)
     img = to_hu_int16(resample_image(st_s, pl, g))
-    Q = store_slice_origins(st_s, pl, g)
-    A_store, resid_store = fit_slice_affine(Q, g)
+    Q, Ur, Uc = store_slice_origins(st_s, pl, g)
+    A_store, resid_store = fit_slice_affine(Q, Ur, Uc)
     T2 = store_to_template(attrs)
     A_tpl = T2 @ A_store
     resid_tpl = resid_store * float(np.linalg.norm(T2[:3, :3], 2))
     brain = None
     if brain_zyx is not None:
-        brain = (map_template_array(np.asarray(brain_zyx, dtype=np.uint8), attrs, Q, g) > 0).astype(np.uint8)
+        brain = (map_template_array(np.asarray(brain_zyx, dtype=np.uint8), attrs, Q, Ur, Uc, g) > 0).astype(np.uint8)
     masks = {}
     for name, ms in (native_masks or {}).items():
         masks[name] = resample_labels(ms.take(order_keep), pl, g)
     for name, arr in (template_masks or {}).items():
-        masks[name] = map_template_array(np.asarray(arr), attrs, Q, g).astype(np.uint8)
+        masks[name] = map_template_array(np.asarray(arr), attrs, Q, Ur, Uc, g).astype(np.uint8)
     out_attrs = {
         "kind": KIND, "ngeo_rev": NGEO_REV,
         "spacing_mm": [pl.D, H_MM, H_MM], "slice_mm": pl.D, "thick_mm": pl.thick_mm,
@@ -607,12 +643,12 @@ def build(st: SliceStack, attrs: dict, brain_zyx: np.ndarray | None = None, nati
         "tpl_slice_origin": [[round(float(v), 3) for v in (T2[:3, :3] @ q + T2[:3, 3])] for q in Q],
         "head_range_mm": [float(lo), float(hi)], "n_src_slices": int(st.K),
         "src_inplane_mm": [float(np.linalg.norm(st.a)), float(np.linalg.norm(st.b))],
-        **rinfo, **st.info, **(extra or {}),
+        **rinfo, **{k: v for k, v in st.info.items() if not k.startswith('_')}, **(extra or {}),
     }
     out_attrs |= qc(img, brain, masks, pl.D)
     if image_1mm_zyx is not None:
-        out_attrs["qc_corr_1mm"] = corr_with_1mm(img, image_1mm_zyx, attrs, Q, g)
-    return NgeoResult(img, brain, masks, out_attrs, g, pl, Q)
+        out_attrs["qc_corr_1mm"] = corr_with_1mm(img, image_1mm_zyx, attrs, Q, Ur, Uc, g)
+    return NgeoResult(img, brain, masks, out_attrs, g, pl, Q, Ur, Uc)
 
 
 def _dedupe_index(st: SliceStack, tol: float = DUP_TOL_MM) -> np.ndarray:
@@ -660,7 +696,60 @@ def stack_from_sitk(img) -> SliceStack:
     pix = np.ascontiguousarray(np.moveaxis(arr, [2 - m, 2 - eh, 2 - ew], [0, 1, 2]))
     K = pix.shape[0]
     p = o[None] + np.arange(K)[:, None] * (sp[m] * Dm[:, m])[None]
-    return SliceStack(pix, p, sp[eh] * Dm[:, eh], sp[ew] * Dm[:, ew], None, 0.0, {"slice_axis": m})
+    return SliceStack(pix, p, sp[eh] * Dm[:, eh], sp[ew] * Dm[:, ew], None, 0.0, {"slice_axis": m, "_axes": (m, eh, ew)})
+
+
+def nifti_store_frame(st: SliceStack, img, attrs: dict, image_1mm_zyx: np.ndarray | None) -> dict:
+    """The 1 mm store's frame for a volume source read by ``geometry.read``. Normally the same as this read (nothing
+    to do). Volumes stored by the pre-2026-10-25 nibabel fallback reader (seg_cq500 among the CT) carry a ``native_*``
+    grid in another frame and index order: the stored grid indexes the same voxels up to axis flips; the flips are
+    chosen by correlating the source with the 1 mm image through each candidate. Sets ``st.q / aq / bq``."""
+    size = np.asarray(img.GetSize())
+    if "native_size" not in attrs or list(attrs["native_size"]) != list(size):
+        return {"store_frame": "true"}
+    A_now = _affine_from(img.GetOrigin(), img.GetSpacing(), img.GetDirection())
+    A_nat = _affine_from(attrs["native_origin"], attrs["native_spacing"], attrs["native_direction"])
+    corners = np.array([[i, j, k, 1] for i in (0, size[0] - 1) for j in (0, size[1] - 1) for k in (0, size[2] - 1)],
+                       dtype=np.float64).T
+    if np.abs((A_now - A_nat) @ corners).max() < 0.5:
+        return {"store_frame": "true"}
+    if image_1mm_zyx is None:
+        return {"store_frame": "native_mismatch_unresolved"}
+    m, eh, ew = st.info["_axes"]
+    M = np.linalg.inv(grid_affine(attrs)) @ store_to_template(attrs)
+    ks = np.arange(0, st.K, 2)
+    step = max(1, min(st.pix.shape[1:]) // 64)
+    ii, jj = np.meshgrid(np.arange(0, st.pix.shape[1], step), np.arange(0, st.pix.shape[2], step), indexing="ij")
+    src = st.pix[ks][:, ::step, ::step]
+    best = None
+    for fx in (0, 1):
+        for fy in (0, 1):
+            for fz in (0, 1):
+                flip = np.array([fx, fy, fz])
+                F = np.eye(4)                                        # current index -> stored index
+                for ax in range(3):
+                    if flip[ax]:
+                        F[ax, ax], F[ax, 3] = -1.0, size[ax] - 1
+                B = A_nat @ F
+                idx = np.zeros((4, len(ks), *ii.shape))
+                idx[m] = ks[:, None, None]
+                idx[eh], idx[ew], idx[3] = ii[None], jj[None], 1.0
+                xyz = np.tensordot(M @ B, idx, axes=1)
+                ref = ndimage.map_coordinates(np.asarray(image_1mm_zyx, np.float32), [xyz[2], xyz[1], xyz[0]],
+                                              order=1, mode="constant", cval=FLOOR_HU, prefilter=False)
+                head = (src > AIR_HU) & (ref > AIR_HU)
+                c = float(np.corrcoef(np.clip(src[head], -50, 150), np.clip(ref[head], -50, 150))[0, 1]) \
+                    if head.sum() > 200 else -1.0
+                if best is None or c > best[0]:
+                    best = (c, B, flip)
+    c, B, flip = best
+    info = {"store_frame": "native_flip_" + "".join("xyz"[i] for i in range(3) if flip[i]) if flip.any()
+            else "native_same_index", "store_frame_corr": c}
+    if not c >= 0.6:
+        return info | {"store_frame": "native_mismatch_unresolved"}
+    st.q = (B[:3, m][None] * np.arange(st.K)[:, None]) + B[:3, 3][None]
+    st.aq, st.bq = B[:3, eh].copy(), B[:3, ew].copy()
+    return info
 
 
 def _f(v, default=0.0) -> float:

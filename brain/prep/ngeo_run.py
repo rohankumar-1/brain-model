@@ -238,7 +238,7 @@ def _template_masks(store_root: Path, image_path: str, dataset: str) -> dict[str
     return out
 
 
-def read_case(dataset: str, spec: dict, attrs: dict, brain: np.ndarray | None):
+def read_case(dataset: str, spec: dict, attrs: dict, brain: np.ndarray | None, image_1mm: np.ndarray | None = None):
     """(SliceStack with ``q`` set, native label stacks, extra attrs) for one case."""
     import SimpleITK as sitk
 
@@ -260,7 +260,7 @@ def read_case(dataset: str, spec: dict, attrs: dict, brain: np.ndarray | None):
         if dataset in SITK_FRAME and os.environ.get("NGEO_IGNORE_STORE_FRAME") == "1":    # diagnostic only
             extra["store_frame"] = "ignored"
         elif dataset in SITK_FRAME:
-            q, finfo = ngeo.sitk_store_origins(st.p, st.a, st.b, attrs)
+            q, finfo = ngeo.sitk_store_origins(st.p, st.a, st.b, attrs, np.asarray([h.instance for h in main]))
             st.q = q
             extra |= finfo if q is not None else finfo | {"store_frame_ok": False}
         else:
@@ -281,8 +281,8 @@ def read_case(dataset: str, spec: dict, attrs: dict, brain: np.ndarray | None):
     img, off = intensity.fix_ct_offset(img)
     img = intensity.clamp_ct(img)
     st = ngeo.stack_from_sitk(img)
-    extra |= {"source": spec["path"], "series": "", "series_kind": "nifti", "store_frame": "true",
-              "offset_repaired": bool(off)}
+    extra |= {"source": spec["path"], "series": "", "series_kind": "nifti", "offset_repaired": bool(off)}
+    extra |= ngeo.nifti_store_frame(st, img, attrs, image_1mm)
     masks = {}
     for name, p in spec.get("masks", {}).items():
         m = sitk.Cast(geometry.read(Path(p)), sitk.sitkUInt8)
@@ -301,12 +301,12 @@ def run_case(row: dict, spec: dict, store_root: str, out_root: str) -> dict:
         arrays = store.read_many(img_zip, ("brain", "image"))
         attrs = store.read_attrs(img_zip, "image")
         brain = arrays.get("brain")
-        st, nmasks, extra = read_case(row["dataset"], spec, attrs, brain)
+        img1 = arrays.get("image")
+        img1 = None if img1 is None else store.squeeze_channel(img1)
+        st, nmasks, extra = read_case(row["dataset"], spec, attrs, brain, img1)
         t1 = time.time()
         tmasks = _template_masks(sr, row["image_path"], row["dataset"])
-        img1 = arrays.get("image")
-        res = ngeo.build(st, attrs, brain, nmasks, tmasks, extra | {"volume_id": row["volume_id"]},
-                         None if img1 is None else store.squeeze_channel(img1))
+        res = ngeo.build(st, attrs, brain, nmasks, tmasks, extra | {"volume_id": row["volume_id"]}, img1)
         t2 = time.time()
         stem = row["image_path"][:-4]
         out = orr / f"{stem}.ngeo.zip"
@@ -468,7 +468,8 @@ QC_RULES = (("brain_off", lambda r: r.get("qc_brain_tissue", 1.0) < 0.8),
             ("tpl_nonlinear", lambda r: r.get("tpl_resid_mm", 0.0) > 3.0),
             ("gaps", lambda r: r.get("asm_n_gaps", 0) > 0),
             ("fov_cut", lambda r: r.get("qc_edge_tissue", 0.0) > 0.02),
-            ("frame_assumed", lambda r: r.get("store_frame_ok") is False),
+            ("frame_assumed", lambda r: r.get("store_frame_ok") is False
+             or str(r.get("store_frame", "")).endswith("unresolved")),
             ("short", lambda r: r.get("S", 99) < 12))
 
 
