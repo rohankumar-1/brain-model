@@ -52,11 +52,16 @@ def load_model(ckpt_path: Path, device: torch.device):
 
 
 def _loader(store, labels, volumes, reg, stats, task, split, ids=None, use=None, workers=4, strip_all=False,
-            strip_match=None, study=None, partners=None):
+            strip_match=None, study=None, partners=None, cfg: dict | None = None):
+    """Evaluation loader for one task. ``cfg``: the checkpoint's config; with ``data.ngeo.enabled`` the scans come
+    from their native-geometry copies (``data.ngeo_setup``; scans without one are left out)."""
+    from brain.multitask.data import ngeo_setup
+
+    ngeo_kw, cf = ngeo_setup(cfg, store)
     ds = MultitaskDataset(store, labels, volumes, reg, stats, split=split, tasks=[task], train=False, use=use,
                           volume_ids=ids, max_seg=1, strip_all=strip_all, strip_match=strip_match, study=study,
-                          partners=partners)
-    return make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False), ds
+                          partners=partners, **ngeo_kw)
+    return make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False, collate_fn=cf), ds
 
 
 def fit_embedding(model, reg, cfg, loader, t: int, device, amp, steps: int = 200, lr: float = 3e-3) -> dict:

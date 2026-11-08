@@ -1383,17 +1383,11 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
     volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
     labels = drop_datasets(labels, volumes, d.get("exclude_datasets"))
     labels = drop_volumes(labels, d.get("exclude_volumes"))
-    ngeo_kw, cf = {}, None
-    if ngeo_on:            # native-geometry CT (data.ngeo): the scans volumes_ngeo.csv lists, same label rows
-        from functools import partial
-
-        ng = {**ng, "root": str(resolve(ng["root"])) if ng.get("root") else str(store)}   # ngeo zips + their index
-        ngi = ngeo_index_rows(pd.read_csv(Path(ng["root"]) / ng.get("index_name", "volumes_ngeo.csv"),
-                                          low_memory=False), ng)
+    ngeo_kw, cf = ngeo_setup(cfg, store)
+    if ngeo_kw:            # native-geometry CT (data.ngeo): the scans volumes_ngeo.csv lists, same label rows
+        ngi = ngeo_kw["ngeo_index"]
         labels = labels[labels["volume_id"].astype(str).isin(set(ngi["volume_id"]))]
         volumes = ngeo_volumes(volumes, ngi) if "path" in ngi else volumes
-        ngeo_kw = {"ngeo": ng, "ngeo_index": ngi}
-        cf = partial(collate_ngeo, pad_multiple=int(ng.get("pad_multiple", 4)))
         print(f"[data] native geometry: {len(ngi)} indexed scans, {labels['volume_id'].nunique()} labelled", flush=True)
     study_cfg = tk.get("study") or None
     partners = None
@@ -1433,6 +1427,34 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
         val = make_loader(vds, batch_size=2, shuffle=False, seed=0, workers=min(4, workers), drop_last=False,
                           collate_fn=cf)
     return loader, val, stats, len(ds)
+
+
+_NGEO_INDEX: dict[str, pd.DataFrame] = {}
+
+
+def ngeo_setup(cfg: dict | None, store) -> tuple[dict, object]:
+    """For a config with ``data.ngeo.enabled`` (a native-geometry run or checkpoint): the ``MultitaskDataset``
+    keyword arguments (``ngeo`` with its resolved ``root``, ``ngeo_index`` = the filtered ``volumes_ngeo.csv``) and
+    the collate function (``collate_ngeo``); ({}, None) otherwise. The index is read once per process."""
+    from functools import partial
+
+    from brain.common.paths import resolve
+
+    ng = ((cfg or {}).get("data") or {}).get("ngeo") or {}
+    if not ng.get("enabled"):
+        return {}, None
+    ng = {**ng, "root": str(resolve(ng["root"])) if ng.get("root") else str(store)}   # ngeo zips + their index
+    path = str(Path(ng["root"]) / ng.get("index_name", "volumes_ngeo.csv"))
+    if path not in _NGEO_INDEX:
+        _NGEO_INDEX[path] = pd.read_csv(path, low_memory=False)
+    return ({"ngeo": ng, "ngeo_index": ngeo_index_rows(_NGEO_INDEX[path], ng)},
+            partial(collate_ngeo, pad_multiple=int(ng.get("pad_multiple", 4))))
+
+
+def input_patch(model, cfg: dict | None) -> tuple:
+    """The token patch ``prepare`` gates with: the ngeo stem's for a native-geometry config, else the 1 mm one."""
+    ng = ((cfg or {}).get("data") or {}).get("ngeo") or {}
+    return tuple(model.backbone.ngeo_patch_xyz if ng.get("enabled") else model.backbone.patch_xyz)
 
 
 def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:
