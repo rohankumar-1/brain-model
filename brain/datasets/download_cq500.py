@@ -78,6 +78,21 @@ def choose(series: pd.DataFrame) -> str | None:
     return ok.sort_values(["thickness", "n"], ascending=[True, False]).iloc[0]["folder"]
 
 
+def choose_thick(series: pd.DataFrame) -> str | None:
+    """For the native-geometry copy (brain.prep.ngeo): the plain soft-tissue series with real 2.5-6 mm slices
+    (closest to 5 mm, then most slices), only for studies whose ``choose`` pick is a thin series; None otherwise."""
+    first = choose(series)
+    if first is None or float(series.loc[series["folder"] == first, "thickness"].iloc[0]) >= 2.5:
+        return None
+    plain = ~series["description"].map(_is_contrast)
+    ok = series[plain & (series["kernel_class"] == "soft") & (series["n"] >= 15)
+                & series["thickness"].between(2.5, 6.0)].copy()
+    if ok.empty:
+        return None
+    ok["off"] = (ok["thickness"] - 5.0).abs()
+    return ok.sort_values(["off", "n"], ascending=[True, False]).iloc[0]["folder"]
+
+
 def headers(zf: zipfile.ZipFile) -> pd.DataFrame:
     import pydicom
 
@@ -96,7 +111,7 @@ def headers(zf: zipfile.ZipFile) -> pd.DataFrame:
     return out
 
 
-def fetch(i: int, dest: Path, tmp: Path) -> list[dict]:
+def fetch(i: int, dest: Path, tmp: Path, chooser=choose) -> list[dict]:
     out = dest / f"CQ500-CT-{i}.zip"
     if out.exists():
         return []
@@ -116,7 +131,7 @@ def fetch(i: int, dest: Path, tmp: Path) -> list[dict]:
     try:
         with zipfile.ZipFile(src) as zf:
             s = headers(zf)
-            pick = choose(s)
+            pick = chooser(s)
             if pick is not None:
                 part = out.with_name(out.name + ".partial")
                 with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED) as w:
@@ -129,10 +144,10 @@ def fetch(i: int, dest: Path, tmp: Path) -> list[dict]:
     return [{**r, "study": f"CQ500-CT-{i}", "chosen": r["folder"] == pick} for r in s.to_dict("records")]
 
 
-def fetch_safe(i: int, dest: Path, tmp: Path) -> list[dict]:
+def fetch_safe(i: int, dest: Path, tmp: Path, chooser=choose) -> list[dict]:
     """``fetch``, with any failure recorded in series.csv instead of ending the run (one bad study ended the first)."""
     try:
-        return fetch(i, dest, tmp)
+        return fetch(i, dest, tmp, chooser)
     except Exception as e:                                   # noqa: BLE001
         return [{"study": f"CQ500-CT-{i}", "error": f"{type(e).__name__}: {e}"[:200]}]
 
@@ -141,12 +156,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dest", type=Path, required=True)
     ap.add_argument("--workers", type=int, default=6)
-    ap.add_argument("--studies", default=f"0-{N_STUDIES - 1}", help="range a-b (inclusive)")
+    ap.add_argument("--studies", default=f"0-{N_STUDIES - 1}", help="range a-b (inclusive) or a comma list")
+    ap.add_argument("--thick", action="store_true",
+                    help="keep the real 5 mm plain series of studies whose regular pick is thin (choose_thick; "
+                         "for brain.prep.ngeo, dest e.g. $BRAIN_DATASETS/cq500_dicom_thick)")
     a = ap.parse_args()
-    lo, hi = map(int, a.studies.split("-"))
+    chooser = choose_thick if a.thick else choose
+    if "," in a.studies or "-" not in a.studies:
+        ids = [int(x) for x in a.studies.split(",") if x]
+    else:
+        lo, hi = map(int, a.studies.split("-"))
+        ids = list(range(lo, hi + 1))
     a.dest.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR", "/tmp")) as t, ThreadPoolExecutor(a.workers) as ex:
-        rows = [r for rs in ex.map(lambda i: fetch_safe(i, a.dest, Path(t)), range(lo, hi + 1)) for r in rs]
+        rows = [r for rs in ex.map(lambda i: fetch_safe(i, a.dest, Path(t), chooser), ids) for r in rs]
     if rows:
         f = a.dest / "series.csv"
         old = pd.read_csv(f) if f.exists() else pd.DataFrame()

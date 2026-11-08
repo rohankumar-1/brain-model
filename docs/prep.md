@@ -120,6 +120,46 @@ broke 5, and dcm2niix found no gantry tilt in any study (the released DICOMs app
 lack the posterior fossa in the data itself (cerebellum ~30 ml under both readers): RSNA seems to ship only the main
 axial series. Decision: keep the SimpleITK reader and RSNA as is; QC (below) keeps the unusable scans out of training.
 
+### Native-geometry CT copy ("ngeo", 2026-11-07)
+
+`brain/prep/ngeo.py` (geometry) and `brain/prep/ngeo_run.py` (driver, index) add one zip per CT case next to its image
+zip, `<case>.ngeo.zip`, without touching the 1 mm copy (contract: `runs/diagnostics/ngeo/CONTRACT.md`, section 2):
+`image` (S, 1, 512, 512) int16 HU (air clamp at -500 HU), native slices along the acquisition normal (inferior ->
+superior), 0.5 mm in-plane in the acquisition's own axes (rows anterior -> posterior, columns right -> left), centred on
+the brain, over the 1 mm grid's 160 mm slab widened to the brain's extent; `brain` from the 1 mm mask. Label masks with
+a native source (BHSD / HemSeg / INSTANCE / Seg-CQ500 `ICH`, AISD / ISLES-24 `lesion`, ISLES-24 `lvo`, `cow`) are
+resampled in-plane to `<case>.<mask>.ngeo.zip`; template-grid labels (`bleedpl`, `synthseg`, RSNA-ICA `cow` /
+`aneurysm`) map from the 1 mm grid. Attributes: `affine_scanner`, `affine_template` (voxel -> template mm),
+`tpl_slice_origin` (exact per-slice template position), `slice_mm`, `thick_mm`, `synth_thick`, `assembly`
+(`n_dup_removed`, `n_gaps`, `uneven`, `tilt_deg`, `deshear`), and QC (`qc_brain_tissue`, `qc_corr_1mm`, ...).
+
+- DICOM series (RSNA ICH, HemSeg images, CQ500, RSNA-ICA CTA) are assembled by position: largest series, majority
+  orientation, sorted along the normal, repeats (< 0.2 mm apart) dropped. Thick series (>= 2.5 mm) keep their slices
+  (copied, never interpolated through-plane); thin series are box-averaged into ~5 mm slabs; RSNA's mixed 2.5 mm /
+  5 mm protocol puts the 2.5 mm block onto the 5 mm grid by box averaging; missing slices are interpolated and counted.
+  Each output slice is resampled in-plane only (one 2D affine per source slice), which removes gantry-tilt shear.
+- CQ500: the real 5 mm plain series of a thin study (`python -m brain.datasets.download_cq500 --thick`, pool
+  `cq500_dicom_thick`) when present, else slabs from the thin series. Seg-CQ500's ICH masks are mapped onto the cq500
+  grid through physical space when Seg-CQ500's CT agrees with the cq500 image there (correlation >= 0.8);
+  `volumes_ngeo.csv` keeps the cq500 row of the 48 colliding volume ids.
+- RSNA ICH / HemSeg were read into the 1 mm store by SimpleITK's series reader, whose frame is not the scanner's for
+  tilted or unevenly spaced series (below). `ngeo.sitk_store_origins` recovers every file's slice origin in that frame
+  from the stored `native_*` attributes, so the 1 mm labels map back exactly per slice; `affine_template` is their
+  least-squares affine (`tpl_resid_mm` > 3 flags the uneven series, where `tpl_slice_origin` is the exact map).
+
+    STORE=$SCRATCH/brain-model/data/processed/slices_zarr
+    DATASETS=rsna_ich,rsna_ica_cta,cq500,hemseg SHARD_N=48 sbatch --export=ALL --array=0-47%16 jobs/ngeo_prep.sbatch
+    DATASETS=bhsd,aisd,instance,seg_cq500,isles24_ncct,isles24_cta,pedi_cranial_ct,synthrad_ct,synthrad_cbct \
+      SHARD_N=2 sbatch --export=ALL --array=0-1 jobs/ngeo_prep.sbatch
+    python -m brain.prep.ngeo_run index --root $STORE       # volumes_ngeo.csv
+    python -m brain.prep.ngeo_qc --out-root $STORE --n 50   # overlays + qc.csv (spot checks)
+
+RSNA ICH geometry (header survey of 600 studies, 2026-11-07): 56% are gantry-tilted (median 19 degrees; the
+orientation is tilted and the table steps along scanner z, so the stack is sheared by exactly the tilt angle;
+GantryDetectorTilt is stripped, which is why dcm2niix reported no tilt); 19% are unevenly spaced, almost all the
+2.5 mm posterior-fossa + 5 mm protocol (SimpleITK spaced those evenly, so their 1 mm volumes are stretched below and
+compressed above; the affine registration absorbs part of it); 1.5% repeat slice positions; one series per study.
+
 ### Known issue: OASIS-1 Analyze orientation (fixed 2026-10-21)
 
 OASIS-1 ships Analyze 7.5 files with `orient = 2` (sagittal). ITK ignores that byte and read the 128-slice left-right
