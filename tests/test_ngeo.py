@@ -259,6 +259,7 @@ def test_rsna_slice_labels_map_onto_ngeo_tokens():
     bits[2] = 1                                                     # slice 2: hemorrhage_any
     for it in items:
         it["affine"] = aff
+        it["slice_origin"] = aff[:3, 3][None] + torch.arange(6, dtype=torch.float64)[:, None] * aff[:3, 0][None]
     items[0]["slab"] = (np.array([1.0, 0.0, 0.0], np.float32), 0.0, 5.0, (5 * np.arange(6) + 1).astype(np.float32), bits)
     items[1]["slab"] = None
     b = collate_ngeo(items)
@@ -380,3 +381,36 @@ def test_bank_augmentation_stays_in_plane():
     b = prepare(raw, cfg, CPU, NGEO_PATCH, train=True)
     other = torch.cat([b["x"][:, :, :2], b["x"][:, :, 3:]], 2)
     assert torch.allclose(other, torch.full_like(other, -1024.0), atol=1e-3) and (b["x"][:, :, 2] > 0).any()
+
+
+def test_per_slice_origins_override_the_fitted_affine():
+    """Unevenly spaced series (prep tpl_resid_mm > 3): token positions and slice-label probes follow the exact
+    per-slice template origins (tpl_slice_origin), not the least-squares affine."""
+    aff = torch.zeros(1, 4, 4, dtype=torch.float64)
+    aff[0, 0, 2], aff[0, 1, 1], aff[0, 2, 0], aff[0, 3, 3] = 0.5, 0.5, 5.0, 1.0
+    z = torch.tensor([0.0, 2.5, 5.0, 10.0, 15.0, 20.0], dtype=torch.float64)          # 2.5 mm then 5 mm slices
+    so = torch.zeros(1, 6, 3, dtype=torch.float64)
+    so[0, :, 2] = z
+    c = ngeo.token_centres_mm(aff, (6, 64, 64), NGEO_PATCH, so)                      # (1, 6 * 4, 3)
+    assert torch.allclose(c[0].view(6, 4, 3)[:, 0, 2], (z + 0.5).float())
+    lin = ngeo.token_centres_mm(aff, (6, 64, 64), NGEO_PATCH)
+    assert not torch.allclose(lin, c)
+    p = ngeo.to_template_index(aff, torch.tensor([[[1.4, 0.0, 0.0]]], dtype=torch.float64), so)
+    assert torch.allclose(p[0, 0], torch.tensor([0.0, 0.0, 2.5 + 0.4 * 5.0], dtype=torch.float64))
+
+
+def test_untrusted_scans_keep_scan_labels_only():
+    """QC flags: frame_mismatch / frame_assumed / brain_off scans lose brain- and template-derived labels (bleedpl,
+    @brain) but keep classification labels; AISD frame_mismatch is exempt."""
+    from brain.multitask.data import drop_untrusted_labels, untrusted_ngeo
+
+    ngi = pd.DataFrame({"volume_id": ["a", "b", "c", "d"], "dataset": ["rsna_ich", "aisd", "rsna_ich", "bhsd"],
+                        "qc_flags": ["frame_mismatch,tpl_nonlinear", "frame_mismatch", "tpl_nonlinear", np.nan]})
+    bad = untrusted_ngeo(ngi)
+    assert bad == {"a"}
+    lab = pd.DataFrame({"volume_id": ["a", "a", "a", "a", "c"],
+                        "task": ["hemorrhage_any", "hemorrhage_segmentation", "brain_mask", "hemorrhage_segmentation",
+                                 "hemorrhage_segmentation"],
+                        "ref": ["", "rsna_ich/x.bleedpl.zip|1|2", "@brain", "bhsd/x.ICH.zip|1", "rsna_ich/y.bleedpl.zip|1|2"]})
+    kept = drop_untrusted_labels(lab, bad)
+    assert kept["ref"].tolist() == ["", "bhsd/x.ICH.zip|1", "rsna_ich/y.bleedpl.zip|1|2"]

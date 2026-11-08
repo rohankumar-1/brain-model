@@ -26,8 +26,11 @@ data:
   exclude_datasets: [rsna_ica]    # RSNA-ICA out of training for now (user, 2026-11-01)
   ngeo:
     enabled: true
+    root: null                    # ngeo zips + volumes_ngeo.csv; null = data.store_root (the full run)
     index_name: volumes_ngeo.csv  # store root; volume_id, path, S, slice_mm, thick_mm, synth_thick, qc flags
-    require: []                   # boolean QC columns of volumes_ngeo.csv a scan must pass (names TBD by the prep)
+    require: []                   # boolean columns of volumes_ngeo.csv a scan must pass
+    drop_flags: []                # qc_flags that drop a scan entirely
+    untrusted_flags: [frame_mismatch, frame_assumed, brain_off]   # keep image + scan labels, drop brain / mapped masks / slice labels (AISD frame_mismatch exempt)
     pad_multiple: 4               # batch slice count: the longest scan rounded up to this
     max_slices: null              # cap (consecutive window) for very thin thick-series; null = whole scan
   fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet

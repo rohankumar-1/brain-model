@@ -101,7 +101,15 @@ class MultitaskDataset(Dataset):
                     volumes["volume_id"], volumes["image_path"].map(lambda q: ngeo_path(q).as_posix())))))
                 ngi = ngi[ngi["path"].notna()]
             labels = labels[labels["volume_id"].isin(set(ngi["volume_id"]))]
+            # scans whose 1 mm-derived maps (brain mask, template-mapped masks, slice-label positions) are unusable
+            self._ngeo_untrusted = untrusted_ngeo(ngi, self.ngeo)
+            labels = drop_untrusted_labels(labels, self._ngeo_untrusted)
+            self.ngeo_root = Path(self.ngeo.get("root") or store_root)
             self._ngeo_rel = dict(zip(ngi["volume_id"].astype(str), ngi["path"].astype(str)))
+            # mask name (lower case) -> ngeo mask path per scan, from the index's mask_<name>_ngeo columns
+            cols = {c[5:-5]: c for c in ngi.columns if c.startswith("mask_") and c.endswith("_ngeo")}
+            self._ngeo_masks = {str(v): {m: str(r[c]) for m, c in cols.items() if isinstance(r[c], str) and r[c]}
+                                for v, r in zip(ngi["volume_id"], ngi.to_dict("records"))}
             self._grid_cache: dict[int, dict] = {}
         self.slices, self.boxes = slices, boxes
         self.meta_drop, self.skull_strip, self.mask_p = float(meta_drop), float(skull_strip), float(mask_p)
@@ -325,7 +333,7 @@ class MultitaskDataset(Dataset):
                 if t in self.lesion_tasks and not ref.startswith("@"):
                     path, ids, *ign = ref.split("|")
                     if path not in mask_cache:
-                        mask_cache[path] = self._mask(path)
+                        mask_cache[path] = self._mask(path, vid)
                     if mask_cache[path] is None:
                         continue
                     lm = np.isin(mask_cache[path], [int(i) for i in (ids + ("," + ign[0] if ign else "")).split(",")])
@@ -366,7 +374,7 @@ class MultitaskDataset(Dataset):
                 else:
                     path, ids, *ign = ref.split("|")         # ``path|ids[|ignored ids]``
                     if path not in mask_cache:
-                        mask_cache[path] = self._mask(path)
+                        mask_cache[path] = self._mask(path, vid)
                     if mask_cache[path] is None:             # no copy of this mask on the ngeo grid
                         continue
                     m = np.isin(mask_cache[path], [int(i) for i in ids.split(",")]).astype(np.uint8)
@@ -427,28 +435,35 @@ class MultitaskDataset(Dataset):
             "boxes": self.boxes.get(vid) if self.boxes else None,
         }
         if geo is not None:
-            out.update(affine=torch.from_numpy(geo["affine"]), spacing=torch.from_numpy(geo["spacing"]))
+            out.update(affine=torch.from_numpy(geo["affine"]), spacing=torch.from_numpy(geo["spacing"]),
+                       slice_origin=torch.from_numpy(np.ascontiguousarray(geo["slice_origin"])))
+            if vid in self._ngeo_untrusted:              # slice-label positions go through the template map
+                out["slab"] = None
             out = self._cut_slices(out, rng)
         return out
 
     # -- native geometry ---------------------------------------------------------------------------------
-    def _mask(self, path: str):
-        """A label mask by its 1 mm store path (``folder/<case>.<mask>.zip``): that zip, or in ngeo mode its
-        ``.ngeo.zip`` copy (None when the prep wrote none)."""
+    def _mask(self, path: str, vid: str | None = None):
+        """A label mask by its 1 mm store path (``folder/<case>.<mask>.zip``): that zip, or in ngeo mode the scan's
+        ngeo copy of that mask (the index's ``mask_<mask>_ngeo``, which also places Seg-CQ500 masks on the cq500
+        grid; else ``<case>.<mask>.ngeo.zip`` beside the 1 mm path) under ``data.ngeo.root``; None when there is none."""
         from brain.prep import store
 
         if self.ngeo is None:
             return store.read_image(self.store_root / path, "mask")
         from brain.data.ngeo import ngeo_path, read_ngeo_mask
 
-        return read_ngeo_mask(ngeo_path(self.store_root / path))
+        name = Path(path).name
+        mask = name.split(".")[-2].lower() if name.count(".") >= 2 else ""
+        rel = (self._ngeo_masks.get(vid) or {}).get(mask) if vid is not None else None
+        return read_ngeo_mask(self.ngeo_root / rel if rel else ngeo_path(self.ngeo_root / path))
 
     def _read_ngeo(self, idx: int, vid: str, need_brain: bool) -> tuple[dict, dict]:
         """``image`` / ``brain`` arrays on the ngeo grid and the geometry (template-index affine, spacing)."""
-        from brain.data.ngeo import grid_attrs, read_ngeo, template_index_affine
+        from brain.data.ngeo import grid_attrs, read_ngeo, template_index_affine, template_index_slices
 
         rel = Path(self._ngeo_rel[vid])
-        d = read_ngeo(rel if rel.is_absolute() else self.store_root / rel, brain=need_brain)
+        d = read_ngeo(rel if rel.is_absolute() else self.ngeo_root / rel, brain=need_brain)
         grid = d["grid"]
         if grid is None:                  # the 1 mm image zip's grid (cached per worker)
             if idx not in self._grid_cache:
@@ -460,7 +475,13 @@ class MultitaskDataset(Dataset):
             arrays["brain"] = d["brain"]
         elif need_brain:
             raise KeyError(f"{rel}: no brain mask on the ngeo grid")
-        return arrays, {"affine": template_index_affine(d["affine_template"], grid), "spacing": d["spacing"]}
+        aff = template_index_affine(d["affine_template"], grid)
+        s_n = d["image"].shape[0]
+        if d["slice_origin"] is not None and len(d["slice_origin"]) == s_n:     # exact per-slice positions
+            so = template_index_slices(d["slice_origin"], grid)
+        else:
+            so = aff[:3, 3][None] + np.arange(s_n)[:, None] * aff[:3, 0][None]
+        return arrays, {"affine": aff, "spacing": d["spacing"], "slice_origin": so}
 
     def _cut_slices(self, out: dict, rng: np.random.Generator) -> dict:
         """At most ``ngeo.max_slices`` consecutive slices (training: a random window, else the centre); the affine
@@ -477,18 +498,72 @@ class MultitaskDataset(Dataset):
                 out[k] = out[k][:, s0:s0 + n].contiguous()
         shift = torch.eye(4, dtype=out["affine"].dtype)
         shift[0, 3] = s0
-        out["affine"] = out["affine"] @ shift          # slice labels map through it, so they stay valid
+        out["affine"] = out["affine"] @ shift
+        if out.get("slice_origin") is not None:
+            out["slice_origin"] = out["slice_origin"][s0:s0 + n].contiguous()          # slice labels map through it, so they stay valid
         return out
 
 
 def ngeo_index_rows(ngeo_index: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     """``volumes_ngeo.csv`` rows to use: one per volume_id (the prep keeps the cq500 copy of the CQ500 / seg_cq500
-    collision; a repeat here keeps the first), rows failing any boolean column in ``require`` (QC flags) dropped."""
+    collision; a repeat here keeps the first), rows failing any boolean column in ``require`` dropped, and rows with
+    a ``qc_flags`` entry in ``drop_flags`` dropped entirely."""
     d = ngeo_index.drop_duplicates("volume_id").copy()
     for col in (cfg or {}).get("require") or ():
         d = d[d[col].astype(str).str.lower().isin(["true", "1", "1.0"])]
+    drop = set((cfg or {}).get("drop_flags") or ())
+    if drop and "qc_flags" in d:
+        d = d[~d["qc_flags"].map(lambda f: bool(drop & qc_flag_set(f)))]
     d["volume_id"] = d["volume_id"].astype(str)
     return d
+
+
+# prep QC flags (brain.prep.ngeo_run.QC_RULES) after which the scan's 1 mm-derived maps on the ngeo grid (brain mask,
+# template-mapped label masks, RSNA slice-label positions) are not trusted: the image and its scan-level labels stay
+UNTRUSTED_FLAGS = ("frame_mismatch", "frame_assumed", "brain_off")
+# per dataset, flags known to be false positives (AISD: its CT disagrees with the 1 mm copy's intensity scale only)
+FLAG_EXEMPT = {"aisd": ("frame_mismatch",)}
+# masks the prep maps from the 1 mm template grid (the others are resampled from a native source)
+TEMPLATE_MASKS = ("bleedpl", "synthseg", "aneurysm")
+
+
+def qc_flag_set(flags) -> set:
+    return {f for f in str(flags).split(",") if f and f != "nan"} if isinstance(flags, str) else set()
+
+
+def untrusted_ngeo(ngi: pd.DataFrame, cfg: dict | None = None) -> set:
+    """volume ids whose ngeo copy carries a flag in ``data.ngeo.untrusted_flags`` (default ``UNTRUSTED_FLAGS``),
+    minus the per-dataset exemptions (``FLAG_EXEMPT``, or ``data.ngeo.flag_exempt``)."""
+    if "qc_flags" not in ngi:
+        return set()
+    bad = set((cfg or {}).get("untrusted_flags") or UNTRUSTED_FLAGS)
+    exempt = {k: set(v) for k, v in ((cfg or {}).get("flag_exempt") or FLAG_EXEMPT).items()}
+    ds = ngi["dataset"].astype(str) if "dataset" in ngi else pd.Series("", index=ngi.index)
+    out = set()
+    for vid, flags, d in zip(ngi["volume_id"].astype(str), ngi["qc_flags"], ds):
+        if (qc_flag_set(flags) & bad) - exempt.get(d, set()):
+            out.add(vid)
+    return out
+
+
+def template_mask(ref: str) -> bool:
+    """Whether a label ref (``path|ids...``) names a mask the prep maps from the 1 mm grid (``TEMPLATE_MASKS``, and
+    RSNA-ICA's ``cow``)."""
+    path = ref.split("|")[0]
+    name = Path(path).name
+    mask = name.split(".")[-2].lower() if name.count(".") >= 2 else ""
+    return mask in TEMPLATE_MASKS or (mask == "cow" and path.startswith("rsna_ica"))
+
+
+def drop_untrusted_labels(labels: pd.DataFrame, untrusted: set) -> pd.DataFrame:
+    """On untrusted ngeo scans, label rows that need the 1 mm-derived brain mask (``@brain``, ``@hu:...:brain``,
+    live targets) or a template-mapped mask go; scan-level labels (classification / regression) stay."""
+    if not untrusted:
+        return labels
+    ref = labels["ref"].fillna("").astype(str)
+    needs = ref.eq("@brain") | ref.str.startswith("@live:") | (ref.str.startswith("@hu:") & ref.str.endswith(":brain")) \
+        | ref.map(lambda r: not r.startswith("@") and r != "" and template_mask(r))
+    return labels[~(labels["volume_id"].astype(str).isin(untrusted) & needs)]
 
 
 def ngeo_volumes(volumes: pd.DataFrame, ngi: pd.DataFrame) -> pd.DataFrame:
@@ -571,6 +646,7 @@ def collate_ngeo(batch: list[dict], pad_multiple: int = 4) -> dict:
     out = collate(padded)
     out.update(slice_keep=torch.stack([b["slice_keep"] for b in padded]),
                affine=torch.stack([b["affine"].float() for b in padded]),
+               slice_origin=torch.stack([b["slice_origin"].double() for b in padded]),
                spacing=torch.stack([b["spacing"].float() for b in padded]))
     return out
 
@@ -675,7 +751,8 @@ def token_probes(device, b: int, shape_zyx, patch_xyz, flip: torch.Tensor | None
 
 
 def slab_labels(batch: dict, device, shape_zyx, patch_xyz, flip: torch.Tensor | None,
-                theta: torch.Tensor | None, to_store: torch.Tensor | None = None) -> torch.Tensor | None:
+                theta: torch.Tensor | None, to_store: torch.Tensor | None = None,
+                slice_origin: torch.Tensor | None = None) -> torch.Tensor | None:
     """Per row, slice-label subtype (``SLAB_TASKS``) and encoder token: (B, 6, N) int16, -1 unlabelled, 0 a token in
     slices without that finding, r >= 1 in its r-th run of consecutive positive slices. Each token's probes
     (``token_probes``) go to the slice axis (``s = g . zyx + c``); a probe takes the nearest slice within half the
@@ -691,8 +768,9 @@ def slab_labels(batch: dict, device, shape_zyx, patch_xyz, flip: torch.Tensor | 
         px, py, pz = (int(v) for v in patch_xyz)
         src, n_tok, n_probe = token_probes(device, has.shape[0], shape_zyx, patch_xyz, flip, theta,
                                            half_zyx=(pz / 2 - 0.05, py / 2 - 0.5, px / 2 - 0.5))
-        a = to_store.to(device).float()
-        src = (torch.einsum("bij,bmj->bmi", a[:, :3, :3], src) + a[:, :3, 3].unsqueeze(1)).flip(-1)   # z, y, x
+        from brain.data.ngeo import to_template_index
+
+        src = to_template_index(to_store.to(device), src, slice_origin).float().flip(-1)          # z, y, x
     s = (src * batch["slab_g"].to(device).unsqueeze(1)).sum(-1) + batch["slab_c"].to(device).unsqueeze(1)
     pos, bits = batch["slab_s"].to(device), batch["slab_bits"].to(device).long()
     L = pos.shape[1]
@@ -1178,7 +1256,8 @@ def prepare_ngeo(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_uns
     real = batch["slice_keep"].to(device)[:, : s_n // pz * pz].view(b, s_n // pz, pz).all(-1)    # (B, S/pz)
     keep = foreground_tokens(raw, mod, patch_xyz, gate_cfg(cfg)) \
         & real[:, :, None, None].expand(b, s_n // pz, r_n // py, c_n // px).reshape(b, -1)
-    slab = slab_labels(batch, device, raw.shape[2:], patch_xyz, flip, theta, to_store=aff)
+    so = batch["slice_origin"].to(device) if "slice_origin" in batch else None
+    slab = slab_labels(batch, device, raw.shape[2:], patch_xyz, flip, theta, to_store=aff, slice_origin=so)
     if slab is not None:
         slab = torch.cat([slab, torch.full((b, len(TOKEN_MIL_TASKS) - len(SLAB_TASKS), slab.shape[2]), -1,
                                            dtype=slab.dtype, device=device)], 1)
@@ -1197,7 +1276,7 @@ def prepare_ngeo(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_uns
         x = appearance(raw, mod, {**app, "window": window}, protect=live_rows, sharp=sharp_rows)
     else:
         x = raw if bank else encoder_window(raw, mod, in_chans)
-    coords = token_centres_mm(aff, raw.shape[2:], patch_xyz)
+    coords = token_centres_mm(aff, raw.shape[2:], patch_xyz, so)
     stride = tuple(int(v) for v in ((m.get("ngeo") or {}).get("seg_stride") or (1, 4, 4)))
     return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
             "seg": seg, "seg_pair": batch["seg_pair"].to(device),
@@ -1308,7 +1387,9 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
     if ngeo_on:            # native-geometry CT (data.ngeo): the scans volumes_ngeo.csv lists, same label rows
         from functools import partial
 
-        ngi = ngeo_index_rows(pd.read_csv(store / ng.get("index_name", "volumes_ngeo.csv"), low_memory=False), ng)
+        ng = {**ng, "root": str(resolve(ng["root"])) if ng.get("root") else str(store)}   # ngeo zips + their index
+        ngi = ngeo_index_rows(pd.read_csv(Path(ng["root"]) / ng.get("index_name", "volumes_ngeo.csv"),
+                                          low_memory=False), ng)
         labels = labels[labels["volume_id"].astype(str).isin(set(ngi["volume_id"]))]
         volumes = ngeo_volumes(volumes, ngi) if "path" in ngi else volumes
         ngeo_kw = {"ngeo": ng, "ngeo_index": ngi}
@@ -1477,5 +1558,6 @@ class SyntheticNgeo(SyntheticMultitask):
         aff = torch.eye(4, dtype=torch.float64)
         aff[:3, :3] = m
         aff[:3, 3] = torch.tensor(self.centre, dtype=torch.float64) - m @ ctr
-        item.update(image=img.to(torch.int16), modality=0, affine=aff, spacing=sp, meta=0, seq=0)
+        so = aff[:3, 3][None] + torch.arange(s_n, dtype=torch.float64)[:, None] * aff[:3, 0][None]
+        item.update(image=img.to(torch.int16), modality=0, affine=aff, spacing=sp, meta=0, seq=0, slice_origin=so)
         return item

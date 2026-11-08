@@ -141,6 +141,14 @@ listed in `volumes_ngeo.csv` under the 1 mm rows' `volume_id`, so the label tabl
   `MultitaskDataset(ngeo_index=...)` keeps the scans the index lists, reads image / brain / masks from the ngeo
   copies, skips live targets and masks without an ngeo copy; each sample carries `affine` (voxel (s, r, c) ->
   template index) and `spacing`. The CQ500 / seg_cq500 duplicate id resolves to the ngeo copy's folder.
+- As built by the prep (`brain/prep/ngeo.py`, docs/prep.md "Native-geometry CT copy"): `data.ngeo.root` holds the
+  ngeo zips and `volumes_ngeo.csv` (default: the store root). Token positions use the exact per-slice template
+  origins (`tpl_slice_origin`) when present, so unevenly spaced RSNA series (`tpl_resid_mm` > 3, flag
+  `tpl_nonlinear`, where the fitted `affine_template` is off by 10-20 mm) are placed and slice-labelled correctly.
+  Masks are found through the index's `mask_<name>_ngeo` columns (Seg-CQ500 masks live on the cq500 grid);
+  `bleedpl` label 2 is ignored as on the 1 mm grid (labels v12 refs `path|1|2`). Scans flagged `frame_mismatch`,
+  `frame_assumed` or `brain_off` (`data.ngeo.untrusted_flags`; AISD `frame_mismatch` exempt) keep the image and
+  scan-level labels but lose brain-mask, template-mapped-mask and slice labels; `drop_flags` removes scans outright.
 - Batches: `collate_ngeo` pads to the batch's longest scan (rounded to `pad_multiple`) with air, and marks the real
   slices (`slice_keep`). The stem and decoder run per slice / per scan, so a scan's outputs do not depend on the
   padding; the transformer packs kept tokens, so padded tokens cost nothing there. `max_slices` caps very long scans.

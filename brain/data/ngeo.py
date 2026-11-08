@@ -74,6 +74,9 @@ def read_ngeo(path: str | Path, brain: bool = True) -> dict:
             "spacing": np.asarray(sp, dtype=np.float32).reshape(3),
             "affine_template": np.asarray(attrs["affine_template"], dtype=np.float64).reshape(4, 4),
             "grid": {k: attrs[k] for k in GRID_KEYS} if all(attrs.get(k) is not None for k in GRID_KEYS) else None,
+            # exact per-slice template position (physical mm) of pixel (0, 0) (prep: tpl_slice_origin); None if absent
+            "slice_origin": (np.asarray(attrs["tpl_slice_origin"], dtype=np.float64).reshape(-1, 3)
+                             if attrs.get("tpl_slice_origin") is not None else None),
             "attrs": attrs}
 
 
@@ -111,7 +114,31 @@ def template_index_affine(affine_template: np.ndarray, grid: dict) -> np.ndarray
     return np.linalg.inv(g) @ np.asarray(affine_template, dtype=np.float64).reshape(4, 4)
 
 
-def token_centres_mm(aff: torch.Tensor, shape_zyx, patch_xyz) -> torch.Tensor:
+def template_index_slices(slice_origin: np.ndarray, grid: dict) -> np.ndarray:
+    """(S, 3) per-slice template physical origins (``tpl_slice_origin``) -> 1 mm template voxel index (x, y, z)."""
+    d = np.asarray(grid["grid_direction"], dtype=np.float64).reshape(3, 3)
+    sp = np.asarray(grid["grid_spacing"], dtype=np.float64).reshape(3)
+    o = np.asarray(grid["grid_origin"], dtype=np.float64).reshape(3)
+    return (np.linalg.inv(d @ np.diag(sp)) @ (np.asarray(slice_origin, dtype=np.float64) - o).T).T
+
+
+def to_template_index(aff: torch.Tensor, src: torch.Tensor, slice_origin: torch.Tensor | None = None) -> torch.Tensor:
+    """Points ``src`` (B, M, 3) in ngeo voxel (s, r, c) -> template index (x, y, z) (B, M, 3). With ``slice_origin``
+    (B, S, 3), each point uses its nearest slice's exact origin plus the in-plane steps (columns 1, 2 of ``aff``) and
+    the mean slice step for its fractional slice offset: exact on the slices for unevenly spaced series, where the
+    least-squares ``aff`` is not (prep ``tpl_resid_mm`` > 3)."""
+    a = aff.double()
+    src = src.double()
+    if slice_origin is None:
+        return torch.einsum("bij,bmj->bmi", a[:, :3, :3], src) + a[:, :3, 3].unsqueeze(1)
+    o = slice_origin.double()
+    s0 = src[..., 0].round().clamp(0, o.shape[1] - 1)
+    base = o.gather(1, s0.long().unsqueeze(-1).expand(-1, -1, 3))
+    rest = torch.stack([src[..., 0] - s0, src[..., 1], src[..., 2]], -1)
+    return base + torch.einsum("bij,bmj->bmi", a[:, :3, :3], rest)
+
+
+def token_centres_mm(aff: torch.Tensor, shape_zyx, patch_xyz, slice_origin: torch.Tensor | None = None) -> torch.Tensor:
     """(B, N, 3) template mm (x, y, z) of each token centre, in the encoder's (s, r, c) token order. ``aff`` (B, 4, 4)
     or (4, 4): ngeo voxel (s, r, c) -> template index (``template_index_affine``); ``shape_zyx`` the (padded) grid
     (S, R, C); ``patch_xyz`` the token's extent in input voxels (col, row, slice)."""
@@ -123,8 +150,8 @@ def token_centres_mm(aff: torch.Tensor, shape_zyx, patch_xyz) -> torch.Tensor:
     r = torch.arange(r_n // py, device=dev, dtype=torch.float64) * py + (py - 1) / 2
     c = torch.arange(c_n // px, device=dev, dtype=torch.float64) * px + (px - 1) / 2
     src = torch.stack(torch.meshgrid(s, r, c, indexing="ij"), -1).reshape(-1, 3)        # (N, 3) s, r, c
-    a = a.double()
-    idx = torch.einsum("bij,nj->bni", a[:, :3, :3], src) + a[:, :3, 3].unsqueeze(1)
+    so = None if slice_origin is None else (slice_origin if slice_origin.dim() == 3 else slice_origin.unsqueeze(0))
+    idx = to_template_index(a, src.unsqueeze(0).expand(a.shape[0], -1, -1), so)
     return (idx + 0.5).float()                                                           # voxel centre i -> i + 0.5 mm
 
 
@@ -187,6 +214,10 @@ def pad_slices(item: dict, n: int) -> dict:
         return torch.cat([t, torch.full(shape, value, dtype=t.dtype)], axis)
 
     out["image"] = pad(item["image"], AIR_HU, 0)
+    if item.get("slice_origin") is not None:            # padded slices continue at the mean slice step
+        so = item["slice_origin"]
+        k = torch.arange(1, n - s + 1, dtype=so.dtype).unsqueeze(-1)
+        out["slice_origin"] = torch.cat([so, so[-1:] + k * item["affine"][:3, 0].to(so.dtype)], 0)
     for k in ("seg", "dense"):
         if k in item and item[k] is not None and item[k].dim() == 4:
             out[k] = pad(item[k], 0, 1)
