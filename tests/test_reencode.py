@@ -46,7 +46,7 @@ def _old_zip(path: Path, vol16: np.ndarray, kind: str, with_brain: bool = True) 
 def test_encode_decode_ct_clamps_air_and_rounds_to_hu():
     v = _ct(np.random.default_rng(0)).astype(np.float32)
     q, attrs = store.encode_image(v, "ct_hu")
-    assert q.dtype == np.int16 and attrs == {"dtype_rev": 7, "scale": 1.0}
+    assert q.dtype == np.int16 and attrs == {"dtype_rev": 7, "scale": 1.0, "air_below": -500.0}
     d = store.decode(q, {"kind": "ct_hu", **attrs})
     air = v < -500
     assert np.all(d[air] == -1024)
@@ -190,3 +190,27 @@ def test_write_case_writes_format7_and_resume_check(tmp_path):
     old = _old_zip(tmp_path / "old.zip", vol, "mri_z")
     assert not store.is_current(old, "image", shape, np.int16)       # a format-6 zip is not current for prep
     assert np.abs(store.read_image(p).astype(np.float64) - vol.astype(np.float32)).max() <= 0.0005 + 1e-6
+
+
+def test_ct_without_air_clamp_keeps_air_range():
+    v = _ct(np.random.default_rng(8)).astype(np.float32)
+    q, attrs = store.encode_image(v, "ct_hu", air_below=None)
+    assert "air_below" not in attrs
+    assert np.abs(store.decode(q, {"kind": "ct_hu", **attrs}) - v).max() <= 0.5
+
+
+@pytest.mark.parametrize("kind", ["ct_hu", "mri_z"])
+def test_float16_decode_matches_float32_then_cast(kind):
+    rng = np.random.default_rng(9)
+    v = (_ct(rng) if kind == "ct_hu" else _mri(rng)).astype(np.float32)
+    q, attrs = store.encode_image(v, kind)
+    a = {"kind": kind, **attrs}
+    f16 = store.decode(q, a, np.float16)
+    assert f16.dtype == np.float16 and np.array_equal(f16, store.decode(q, a).astype(np.float16))
+
+
+def test_reencode_without_air_clamp(tmp_path):
+    v = _ct(np.random.default_rng(10))
+    p = _old_zip(tmp_path / "case.zip", v, "ct_hu")
+    assert reencode.reencode_zip(p, air_below=None)["n_air_clamped"] == 0
+    assert np.abs(store.read_image(p) - v.astype(np.float32)).max() <= 0.5

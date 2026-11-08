@@ -31,21 +31,25 @@ CT_AIR_BELOW, CT_AIR = -500.0, -1024  # HU below CT_AIR_BELOW are stored as CT_A
 STEP = {"ct_hu": 1.0, "mri_z": 0.001}  # stored integer unit per kind (HU; z)
 
 
-def encode_image(vol: np.ndarray, kind: str, step: float | None = None) -> tuple[np.ndarray, dict]:
-    """Native-unit float volume -> (int16 array, attrs to add). CT: air clamp, then 1 HU steps; MRI: ``step`` z."""
+def encode_image(vol: np.ndarray, kind: str, step: float | None = None,
+                 air_below: float | None = CT_AIR_BELOW) -> tuple[np.ndarray, dict]:
+    """Native-unit float volume -> (int16 array, attrs to add). CT: values below ``air_below`` HU set to -1024 (None:
+    no clamp), then 1 HU steps; MRI: ``step`` z (0.001)."""
     if kind not in IMAGE_KINDS:
         raise ValueError(f"unknown image kind {kind!r}")
     step = float(STEP[kind] if step is None else step)
     v = np.asarray(vol, dtype=np.float32)
     if not np.isfinite(v).all():
         raise ValueError("image has non-finite values")
-    if kind == "ct_hu":
-        v = np.where(v < CT_AIR_BELOW, np.float32(CT_AIR), v)
+    extra = {}
+    if kind == "ct_hu" and air_below is not None:
+        v = np.where(v < np.float32(air_below), np.float32(CT_AIR), v)
+        extra["air_below"] = float(air_below)
     q = np.rint(v / np.float32(step)) if step != 1.0 else np.rint(v)
     lo, hi = float(q.min(initial=0)), float(q.max(initial=0))
     if lo < -32768 or hi > 32767:
         raise ValueError(f"image range [{lo * step}, {hi * step}] does not fit int16 at step {step}")
-    return q.astype(np.int16), {"dtype_rev": DTYPE_REV, "scale": step}
+    return q.astype(np.int16), {"dtype_rev": DTYPE_REV, "scale": step, **extra}
 
 
 def is_image(attrs: dict) -> bool:
@@ -59,13 +63,23 @@ def decode(arr: np.ndarray, attrs: dict, dtype=np.float32) -> np.ndarray:
     if not is_image(attrs):
         return arr
     if np.issubdtype(arr.dtype, np.integer):
-        out = arr.astype(np.float32)
         scale = float(attrs.get("scale", 1.0))
         inv = round(1.0 / scale) if scale > 0 else 0
-        if scale != 1.0 and inv and abs(inv * scale - 1.0) < 1e-9:
-            out /= np.float32(inv)        # integer divisor: correctly rounded, so -6000 -> -6.0 exactly (MRI floor)
-        elif scale != 1.0:
-            out *= np.float32(scale)
+        div = inv if scale != 1.0 and inv and abs(inv * scale - 1.0) < 1e-9 else None
+        if np.dtype(dtype) == np.float16:          # the training loaders: torch's half cast is ~5x numpy's
+            import torch
+
+            t = torch.from_numpy(np.ascontiguousarray(arr))
+            if scale == 1.0:
+                return t.half().numpy()                # integers: exact below 2048 HU, round-to-even above (as before)
+            t = t.float()
+            return (t.div_(div) if div else t.mul_(scale)).half().numpy()
+        if div:                                         # integer divisor: correctly rounded, so -6000 -> -6.0 exactly
+            out = np.divide(arr, np.float32(div), dtype=np.float32)
+        else:
+            out = arr.astype(np.float32)
+            if scale != 1.0:
+                out *= np.float32(scale)
         return out if np.dtype(dtype) == np.float32 else out.astype(dtype)
     return arr.astype(dtype, copy=False)
 

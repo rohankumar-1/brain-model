@@ -41,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO_ROOT / "runs" / "diagnostics" / "reencode"
 QUOTA = Path.home() / "orcd" / ".quota"
 MRI_EXTRA = 1e-6          # float32 decode rounding on top of step / 2 (|z| <= 20)
-CHANGED_ATTRS = {"format_version", "dtype_rev", "scale"}
+CHANGED_ATTRS = {"format_version", "dtype_rev", "scale", "air_below"}
 
 
 class Stop(Exception):
@@ -118,7 +118,8 @@ def needs_reencode(path: Path) -> bool:
 
 
 def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None = None,
-                 mri_step: float | None = None, ct_step: float | None = None, keep_tmp: bool = False) -> dict:
+                 mri_step: float | None = None, ct_step: float | None = None, keep_tmp: bool = False,
+                 air_below: float | None = store.CT_AIR_BELOW) -> dict:
     """Re-encode one image zip in place. Returns the manifest record (status ok / skip; raises on failure, leaving
     the original untouched)."""
     path = Path(path)
@@ -140,7 +141,7 @@ def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None
         zs.close()
     t1 = time.perf_counter()
     step = {"ct_hu": ct_step, "mri_z": mri_step}[kind]
-    enc, extra = store.encode_image(old, kind, step)
+    enc, extra = store.encode_image(old, kind, step, air_below)
     new_attrs = {**attrs, "format_version": store.FORMAT_VERSION, **extra}
 
     tmp = tmp_for(path)
@@ -156,7 +157,7 @@ def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None
                     continue
                 zout.writestr(info, zin.read(info))                # same name, bytes, date and (stored) method
         t3 = time.perf_counter()
-        rec = verify(path, tmp, old, attrs, chunks, shape, kind, extra["scale"])
+        rec = verify(path, tmp, old, attrs, chunks, shape, kind, extra["scale"], extra.get("air_below"))
         os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))           # keep the original permissions (DUA data: 600)
         new_bytes = tmp.stat().st_size
         rec = {"status": "ok", "kind": kind, "old_bytes": old_bytes, "new_bytes": new_bytes, "old_dtype": old_dtype,
@@ -173,7 +174,8 @@ def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None
     return rec | {"t_s": round(time.perf_counter() - t0, 3)}
 
 
-def verify(path: Path, tmp: Path, old: np.ndarray, attrs: dict, chunks, shape, kind: str, scale: float) -> dict:
+def verify(path: Path, tmp: Path, old: np.ndarray, attrs: dict, chunks, shape, kind: str, scale: float,
+           air_below: float | None = None) -> dict:
     """Checks of the temp zip against the original (see the module docstring). Raises AssertionError on a mismatch."""
     with zipfile.ZipFile(path) as zo, zipfile.ZipFile(tmp) as zn:
         names_o, names_n = set(zo.namelist()), set(zn.namelist())
@@ -205,7 +207,7 @@ def verify(path: Path, tmp: Path, old: np.ndarray, attrs: dict, chunks, shape, k
     ref = old.astype(np.float32)
     err = np.abs(dec - ref)
     if kind == "ct_hu":
-        air = ref < store.CT_AIR_BELOW
+        air = ref < air_below if air_below is not None else np.zeros(ref.shape, bool)
         assert np.all(dec[air] == store.CT_AIR), "air clamp"
         err[air] = 0
         mx = float(err.max(initial=0.0))
@@ -251,6 +253,8 @@ def main(argv=None) -> int:
     ap.add_argument("--clevel", type=int, default=None, help=f"Blosc zstd level (default {store.CLEVEL})")
     ap.add_argument("--ct-step", type=float, default=None, help="CT HU per integer step (default 1; 0.125 keeps "
                     "every float16 HU >= 128 exact at ~+1.5 MB per CT)")
+    ap.add_argument("--ct-air-below", default=str(store.CT_AIR_BELOW),
+                    help="CT HU below this are stored as -1024 ('none': no clamp, keeps the asinh windows' air range)")
     ap.add_argument("--mri-step", type=float, default=None, help="MRI z per integer step (default 0.001)")
     ap.add_argument("--min-free-gb", type=float, default=200.0, help="statvfs free space margin")
     ap.add_argument("--quota-margin-gb", type=float, default=15.0, help="scratch quota headroom (cache + own bytes)")
@@ -260,6 +264,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     i, n = (int(x) for x in a.shard.split("/"))
+    air_below = None if str(a.ct_air_below).lower() == "none" else float(a.ct_air_below)
     rels = load_paths(a.root, a.index, a.paths)[i::n]
     a.out.mkdir(parents=True, exist_ok=True)
     manifest = a.out / f"manifest_{i}of{n}.jsonl"
@@ -295,7 +300,7 @@ def main(argv=None) -> int:
                 log({"path": rel, "status": "missing"})
                 continue
             try:
-                rec = reencode_zip(path, guard, a.clevel, a.mri_step, a.ct_step, keep_tmp=a.dry_run)
+                rec = reencode_zip(path, guard, a.clevel, a.mri_step, a.ct_step, keep_tmp=a.dry_run, air_below=air_below)
             except Stop as e:
                 log({"path": rel, "status": "stopped", "reason": str(e)})
                 print(f"[reencode] STOP: {e}", flush=True)
