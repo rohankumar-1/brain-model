@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from brain.downstream.metrics import HEADLINE
+from brain.downstream.metrics import EXTRA_READOUTS, HEADLINE
 from brain.downstream.records import RESULTS_ROOT, record_dir
 
 DB_PATH = RESULTS_ROOT / "experiments.sqlite"
@@ -158,6 +158,7 @@ def report(con: sqlite3.Connection, *, task: str | None = None, all_heads: bool 
         cols = ["model_id", "task", "head", "view", "metric", "val", "test", "ci_lo", "ci_hi", "n_test",
                 "pretrain_overlap", "finished_utc"]
         return t[cols].sort_values(["task", "model_id", "head"]).reset_index(drop=True)
+    t = t[~t["head"].astype(str).isin(EXTRA_READOUTS)]       # extra readouts (attentive probe): --all-heads only
     # one head per (model, task): best on val among the heads that have a val score. Never on test: before
     # 2026-10-25 a task whose val split had no positives fell back to the best test score ("test!"), an optimistic
     # pick (CQ500 EDH: 2 test positives); such a task now gets picked_on "none" and should be cross-validated.

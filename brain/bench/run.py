@@ -67,7 +67,10 @@ def plan(model, ref, b, *, tasks: list[str] | None, full: bool) -> tuple[list[st
 
 
 def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submit: bool = False,
-        dependency: str | None = None, extra: list[str] | None = None, jobs: int = SUITE_JOBS) -> None:
+        dependency: str | None = None, extra: list[str] | None = None, jobs: int = SUITE_JOBS,
+        attn_probe: str | None = None) -> None:
+    """``attn_probe`` (``on`` / ``only``): the attentive-probe readout on the transfer tasks only (run_suite
+    ``--attn-probe``); segmentation, token probes, heads and few-shot are left out of such a run."""
     from brain.bench.spec import load
     from brain.downstream.models import resolve_model
     from brain.downstream.suite import command
@@ -77,6 +80,9 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
     ref_model = resolve_model(model)
     ref = resolve_model(b.reference)
     todo, other = plan(ref_model, ref, b, tasks=tasks, full=full)
+    if attn_probe:
+        todo, other = [t for t in todo if t in b.tasks], {}
+        extra += ["--attn-probe", attn_probe]
     skipped = [t for t in b.tasks if t not in b.tasks_for(ref_model)]   # other modality, or labels seen in training
     print(f"[bench] {ref_model.name} = {ref_model.model_id} ({ref_model.training_class}): {len(todo)} suite entries"
           + (f" + {', '.join(other)}" if other else "")
@@ -86,7 +92,7 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
         n_jobs, jobs = jobs, []
         # the jobs run this checkout's code (jobs/_env.sh defaults to the main checkout)
         base_env = {**os.environ, "BRAIN_REPO": str(REPO_ROOT)}
-        no_tok = " ".join(no_token_tasks(b, todo))
+        no_tok = " ".join(no_token_tasks(b, todo) if attn_probe != "only" else [])
         for part in shards(todo, n_jobs, {*b.seg_tasks, "probe3d"}):
             hours = min(24, 2 + len(part) // 3 + (3 * sum(t in b.seg_tasks for t in part)) + 2 * ("probe3d" in part))
             env = {**base_env, "CKPT": model, "SUITE_TASKS": " ".join(part), "EXTRA": " ".join(extra or []),
@@ -106,7 +112,7 @@ def run(model: str, *, tasks: list[str] | None = None, full: bool = False, submi
               f"--model {model}")
         return
     failed = []
-    no_tok = set(no_token_tasks(b, todo))
+    no_tok = set(no_token_tasks(b, todo)) if attn_probe != "only" else set()
     for t in todo:
         cmd = command(t, model, list(extra or []) + (["--no-token-heads"] if t in no_tok else []))
         print("[bench] " + " ".join(cmd[2:]), flush=True)

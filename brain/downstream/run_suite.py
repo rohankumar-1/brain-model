@@ -12,6 +12,11 @@ head (``mlp``); a linear probe on the 8 octant means of the token grid (``spatia
 (``multi``: CT brain / subdural / bone, MRI tissue / wide); registry models normalise intensities themselves.
 Segmentation tasks run in ``brain.downstream.seg3d``.
 
+``--attn-probe on`` adds the attentive probe (``attn_probe``: learned queries cross-attending over the foreground
+tokens, then linear; ``brain.downstream.heads.AttentiveProbe``), ``--attn-probe only`` runs it alone. It is an EXTRA
+readout (``metrics.EXTRA_READOUTS``): recorded under its own head name, never pinned, never a fallback readout and
+never in a headline score (configs/bench/readouts_v3.yaml does not list it).
+
 Results land in runs/downstream/<task>/<ckpt_tag>/<run>/ (predictions, config) and as one experiment record per
 head (``brain.downstream.records``; query with ``python -m brain.downstream.db report``). Caches live under
 runs/downstream/_cache/v<store format> so a re-prepped store never reuses stale embeddings.
@@ -29,10 +34,11 @@ import numpy as np
 from brain.common.paths import REPO_ROOT as ROOT
 from brain.prep.store import FORMAT_VERSION
 from brain.downstream.embeddings import load_or_build_embeddings, resolve_path
-from brain.downstream.heads import MLPProbe, make_logreg, make_ridge
+from brain.downstream.heads import MLPProbe, make_attn_probe, make_logreg, make_ridge
 from brain.downstream.token_probes import make_token_heads, token_grid_zyx
 from brain.downstream import cv
-from brain.downstream.metrics import HEADLINE, binary_metrics, bootstrap_ci, multilabel_metrics, regression_metrics
+from brain.downstream.metrics import EXTRA_READOUTS, HEADLINE, binary_metrics, bootstrap_ci, multilabel_metrics, \
+    regression_metrics
 from brain.downstream.results import eval_banner, finalize_run, new_run_dir, print_head_table, save_head_result
 from brain.downstream.tasks import SEGMENTATION_TASKS, TASK_NAMES, TaskBundle, load_task, load_volumes, split_xy, \
     DEFAULT_VOLUMES
@@ -57,6 +63,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--token-heads", action=argparse.BooleanOptionalAction, default=True,
                    help="also fit the 3D-conv probe (tok_conv) on the token grid (brain.bench run turns it off for "
                         "tasks whose pinned readout is another head)")
+    p.add_argument("--attn-probe", choices=["off", "on", "only"], default="off",
+                   help="the attentive-probe readout (attn_probe), an extra never pinned or in the headline: on = also "
+                        "fit it, only = fit it alone (no linear / mlp / spatial / tok_conv)")
+    p.add_argument("--attn-queries", type=int, default=1, help="attentive probe: learned queries")
+    p.add_argument("--attn-hidden", type=int, default=0,
+                   help="attentive probe: 0 = linear output, else the token probes' MLP with this hidden width")
     p.add_argument("--cv", choices=["auto", "on", "off"], default="auto",
                    help="repeated subject-grouped k-fold CV instead of the fixed split (auto: small held-out tasks)")
     p.add_argument("--cv-folds", type=int, default=5)
@@ -183,6 +195,19 @@ def pooled_heads(task: TaskBundle, seed: int) -> list:
                                               regression=task.task_type == "regression")]
 
 
+def attn_mode(mode: str, emb: dict) -> str | None:
+    """``--attn-probe`` for this embedding: None (off), ``on`` or ``only``. It needs a token sequence with positions
+    (a global-only encoder's single vector has nothing to attend over)."""
+    if mode == "off":
+        return None
+    if emb.get("z") is None or np.asarray(emb["mus"].shape)[1] < 2:
+        if mode == "only":
+            raise SystemExit("--attn-probe only: this model has no token sequence (positions) to attend over")
+        print("[readout] attn_probe skipped: no token sequence with positions")
+        return None
+    return mode
+
+
 def headline(task: TaskBundle, m: dict) -> str:
     key = HEADLINE[task.task_type]
     lo, hi = m[f"{key}_ci"]
@@ -215,15 +240,27 @@ def main() -> None:
     print(f"[embed] {emb['mus'].shape} ({emb['representation']}) cache={emb['cache_path']}")
     multilabel = task.task_type == "multilabel"
     grid = token_grid_zyx(emb["mus"].shape[1])
-    vec, pooled_kind = pooled_embedding(emb)
-    p_emb = one_token(emb, vec)
-    o_emb = one_token(emb, octant_embedding(emb, grid)) if grid is not None else None
-    token_heads = args.token_heads and grid is not None
-    print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp"
-          + ("; spatial (octants)" if o_emb is not None else "") + ("; tok_conv" if token_heads else ""))
+    attn = attn_mode(args.attn_probe, emb)
+    only = attn == "only"
+    vec, pooled_kind = pooled_embedding(emb) if not only else (None, "mean")
+    p_emb = one_token(emb, vec) if not only else None
+    o_emb = one_token(emb, octant_embedding(emb, grid)) if grid is not None and not only else None
+    token_heads = args.token_heads and grid is not None and not only
+    if only:
+        print("[readout] attn_probe only (extra readout: not pinned, not in the headline)")
+    else:
+        print(f"[readout] pooled ({pooled_kind}) {vec.shape}: linear + mlp"
+              + ("; spatial (octants)" if o_emb is not None else "") + ("; tok_conv" if token_heads else "")
+              + ("; attn_probe (extra readout: not pinned, not in the headline)" if attn else ""))
 
     def head_sets_for(task_s: TaskBundle, packs_s: dict) -> list[tuple[str, dict, list]]:
         """(view, packs, fresh heads) for one split: the token packs ``packs_s`` and the pooled / octant views."""
+        n_out = len(task_s.label_names) if multilabel else 1
+        probe = [("tokens", packs_s, [make_attn_probe(emb["mus"].shape[-1], n_out, multilabel, args.seed,
+                                                       task_s.task_type == "regression", args.attn_queries,
+                                                       args.attn_hidden)])] if attn else []
+        if only:
+            return probe
         sets = [(pooled_kind, ensure_val(split_xy(task_s, p_emb), seed=args.seed), pooled_heads(task_s, args.seed))]
         if o_emb is not None:
             sets.append(("octants", ensure_val(split_xy(task_s, o_emb), seed=args.seed),
@@ -232,7 +269,7 @@ def main() -> None:
             sets.append(("tokens", packs_s, make_token_heads(
                 emb["mus"].shape[-1], len(task_s.label_names) if multilabel else 1, multilabel, args.seed,
                 task_s.task_type == "regression")))
-        return sets
+        return sets + probe
 
     overlap = model.pretrain_overlap(task.volume_ids, volumes)
     cv_on = cv.use_cv(args.cv, task, volumes, overlap, args.cv_max_subjects)
@@ -321,6 +358,8 @@ def main() -> None:
               "time_utc": datetime.now(timezone.utc).isoformat(),
               "started_utc": started, "volumes_csv": str(args.volumes_csv or DEFAULT_VOLUMES),
               "token_heads": token_heads, "msd_target": args.msd_target if task.name == "msd" else None,
+              "attn_probe": attn or "off",
+              "extra_readouts": [h for h in head_names if h in EXTRA_READOUTS],
               "pretrain_overlap": overlap,
               "embed_cache": str(emb["cache_path"]), **split_sizes, "cv": cv_info}
     print(f"[ok] summary → {finalize_run(run_dir, config, all_metrics)}")

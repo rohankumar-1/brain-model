@@ -36,6 +36,10 @@ reference: BQ-R10
 labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v2
 # the pinned readout per task (written by python -m brain.bench pin)
 readouts: configs/bench/readouts_v3.yaml   # written by python -m brain.bench pin once the v3 re-scoring is in
+# extra readouts (brain.downstream.metrics.EXTRA_READOUTS): the attentive probe ``attn_probe`` (learned query
+# cross-attending over the foreground tokens, then linear; run_suite / brain.bench run --attn-probe on|only) is
+# recorded under its own head name and shown in its own section of the model card; it is never pinned, never a
+# model's fallback readout and never part of a headline score (brain.eval.report.suite_heads marks it not ``encoder``)
 
 # transfer: frozen-encoder downstream tasks (brain.downstream.suite) that can tell models apart. Chosen 2026-10-25 from
 #   the results of v3, runs 2-6 and the joint pilot, in skill units (brain.eval.skill): 95% interval narrower than 0.65,

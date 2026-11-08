@@ -27,6 +27,9 @@ def main() -> None:
     r.add_argument("--dependency", default=None, help="Slurm dependency for --submit, e.g. afterok:123")
     r.add_argument("--jobs", type=int, default=4, help="parallel GPU jobs for --submit (1: the tasks run in turn, "
                    "for big token caches such as ADNI's)")
+    r.add_argument("--attn-probe", choices=["on", "only"], default=None,
+                   help="the attentive-probe readout (an extra: never pinned, never in the headline) on the transfer "
+                        "tasks (with --tasks: those): on = with the other readouts, only = alone")
     cd = sub.add_parser("card", help="every recorded number for one model -> runs/bench/cards/<name>.md")
     cd.add_argument("--model", required=True)
     cp = sub.add_parser("compare", help="every model x every task in the task's metric -> runs/bench/compare_v*.md")
@@ -57,7 +60,8 @@ def main() -> None:
     elif a.cmd == "run":
         from brain.bench.run import run
 
-        run(a.model, tasks=a.tasks, full=a.full, submit=a.submit, dependency=a.dependency, extra=extra, jobs=a.jobs)
+        run(a.model, tasks=a.tasks, full=a.full, submit=a.submit, dependency=a.dependency, extra=extra, jobs=a.jobs,
+            attn_probe=a.attn_probe)
     elif a.cmd == "compare":
         from brain.bench.compare import compare
 

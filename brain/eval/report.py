@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from brain.common.paths import REPO_ROOT
+from brain.downstream.metrics import EXTRA_READOUTS
 from brain.eval.skill import skill
 
 # readouts of a BrainQuery model's own outputs, not its encoder (records from before 2026-10-27 still have them)
@@ -164,7 +165,15 @@ def suite_heads() -> pd.DataFrame:
     t["pred"] = [_reroot((json.loads(a).get(h) or json.loads(a).get(f"{h}_volumes")) if isinstance(a, str) and a
                          else None) for a, h in zip(t.artifacts, t["head"])]
     t["cv"] = [cv_protocol(p) for p in t.protocol]
-    t["encoder"] = ~t["head"].astype(str).str.startswith(SUPERVISED_READOUTS)
+    return mark_readouts(t)
+
+
+def mark_readouts(t: pd.DataFrame) -> pd.DataFrame:
+    """``encoder``: a frozen-encoder readout the benchmark may pin, fall back to and score; ``extra``: an extra readout
+    (``metrics.EXTRA_READOUTS``, the attentive probe), reported beside the benchmark only, so never ``encoder``."""
+    h = t["head"].astype(str)
+    t["extra"] = h.isin(EXTRA_READOUTS)
+    t["encoder"] = ~h.str.startswith(SUPERVISED_READOUTS) & ~t["extra"]
     return t
 
 
