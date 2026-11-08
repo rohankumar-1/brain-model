@@ -539,6 +539,18 @@ class BrainQuery(nn.Module):
         return out
 
 
+class MixedForward(nn.Module):
+    """One forward over several sub-batches of the same model (a mixed batch: 1 mm and native-geometry samples, each
+    through its own stem, the shared transformer and heads), so DDP sees a single forward per backward."""
+
+    def __init__(self, model: BrainQuery):
+        super().__init__()
+        self.model = model
+
+    def forward(self, parts: list) -> list:
+        return [self.model(*args, **kw) for args, kw in parts]
+
+
 class TokenTraining:
     """What a trainer does for task tokens, shared by the multitask and joint trainers.
 

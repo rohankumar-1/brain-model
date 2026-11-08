@@ -173,6 +173,61 @@ def bank_input(bank: WindowBank | None, x: torch.Tensor, modality: torch.Tensor 
     return bank(x, modality)
 
 
+def tissue_channel(bank: WindowBank) -> int:
+    """The bank channel closest to the canonical window ((0, 1) in tissue units: CT brain 40 / 40 HU, MRI tissue
+    0.5 / 1.5 z; the first row when ``per_modality``): the channel a 1-channel encoder's weights move to."""
+    c, w = (t.detach().float()[0] for t in bank.centres_widths())
+    return int(((c - 0.0).abs() + (w - 1.0).abs()).argmin())
+
+
+def widen_input(w: torch.Tensor, k: int, ch: int) -> torch.Tensor:
+    """A 1-input-channel convolution weight (out, 1, ...) -> (out, k, ...) with the old kernel in channel ``ch`` and
+    zeros elsewhere: on the bank's output it computes exactly what the old one did on the canonical window."""
+    out = w.new_zeros((w.shape[0], int(k), *w.shape[2:]))
+    out[:, ch] = w[:, 0]
+    return out
+
+
+def warm_start_state(state: dict, target: dict, ch: int) -> dict:
+    """A state dict of a model without a bank (1 input channel: the canonical window) for a model with one: every
+    5-d convolution weight whose input is 1 channel in ``state`` and K > 1 in ``target`` (otherwise equal shape: the
+    patch embedding / conv stem input, the segmentation decoder's image pyramid) is widened (``widen_input``); the
+    bank's own parameters are absent (they start at their init, whose ``ch`` window is the canonical one)."""
+    out = {}
+    for key, v in state.items():
+        t = target.get(key)
+        if (torch.is_tensor(v) and t is not None and v.ndim == 5 and t.ndim == 5 and v.shape[1] == 1 and t.shape[1] > 1
+                and v.shape[0] == t.shape[0] and v.shape[2:] == t.shape[2:]):
+            v = widen_input(v, t.shape[1], ch)
+        out[key] = v
+    return out
+
+
+def add_bank(encoder: nn.Module, model_cfg: dict) -> nn.Module:
+    """Give a trained 1-channel encoder (no bank) the configured bank, its input convolution widened to K channels so
+    that the encoder's outputs are unchanged at the bank's init (``warm_start_state`` on its own weights)."""
+    bank = build_bank(model_cfg)
+    if bank is None or bank_of(encoder) is not None:
+        return encoder
+    if int(getattr(encoder, "in_chans", 1)) != 1:
+        raise ValueError("window_bank warm start: the encoder must take 1 input channel (the canonical window)")
+    ch = tissue_channel(bank)
+    pe = encoder.patch_embed
+    conv = pe.stem[0][0] if hasattr(pe, "stem") else pe.proj
+    new = nn.Conv3d(bank.k, conv.out_channels, conv.kernel_size, stride=conv.stride, padding=conv.padding,
+                    bias=conv.bias is not None).to(conv.weight.device)
+    with torch.no_grad():
+        new.weight.copy_(widen_input(conv.weight, bank.k, ch))
+        if conv.bias is not None:
+            new.bias.copy_(conv.bias)
+    if hasattr(pe, "stem"):
+        pe.stem[0][0] = new
+    else:
+        pe.proj = new
+    encoder.in_chans = bank.k
+    return attach_bank(encoder, model_cfg)
+
+
 def is_bank_param(name: str) -> bool:
     """Whether a parameter name belongs to a window bank (its own optimizer group, ``lr_mult``, no weight decay)."""
     return ".window_bank." in f".{name}"
@@ -186,5 +241,5 @@ def describe(bank: WindowBank | None) -> str:
     return f"k={bank.k} per_modality={bank.per_modality} ct={fmt(nw['ct'])} mri={fmt(nw['mri'])}"
 
 
-__all__ = ["WindowBank", "bank_cfg", "encoder_in_chans", "calibrate", "init_windows", "build_bank", "attach_bank",
+__all__ = ["WindowBank", "tissue_channel", "widen_input", "warm_start_state", "add_bank", "bank_cfg", "encoder_in_chans", "calibrate", "init_windows", "build_bank", "attach_bank",
            "bank_of", "bank_input", "is_bank_param", "describe", "CALIBRATION", "INITS"]

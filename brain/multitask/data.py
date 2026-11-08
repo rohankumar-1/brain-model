@@ -87,23 +87,31 @@ class MultitaskDataset(Dataset):
         targets (measured on the 1 mm grid) are skipped. ``ngeo.max_slices``: longer scans are cut to that many
         consecutive slices (training: a random window; evaluation: the centre)."""
         self.store_root = Path(store_root)
-        self.ngeo = None
+        self.ngeo, self.ngeo_mixed = None, False
         if ngeo_index is not None:
-            if study:
-                raise ValueError("study-level input (tasks.study) is not supported on native-geometry scans")
             self.ngeo = dict(ngeo or {})
+            # mixed (data.ngeo.mixed, the full-suite arm): every labelled scan stays; CT scans with a trusted ngeo copy
+            # are read at native geometry unless a sample needs what that grid lacks (_ngeo_ok), the rest at 1 mm
+            self.ngeo_mixed = bool(self.ngeo.get("mixed"))
+            if study and not self.ngeo_mixed:
+                raise ValueError("study-level input (tasks.study) is not supported on native-geometry scans")
             ngi = ngeo_index_rows(ngeo_index, self.ngeo)
-            volumes = ngeo_volumes(volumes, ngi)
+            if not self.ngeo_mixed:
+                volumes = ngeo_volumes(volumes, ngi)
             if "path" not in ngi:                      # no path column: the copy next to the 1 mm image
                 from brain.data.ngeo import ngeo_path
 
                 ngi = ngi.assign(path=ngi["volume_id"].map(dict(zip(
                     volumes["volume_id"], volumes["image_path"].map(lambda q: ngeo_path(q).as_posix())))))
                 ngi = ngi[ngi["path"].notna()]
-            labels = labels[labels["volume_id"].isin(set(ngi["volume_id"]))]
             # scans whose 1 mm-derived maps (brain mask, template-mapped masks, slice-label positions) are unusable
             self._ngeo_untrusted = untrusted_ngeo(ngi, self.ngeo)
-            labels = drop_untrusted_labels(labels, self._ngeo_untrusted)
+            if self.ngeo_mixed:                       # those are read from the 1 mm store, every label kept
+                ngi = ngi[~ngi["volume_id"].isin(self._ngeo_untrusted)]
+                self._ngeo_untrusted = set()
+            else:
+                labels = labels[labels["volume_id"].isin(set(ngi["volume_id"]))]
+                labels = drop_untrusted_labels(labels, self._ngeo_untrusted)
             self.ngeo_root = Path(self.ngeo.get("root") or store_root)
             self._ngeo_rel = dict(zip(ngi["volume_id"].astype(str), ngi["path"].astype(str)))
             # mask name (lower case) -> ngeo mask path per scan, from the index's mask_<name>_ngeo columns
@@ -286,7 +294,10 @@ class MultitaskDataset(Dataset):
                                   for _, _, r in drawn)
         rel = Path(self.paths[idx])
         geo = None
-        if self.ngeo is not None:
+        use_ngeo = self.ngeo is not None and vid in self._ngeo_rel
+        if use_ngeo and self.ngeo_mixed:     # mixed: the 1 mm copy when this sample needs what ngeo cannot do
+            use_ngeo = self._ngeo_ok(vid, drawn, masked)
+        if use_ngeo:
             arrays, geo = self._read_ngeo(idx, vid, need_brain)
         else:
             # float16 native units, as the format-6 store held them (batches, augmentation and grid_sample stay half)
@@ -333,7 +344,7 @@ class MultitaskDataset(Dataset):
                 if t in self.lesion_tasks and not ref.startswith("@"):
                     path, ids, *ign = ref.split("|")
                     if path not in mask_cache:
-                        mask_cache[path] = self._mask(path, vid)
+                        mask_cache[path] = self._mask(path, vid if geo is not None else None, geo is not None)
                     if mask_cache[path] is None:
                         continue
                     lm = np.isin(mask_cache[path], [int(i) for i in (ids + ("," + ign[0] if ign else "")).split(",")])
@@ -352,8 +363,10 @@ class MultitaskDataset(Dataset):
                 dense_raw.append(other)
                 dense_mod.append(0 if pmod.startswith("ct") else 1)
             if ref.startswith("@live:"):
-                if geo is not None:                          # live targets are measured on the 1 mm grid
-                    continue
+                if live is None and geo is not None:         # measured on the 1 mm copy (a scan-level target)
+                    one = store.read_many(rel if rel.is_absolute() else self.store_root / rel, ("image", "brain"),
+                                          dtype=np.float16)
+                    live = live_targets(store.squeeze_channel(one["image"]), one["brain"], mod)
                 if live is None:
                     live = live_targets(img, arrays["brain"], mod)
                 tid = self.reg[t].id
@@ -374,7 +387,7 @@ class MultitaskDataset(Dataset):
                 else:
                     path, ids, *ign = ref.split("|")         # ``path|ids[|ignored ids]``
                     if path not in mask_cache:
-                        mask_cache[path] = self._mask(path, vid)
+                        mask_cache[path] = self._mask(path, vid if geo is not None else None, geo is not None)
                     if mask_cache[path] is None:             # no copy of this mask on the ngeo grid
                         continue
                     m = np.isin(mask_cache[path], [int(i) for i in ids.split(",")]).astype(np.uint8)
@@ -443,13 +456,13 @@ class MultitaskDataset(Dataset):
         return out
 
     # -- native geometry ---------------------------------------------------------------------------------
-    def _mask(self, path: str, vid: str | None = None):
+    def _mask(self, path: str, vid: str | None = None, ngeo: bool | None = None):
         """A label mask by its 1 mm store path (``folder/<case>.<mask>.zip``): that zip, or in ngeo mode the scan's
         ngeo copy of that mask (the index's ``mask_<mask>_ngeo``, which also places Seg-CQ500 masks on the cq500
         grid; else ``<case>.<mask>.ngeo.zip`` beside the 1 mm path) under ``data.ngeo.root``; None when there is none."""
         from brain.prep import store
 
-        if self.ngeo is None:
+        if self.ngeo is None or ngeo is False:
             return store.read_image(self.store_root / path, "mask")
         from brain.data.ngeo import ngeo_path, read_ngeo_mask
 
@@ -457,6 +470,22 @@ class MultitaskDataset(Dataset):
         mask = name.split(".")[-2].lower() if name.count(".") >= 2 else ""
         rel = (self._ngeo_masks.get(vid) or {}).get(mask) if vid is not None else None
         return read_ngeo_mask(self.ngeo_root / rel if rel else ngeo_path(self.ngeo_root / path))
+
+    def _ngeo_ok(self, vid: str, drawn, masked: bool) -> bool:
+        """Mixed mode: whether this sample can be read at native geometry. Not when it is a masked (reconstruction)
+        sample, asks a dense (synthesis / reconstruction) slot, may get study partners, or asks a mask the prep did
+        not copy to the ngeo grid; those samples come from the 1 mm store, so every label keeps training."""
+        if masked or (self.study and self.partners.get(vid)):
+            return False
+        have = self._ngeo_masks.get(vid) or {}
+        for _, _, ref in drawn:
+            if ref == "@recon" or ref.startswith("@synth:"):
+                return False
+            if ref and not ref.startswith("@"):
+                name = Path(ref.split("|")[0]).name
+                if (name.split(".")[-2].lower() if name.count(".") >= 2 else "") not in have:
+                    return False
+        return True
 
     def _read_ngeo(self, idx: int, vid: str, need_brain: bool) -> tuple[dict, dict]:
         """``image`` / ``brain`` arrays on the ngeo grid and the geometry (template-index affine, spacing)."""
@@ -649,6 +678,24 @@ def collate_ngeo(batch: list[dict], pad_multiple: int = 4) -> dict:
                slice_origin=torch.stack([b["slice_origin"].double() for b in padded]),
                spacing=torch.stack([b["spacing"].float() for b in padded]))
     return out
+
+
+def collate_mixed(batch: list[dict], pad_multiple: int = 4) -> dict:
+    """A mixed batch (``data.ngeo.mixed``): the 1 mm samples (``collate``) and the native-geometry ones
+    (``collate_ngeo``) as two sub-batches, ``iso`` / ``ngeo`` (None when empty). The trainer prepares each and runs
+    both through the same model in one forward (each through its own stem, the same transformer and heads);
+    samples never interact (no study partners on ngeo rows), so this equals one packed batch."""
+    iso = [b for b in batch if "affine" not in b]
+    ngeo = [b for b in batch if "affine" in b]
+    return {"mixed": True, "iso": collate(iso) if iso else None,
+            "ngeo": collate_ngeo(ngeo, pad_multiple) if ngeo else None}
+
+
+def mixed_parts(raw: dict) -> list[dict]:
+    """The sub-batches of a raw batch: [iso, ngeo] (non-empty ones) for a mixed batch, else [raw]."""
+    if not raw.get("mixed"):
+        return [raw]
+    return [raw[k] for k in ("iso", "ngeo") if raw.get(k) is not None]
 
 
 def collate_study(batch: list[dict]) -> dict:
@@ -1364,11 +1411,13 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
     if synthetic and ngeo_on:
         from functools import partial
 
-        cf = partial(collate_ngeo, pad_multiple=int(ng.get("pad_multiple", 4)))
+        cf = partial(collate_mixed if ng.get("mixed") else collate_ngeo, pad_multiple=int(ng.get("pad_multiple", 4)))
         kw = dict(inplane=int(ng.get("synthetic_inplane", 64)), slices=tuple(ng.get("synthetic_slices", (5, 9))),
                   template_xyz=tuple((cfg["model"].get("ngeo") or {}).get("template_xyz") or d["volume_size_xyz"]))
-        ds = SyntheticNgeo(reg, n=32, seed=seed, tasks=train_ids, **kw)
-        val = DataLoader(SyntheticNgeo(reg, n=4, seed=999, tasks=train_ids, **kw), batch_size=2, collate_fn=cf)
+        make = (lambda **k: SyntheticMixed(reg, tuple(reversed(d["volume_size_xyz"])), **k)) if ng.get("mixed") \
+            else (lambda **k: SyntheticNgeo(reg, **k))
+        ds = make(n=32, seed=seed, tasks=train_ids, **kw)
+        val = DataLoader(make(n=4, seed=999, tasks=train_ids, **kw), batch_size=2, collate_fn=cf)
         return DataLoader(ds, batch_size=batch, shuffle=True, collate_fn=cf, drop_last=True), val, {}, len(ds)
     if synthetic:
         shape = tuple(reversed(d["volume_size_xyz"]))
@@ -1384,7 +1433,7 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
     labels = drop_datasets(labels, volumes, d.get("exclude_datasets"))
     labels = drop_volumes(labels, d.get("exclude_volumes"))
     ngeo_kw, cf = ngeo_setup(cfg, store)
-    if ngeo_kw:            # native-geometry CT (data.ngeo): the scans volumes_ngeo.csv lists, same label rows
+    if ngeo_kw and not ng.get("mixed"):   # native-geometry CT only (data.ngeo): the scans volumes_ngeo.csv lists
         ngi = ngeo_kw["ngeo_index"]
         labels = labels[labels["volume_id"].astype(str).isin(set(ngi["volume_id"]))]
         volumes = ngeo_volumes(volumes, ngi) if "path" in ngi else volumes
@@ -1447,8 +1496,9 @@ def ngeo_setup(cfg: dict | None, store) -> tuple[dict, object]:
     path = str(Path(ng["root"]) / ng.get("index_name", "volumes_ngeo.csv"))
     if path not in _NGEO_INDEX:
         _NGEO_INDEX[path] = pd.read_csv(path, low_memory=False)
+    fn = collate_mixed if ng.get("mixed") else collate_ngeo
     return ({"ngeo": ng, "ngeo_index": ngeo_index_rows(_NGEO_INDEX[path], ng)},
-            partial(collate_ngeo, pad_multiple=int(ng.get("pad_multiple", 4))))
+            partial(fn, pad_multiple=int(ng.get("pad_multiple", 4))))
 
 
 def input_patch(model, cfg: dict | None) -> tuple:
@@ -1583,3 +1633,20 @@ class SyntheticNgeo(SyntheticMultitask):
         so = aff[:3, 3][None] + torch.arange(s_n, dtype=torch.float64)[:, None] * aff[:3, 0][None]
         item.update(image=img.to(torch.int16), modality=0, affine=aff, spacing=sp, meta=0, seq=0, slice_origin=so)
         return item
+
+
+class SyntheticMixed(Dataset):
+    """Phantoms for a mixed (``data.ngeo.mixed``) run: even items 1 mm phantoms (``SyntheticMultitask``, MRI),
+    odd items native-geometry CT phantoms (``SyntheticNgeo``)."""
+
+    def __init__(self, reg: Registry, shape_zyx, n: int = 64, seed: int = 0, tasks: list[str] | None = None, **ngeo_kw):
+        self.iso = SyntheticMultitask(reg, shape_zyx, n=n, seed=seed, tasks=tasks)
+        self.ngeo = SyntheticNgeo(reg, n=n, seed=seed + 7, tasks=tasks, **ngeo_kw)
+        self.n = int(n)
+        self.df = self.iso.df
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __getitem__(self, idx: int) -> dict:
+        return self.iso[idx] if idx % 2 == 0 else self.ngeo[idx]

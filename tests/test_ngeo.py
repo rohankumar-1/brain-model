@@ -433,3 +433,25 @@ def test_eval_loader_reads_ngeo_for_an_ngeo_config(tmp_path):
     assert mdata.input_patch(model, cfg) == NGEO_PATCH and mdata.input_patch(model, {}) == tuple(model.backbone.patch_xyz)
     plain, _ = _loader(tmp_path, lab, vols, REG, {}, "hemorrhage_any", "train", use="train", workers=0)
     assert "affine" not in plain.dataset[0]
+
+
+def test_mixed_batches_train_both_geometries(tmp_path, monkeypatch):
+    """data.ngeo.mixed: 1 mm MRI and native-geometry CT samples share a batch (collate_mixed), go through one forward
+    (MixedForward: each through its own stem, shared transformer / heads), and both sub-batches get loss; evaluation
+    walks both parts. With the window bank on, as the full-suite arm."""
+    from brain.multitask.data import SyntheticMixed, collate_mixed, mixed_parts
+    from brain.train import engine
+
+    ds = SyntheticMixed(REG, (16, 32, 32), n=4, seed=0, inplane=64, slices=(4, 6), template_xyz=(32, 32, 16))
+    raw = collate_mixed([ds[i] for i in range(4)])
+    assert raw["iso"] is not None and raw["ngeo"] is not None and len(mixed_parts(raw)) == 2
+    assert int(raw["iso"]["modality"].sum()) == 2 and int(raw["ngeo"]["modality"].sum()) == 0
+    monkeypatch.setenv("BRAIN_PERSIST_SYNTHETIC", "1")
+    engine.run(["multitask", "--synthetic", "--max-steps", "2", "--log-every", "1", "--out-dir", str(tmp_path),
+                "--set", "model.window_bank={enabled: true, k: 4}",
+                "--set", "model.ngeo={enabled: true, stem: [8, 16], patch_xyz: [32, 32, 1], seg_stride: [1, 4, 4]}",
+                "--set", "data.ngeo={enabled: true, mixed: true, synthetic_inplane: 64, synthetic_slices: [4, 6]}",
+                "--set", "model.token_map={enabled: true, dim: 16}", "--set", "loss.token_weight=0.5",
+                "--set", "train.eval_every=2", "--set", "train.ckpt_every=2"])
+    ck = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert any(k.startswith("backbone.ngeo_embed.") for k in ck["multitask"])

@@ -393,6 +393,16 @@ def done_keys(out_root: Path) -> set[str]:
     return keys
 
 
+def manifest_name(tag: str, datasets: str, i: int, n: int) -> str:
+    """A manifest file per (dataset list, job, shard): arrays over different dataset lists with the same SHARD_N (or a
+    re-run) never share a file; ``build_index`` keeps the newest ok row per case across all of them."""
+    import hashlib
+
+    dsh = hashlib.sha1(",".join(sorted(d for d in datasets.split(",") if d)).encode()).hexdigest()[:8]
+    job = os.environ.get("SLURM_ARRAY_JOB_ID") or os.environ.get("SLURM_JOB_ID") or f"pid{os.getpid()}"
+    return f"ngeo_{tag}_{dsh}_{job}_{i}of{n}.jsonl"
+
+
 def cmd_build(a) -> None:
     store_root, out_root = Path(a.root), Path(a.out_root or a.root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -410,7 +420,7 @@ def cmd_build(a) -> None:
     ids = {d: set(g["case_id"]) for d, g in rows.groupby("dataset")}
     stage(set(rows["dataset"]), local, ids)
     spec = resolve(rows, local)
-    manifest = out_root / MANIFESTS / f"ngeo_{a.tag}_{i}of{n}.jsonl"
+    manifest = out_root / MANIFESTS / manifest_name(a.tag, a.datasets, i, n)
     todo = [r for r in rows.to_dict("records")]
     missing = [r for r in todo if f"{r['dataset']}:{r['case_id']}" not in spec]
     with manifest.open("a") as mf:

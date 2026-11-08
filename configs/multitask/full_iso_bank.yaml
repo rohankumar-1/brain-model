@@ -1,0 +1,114 @@
+# full_iso_bank (2026-11-08): R16's recipe (R14-F + 30k steps, labels v12, decontamination, subject balance, anchor-only
+#   groups, fusion, task tokens, per-slot decoder, SSL slots) with the shared learned window bank on, every scan from
+#   the 1 mm store. Pair: full_ngeo_bank (identical except CT geometry). Multitask trainer, as R16.
+#   Warm start from R14-F (no bank): the bank's tissue channel is the canonical window and R14-F's 1-channel
+#   patch-embed / decoder-pyramid kernels move into it (others zero), so step 0 answers exactly as R14-F
+#   (window_bank.warm_start_state; tests/test_bank_warm_start.py). New bank parameters reset the optimizer state.
+#   2 GPUs x 9 = global 18 (R16: 3 x 6). Re-warmed WSD (warmup 500, cooldown 6000) to step 145000: --reset-schedule.
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v12
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 10
+  balance_alpha: 0.5
+  subject_beta: 1.0
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets: [abide1, ixi, oasis1, oasis2, pixar, fomo_nki, fomo_hbn, rsna_ica]   # benchmark cohorts, BrainFMBench, RSNA-ICA
+  exclude_volumes: configs/multitask/train_exclude_r15.csv     # copies of benchmark scans, val/test twins, QC failures
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: runs/v4/scratch_s42/last.pt
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: false
+  fp32_residual: false
+  meta: {enabled: true, drop: 0.2}
+  task_tokens: {enabled: true, share: true, write_bias: 10.0, write_ramp_steps: 2000}
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+  fusion: {after_block: 8, heads: 6}     # study-level input: blocks 0-7 per scan, fused, 8-11 on the study
+  # shared learned window bank (brain.models.window_bank), warm-started from R14-F's 1-channel input: its tissue
+  # window is the canonical one (CT 40/40, MRI 0.5/1.5), the old patch-embed / decoder-pyramid kernels move there
+  window_bank: {enabled: true, k: 6, init: contract6, per_modality: false, lr_mult: 0.1, decoder_grad: false}
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac            # a token counts when >= 25% of its voxels are foreground (centre mode lost 1.2% of brain)
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  lesion_ignore: true
+  study: {p_multi: 0.5, max_scans: 3}   # half the scans with partners come with 1-2 co-registered sequences
+  group_weights: {synthesis: 0.5, radiology: 1.0, derived: 0.5}   # derived: 38.5% of task slots at 1.0 (audit 2026-11-03)
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf, wmh_grade,
+    aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca, aneurysm_acom, aneurysm_aca,
+    aneurysm_pcom, aneurysm_basilar_tip, aneurysm_posterior_other, aneurysm_location, seg_vessels]
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+    shear_deg: 10.0           # residual CT gantry tilt (rigid-registered RSNA keep theirs)
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+      sigma_hu: [2.0, 15.0]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+    ct_physical: {p: 0.5, offset_hu: 10.0, scale: 0.03}      # bank (native-unit) path: CT physical augs
+    kernel: {p: 0.3, sigma_vox: [0.3, 1.0], sharpen: 0.5, amount: [0.2, 1.0]}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
+  synth_contrast: {p: 0.1}
+  task_aware: true
+loss: {seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
+optim:
+  lr: 0.0003
+  enc_lr_mult: 1.0
+  layer_decay: 0.75
+  weight_decay: 0.05
+  warmup_steps: 500
+  clip_grad: 1.0
+  batch_size: 9                    # anchors per GPU on 2 GPUs: global 18 as R16 (fits a 40 GB A100, smoke)
+  schedule: wsd
+  decay_steps: 6000
+  betas: [0.9, 0.999]
+train: {max_steps: 145000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false}
+output: {out_dir: runs/multitask/full_iso_bank, resume_from: runs/multitask/r14f/last.pt}
