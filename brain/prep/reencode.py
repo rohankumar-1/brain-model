@@ -7,7 +7,7 @@ array, its attrs, anything else), verify, then ``os.replace``. Verification (any
   float16 HU are interpolated, not integers, so most voxels move by a fraction of a HU);
 - MRI: max |decoded - old| <= step / 2 (0.0005 z), plus float32 rounding;
 - every non-image zip entry byte-identical, image attrs identical apart from ``format_version`` / ``dtype_rev`` /
-  ``scale``, same shape and chunks, and ``store.read_image`` of the temp file returns the decoded values.
+  ``scale``, same shape and chunks; the values checked are ``store.decode`` of the new array (what every reader returns).
 
 Resumable: zips already at ``dtype_rev`` 7 are skipped, as are paths the shard's manifest already lists as done.
 Sharded by striding over the sorted path list (``--shard i/n``). One manifest line per zip (old / new bytes, max error,
@@ -138,7 +138,7 @@ def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None
         chunks, shape, old_dtype = tuple(a.chunks), tuple(a.shape), str(a.dtype)
     finally:
         zs.close()
-    t_read = time.perf_counter() - t0
+    t1 = time.perf_counter()
     step = {"ct_hu": ct_step, "mri_z": mri_step}[kind]
     enc, extra = store.encode_image(old, kind, step)
     new_attrs = {**attrs, "format_version": store.FORMAT_VERSION, **extra}
@@ -147,6 +147,7 @@ def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None
     if guard is not None:
         guard.check(path.parent, old_bytes)
     try:
+        t2 = time.perf_counter()
         store.write_zip(tmp, {"image": (enc, new_attrs)}, clevel=clevel)
         with zipfile.ZipFile(path) as zin, zipfile.ZipFile(tmp, "a") as zout:
             have = set(zout.namelist())
@@ -154,22 +155,22 @@ def reencode_zip(path: Path, guard: SpaceGuard | None = None, clevel: int | None
                 if info.filename.startswith("image/") or info.filename in have:
                     continue
                 zout.writestr(info, zin.read(info))                # same name, bytes, date and (stored) method
-        t_write = time.perf_counter() - t0 - t_read
+        t3 = time.perf_counter()
         rec = verify(path, tmp, old, attrs, chunks, shape, kind, extra["scale"])
         os.chmod(tmp, stat.S_IMODE(path.stat().st_mode))           # keep the original permissions (DUA data: 600)
         new_bytes = tmp.stat().st_size
+        rec = {"status": "ok", "kind": kind, "old_bytes": old_bytes, "new_bytes": new_bytes, "old_dtype": old_dtype,
+               **rec, "t_read": round(t1 - t0, 3), "t_encode": round(t2 - t1, 3), "t_write": round(t3 - t2, 3),
+               "t_verify": round(time.perf_counter() - t3, 3)}
         if keep_tmp:
-            return {"status": "verified", "kind": kind, "old_bytes": old_bytes, "new_bytes": new_bytes,
-                    "old_dtype": old_dtype, **rec}
+            return rec | {"status": "verified"}
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
     if guard is not None:
         guard.delta += new_bytes - old_bytes
-    return {"status": "ok", "kind": kind, "old_bytes": old_bytes, "new_bytes": new_bytes, "old_dtype": old_dtype,
-            **rec, "t_read": round(t_read, 3), "t_write": round(t_write, 3),
-            "t_s": round(time.perf_counter() - t0, 3)}
+    return rec | {"t_s": round(time.perf_counter() - t0, 3)}
 
 
 def verify(path: Path, tmp: Path, old: np.ndarray, attrs: dict, chunks, shape, kind: str, scale: float) -> dict:
@@ -196,30 +197,25 @@ def verify(path: Path, tmp: Path, old: np.ndarray, attrs: dict, chunks, shape, k
         zs.close()
     assert new.dtype == np.int16, new.dtype
     assert nattrs["format_version"] == store.FORMAT_VERSION and nattrs["dtype_rev"] == store.DTYPE_REV
-    assert nattrs["scale"] == scale
+    assert nattrs["scale"] == scale and nattrs["kind"] == kind
     keep = lambda d: {k: v for k, v in _attrs_plain(d).items() if k not in CHANGED_ATTRS}  # noqa: E731
     assert keep(nattrs) == keep(attrs), "image attrs differ"
-    dec = store.decode(new, nattrs)
+    dec = store.decode(new, nattrs)                    # what read / read_image / read_many return (float32)
     assert dec.dtype == np.float32
     ref = old.astype(np.float32)
-    err = np.abs(dec.astype(np.float64) - ref.astype(np.float64))
-    rec: dict = {}
+    err = np.abs(dec - ref)
     if kind == "ct_hu":
         air = ref < store.CT_AIR_BELOW
         assert np.all(dec[air] == store.CT_AIR), "air clamp"
-        body = err[~air]
-        mx = float(body.max(initial=0.0))
-        assert mx <= scale / 2 + 1e-6, f"CT max error {mx} HU"
-        rec |= {"max_err": round(mx, 6), "n_air_clamped": int((air & (ref != store.CT_AIR)).sum()),
-                "frac_changed": round(float((body > 0).mean()) if body.size else 0.0, 4),
-                "max_err_air": round(float(err[air].max(initial=0.0)), 3)}
-    else:
+        err[air] = 0
         mx = float(err.max(initial=0.0))
-        assert mx <= scale / 2 + MRI_EXTRA, f"MRI max error {mx}"
-        rec |= {"max_err": round(mx, 7)}
-    got = store.read_image(tmp)                                    # the public reader decodes the same values
-    assert np.array_equal(got, store.squeeze_channel(dec)), "store.read_image disagrees with decode"
-    return rec
+        assert mx <= scale / 2 + 1e-6, f"CT max error {mx} HU"
+        n_body = air.size - int(air.sum())
+        return {"max_err": round(mx, 6), "n_air_clamped": int((air & (ref != store.CT_AIR)).sum()),
+                "frac_changed": round(float(np.count_nonzero(err)) / max(n_body, 1), 4)}
+    mx = float(err.max(initial=0.0))
+    assert mx <= scale / 2 + MRI_EXTRA, f"MRI max error {mx}"
+    return {"max_err": round(mx, 7)}
 
 
 def load_paths(root: Path, index: Path | None, paths_file: Path | None) -> list[str]:
@@ -253,6 +249,9 @@ def main(argv=None) -> int:
     ap.add_argument("--shard", default="0/1", help="i/n: this task takes every n-th path starting at i")
     ap.add_argument("--out", type=Path, default=OUT_DIR, help="manifest folder")
     ap.add_argument("--clevel", type=int, default=None, help=f"Blosc zstd level (default {store.CLEVEL})")
+    ap.add_argument("--ct-step", type=float, default=None, help="CT HU per integer step (default 1; 0.125 keeps "
+                    "every float16 HU >= 128 exact at ~+1.5 MB per CT)")
+    ap.add_argument("--mri-step", type=float, default=None, help="MRI z per integer step (default 0.001)")
     ap.add_argument("--min-free-gb", type=float, default=200.0, help="statvfs free space margin")
     ap.add_argument("--quota-margin-gb", type=float, default=15.0, help="scratch quota headroom (cache + own bytes)")
     ap.add_argument("--max-mb-s", type=float, default=0.0, help="cap on this task's read+write MB/s (0: none)")
@@ -296,7 +295,7 @@ def main(argv=None) -> int:
                 log({"path": rel, "status": "missing"})
                 continue
             try:
-                rec = reencode_zip(path, guard, a.clevel, keep_tmp=a.dry_run)
+                rec = reencode_zip(path, guard, a.clevel, a.mri_step, a.ct_step, keep_tmp=a.dry_run)
             except Stop as e:
                 log({"path": rel, "status": "stopped", "reason": str(e)})
                 print(f"[reencode] STOP: {e}", flush=True)

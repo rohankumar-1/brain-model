@@ -23,7 +23,7 @@ import zarr
 FORMAT_VERSION = 7  # 7: int16 image + scale (6: float16 image; 256 x 256 x 160 grid, brain array in the image zip)
 READ_VERSIONS = (6, 7)  # image zips the readers decode
 CHUNK_Z = 8
-CLEVEL = 5              # Blosc zstd level (write-time cost only; decode speed does not depend on it)
+CLEVEL = 9              # Blosc zstd level: 9 vs 5 is ~7% smaller for ~0.8 s more per volume at write; same decode
 
 DTYPE_REV = 7                       # attr marking an int16-encoded image array
 IMAGE_KINDS = ("ct_hu", "mri_z")    # the image array's ``kind`` attr
