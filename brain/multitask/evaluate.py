@@ -20,7 +20,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 
 from brain.downstream.metrics import balanced_accuracy
 from brain.eval.skill import skill, summarize
-from brain.multitask.data import prepare
+from brain.multitask.data import mixed_parts, prepare
 from brain.multitask.losses import seg_target, slot_losses
 
 
@@ -43,8 +43,8 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     neg_ids = set((cfg.get("loss") or {}).get("negative_tasks") or [])   # their training loss, so val loss matches
     negatives = torch.tensor([t.id in neg_ids for t in reg.tasks], device=device) if neg_ids else None
     task_type = model.task_type
-    for raw in loader:
-        b = prepare(raw, cfg, device, patch_xyz, train=False)
+    for raw in (part for full in loader for part in mixed_parts(full)):      # a mixed batch: each sub-batch
+        b = prepare(raw, cfg, device, model.backbone.ngeo_patch_xyz if "affine" in raw else patch_xyz, train=False)
         with torch.autocast(**amp):
             out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
                         dense_pair=b.get("dense_pair"), study=b.get("study"), modality=b["modality"],

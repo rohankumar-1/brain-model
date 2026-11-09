@@ -1,0 +1,131 @@
+# full_ngeo_bank (2026-11-08): full_iso_bank (R16 recipe + shared learned window bank, from R14-F) except CT geometry:
+#   CT scans with a trusted native-geometry copy (STORE/volumes_ngeo.csv) are read at native geometry through the
+#   in-plane ngeo stem (NgeoStemEmbed, random init: R14-F has no conv stem), MRI and the other CT at 1 mm; one batch
+#   holds both (collate_mixed; MixedForward: each sample through its own stem, the shared transformer / task tokens /
+#   heads; token positions in template mm for both). Masks of ngeo rows from the ngeo decoder (seg_ngeo, random init)
+#   on the ngeo grid; token maps and RSNA slice labels through the per-slice template positions; live CT measures from
+#   the 1 mm copy. A CT sample that is masked (reconstruction), asks a synthesis slot, may get study partners or asks
+#   a mask without an ngeo copy is read at 1 mm instead, so every label keeps training. Multitask trainer, as R16.
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v12
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 10
+  balance_alpha: 0.5
+  subject_beta: 1.0
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets: [abide1, ixi, oasis1, oasis2, pixar, fomo_nki, fomo_hbn, rsna_ica]   # benchmark cohorts, BrainFMBench, RSNA-ICA
+  exclude_volumes: configs/multitask/train_exclude_r15.csv     # copies of benchmark scans, val/test twins, QC failures
+  ngeo:                         # native-geometry CT (docs/multitask.md "Native geometry")
+    enabled: true
+    mixed: true                 # every scan stays; CT with a trusted ngeo copy at native geometry, the rest 1 mm
+    root: null                  # ngeo zips + volumes_ngeo.csv in the store root
+    index_name: volumes_ngeo.csv
+    require: []
+    drop_flags: []
+    untrusted_flags: [frame_mismatch, frame_assumed, brain_off]   # these CT scans are read at 1 mm (AISD exempt)
+    pad_multiple: 4
+    max_slices: null
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: runs/v4/scratch_s42/last.pt
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: false
+  fp32_residual: false
+  meta: {enabled: true, drop: 0.2}
+  task_tokens: {enabled: true, share: true, write_bias: 10.0, write_ramp_steps: 2000}
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+  fusion: {after_block: 8, heads: 6}     # study-level input: blocks 0-7 per scan, fused, 8-11 on the study
+  # shared learned window bank (brain.models.window_bank), warm-started from R14-F's 1-channel input: its tissue
+  # window is the canonical one (CT 40/40, MRI 0.5/1.5), the old patch-embed / decoder-pyramid kernels move there
+  window_bank: {enabled: true, k: 6, init: contract6, per_modality: false, lr_mult: 0.1, decoder_grad: false}
+  ngeo:                         # in-plane stem (random init) into the shared transformer; masks on the ngeo grid
+    enabled: true
+    stem: [32, 64]
+    patch_xyz: [32, 32, 1]
+    seg_stride: [1, 4, 4]
+    template_xyz: [256, 256, 160]
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac            # a token counts when >= 25% of its voxels are foreground (centre mode lost 1.2% of brain)
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.5
+  max_seg: 2
+  lesion_ignore: true
+  study: {p_multi: 0.5, max_scans: 3}   # half the scans with partners come with 1-2 co-registered sequences
+  group_weights: {synthesis: 0.5, radiology: 1.0, derived: 0.5}   # derived: 38.5% of task slots at 1.0 (audit 2026-11-03)
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf, wmh_grade,
+    aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca, aneurysm_acom, aneurysm_aca,
+    aneurysm_pcom, aneurysm_basilar_tip, aneurysm_posterior_other, aneurysm_location, seg_vessels]
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+    shear_deg: 10.0           # residual CT gantry tilt (rigid-registered RSNA keep theirs)
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+      sigma_hu: [2.0, 15.0]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+    ct_physical: {p: 0.5, offset_hu: 10.0, scale: 0.03}      # bank (native-unit) path: CT physical augs
+    kernel: {p: 0.3, sigma_vox: [0.3, 1.0], sharpen: 0.5, amount: [0.2, 1.0]}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
+  synth_contrast: {p: 0.1}
+  task_aware: true
+loss: {seg_stride: 2, uncertainty_clamp: 1.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
+optim:
+  lr: 0.0002                       # R16 0.0003 at global 18, scaled linearly to 12
+  enc_lr_mult: 1.0
+  layer_decay: 0.75
+  weight_decay: 0.05
+  warmup_steps: 500
+  clip_grad: 1.0
+  batch_size: 6                    # anchors per GPU on 2 GPUs: global 12 (9 peaked at 40.1 GiB on an L40S: no 40 GB A100)
+  schedule: wsd
+  decay_steps: 6000
+  betas: [0.9, 0.999]
+train: {max_steps: 145000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false}
+output: {out_dir: runs/multitask/full_ngeo_bank, resume_from: runs/multitask/r14f/last.pt}
