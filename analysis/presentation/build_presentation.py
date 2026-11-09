@@ -186,6 +186,45 @@ if BR:
 else:
     brtable = '<p class="pending">CQ500 best-readout runs still in progress.</p>'
 
+# ---- every task with readout runs that include the attentive probe: the validation-picked readout --------------------
+HEADNAME = {"linear": "linear", "mlp": "MLP", "spatial": "octants", "tok_conv": "token conv", "attn_probe": "attention"}
+
+
+def picked(model_dir: str, task: str):
+    runs = sorted((ROOT / f"runs/downstream/{task}/{model_dir}").glob("*/metrics.json"))
+    for p in reversed(runs):
+        m = json.load(open(p))
+        if "attn_probe" not in m:
+            continue
+        key = next(k for k in ("auc_ovr_macro", "auc", "r2") if k in m["attn_probe"])
+
+        def v(h):
+            x = m[h].get("val")
+            return x.get(key) if isinstance(x, dict) else x
+        h = max((h for h in m if v(h) is not None), key=v)
+        return h, v(h), m[h][key], key
+    return None
+
+
+labels_by_key = {k: l for _, ts in bp.G for k, l in ts}
+labels_by_key.update({"cq500_chronic_bleed": "CQ500 chronic bleed"})
+rtasks = sorted({p.parts[-4] for p in (ROOT / "runs/downstream").glob("*/full_iso_bank_last/*/metrics.json")}
+                | {p.parts[-4] for p in (ROOT / "runs/downstream").glob("*/r14f_last/*/metrics.json")})
+rrows = []
+for t in rtasks:
+    a, b = picked("full_iso_bank_last", t), picked("r14f_last", t)
+    if not (a or b):
+        continue
+    old = (bp.S.get(t, {}) or {}).get("BQ-R14F")
+    metric = "R²" if (a or b)[3] == "r2" else "AUC"
+    fmt = lambda x: (f"<td class=num>{x[2]:.3f}<span class=pos> {HEADNAME.get(x[0], x[0])}</span></td>"  # noqa: E731
+                     if x else "<td class=num quiet>–</td>")
+    rrows.append(f"<tr><td>{labels_by_key.get(t, t)}</td><td>{metric}</td>{tcell(old, '')}{fmt(b)}{fmt(a)}</tr>")
+rtable = ('<div class="tablebox"><table class="narrow"><thead><tr><th>Task</th><th>Metric</th>'
+          '<th class=num>R14-F, pinned readout (before)</th><th class=num>R14-F, best readout</th>'
+          '<th class=num>New run, best readout</th></tr></thead><tbody>' + "".join(rrows) + "</tbody></table></div>"
+          ) if rrows else '<p class="pending">Readout runs in progress.</p>'
+
 # ---- validation summary ----------------------------------------------------------------------------------------------
 vgroups = sorted({k for v in VAL.values() if v for k in v if k.startswith("val_group_")})
 vhead = "<thead><tr><th>Validation group</th>" + "".join(
@@ -279,6 +318,12 @@ ol.refs {{ font-size: 13px; color: var(--soft); max-width: 90ch; padding-left: 2
   <p class="sub">Dark green: best in the row; light green: within noise of it (95% intervals overlap); hover for intervals. † the model trained on that task's labels; ‡ its own trained head (RSNA ICH rows).</p>
   {table(FCOLS, frozen_groups(), frozen_get)}
   <div class="tablebox"><table><tbody>{skill_row}</tbody></table></div>
+
+  <h3>Best readout per task (attention probe included)</h3>
+  <p class="sub">Every readout fitted (linear, MLP, octants, token conv, attentive probe); shown is the one with the best
+    <em>validation</em> score and its test score, so the choice never sees test data. The attentive probe loses left vs
+    right (bleed side, LVO side), where the spatial readouts win. Tasks fill in as the chunked runs finish.</p>
+  {rtable}
 
   <h2 id="own">Trained tasks: the model's own heads on held-out test splits</h2>
   <p class="sub">Single-task: the best of three from-scratch architectures per task family. R14-F and the new run are scored on the same scans when the new run's evaluation is in.</p>
