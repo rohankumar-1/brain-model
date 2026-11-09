@@ -104,18 +104,18 @@ T2 = ("External evaluation: trained task, unseen cohort, no labels from it",
           ("CQ500 · epidural", "AUC", .5, None, ".973*", zero_shot("EDH"))])
 T3 = ("Transfer: task never trained, frozen encoder + small readout fitted on the task",
       "frozen benchmark", [
-          ("ADNI · CN vs AD", "AUC", rand("adni_cn_ad"), None, ".922", frozen("adni_cn_ad")),
-          ("ADNI · CN vs MCI", "AUC", rand("adni_cn_mci"), None, ".757", frozen("adni_cn_mci")),
-          ("ADNI · MMSE", "R²", rand("adni_mmse"), None, ".43", frozen("adni_mmse")),
-          ("PPMI · Parkinson's vs control", "AUC", rand("ppmi_pd"), None, ".610", frozen("ppmi_pd")),
-          ("UCSF · IDH mutation", "AUC", rand("ucsf_idh"), None, ".901", frozen("ucsf_idh")),
+          ("ADNI · CN vs AD", "AUC", rand("adni_cn_ad"), None, ".922", frozen("adni_cn_ad", "adni_cn_ad")),
+          ("ADNI · CN vs MCI", "AUC", rand("adni_cn_mci"), None, ".757", frozen("adni_cn_mci", "adni_cn_mci")),
+          ("ADNI · MMSE", "R²", rand("adni_mmse"), None, ".43", frozen("adni_mmse", "adni_mmse")),
+          ("PPMI · Parkinson's vs control", "AUC", rand("ppmi_pd"), None, ".610", frozen("ppmi_pd", "ppmi_pd")),
+          ("UCSF · IDH mutation", "AUC", rand("ucsf_idh"), None, ".901", frozen("ucsf_idh", "ucsf_idh")),
           ("CQ500 · calvarial fracture", "AUC", rand("cq500:CalvarialFracture"), None, ".962*",
            frozen("cq500:CalvarialFracture", "cq500", "CalvarialFracture")),
           ("CQ500 · midline shift", "AUC", rand("cq500:MidlineShift"), None, ".970*",
            frozen("cq500:MidlineShift", "cq500", "MidlineShift")),
           ("ISLES 2024 · LVO side (CTA)", "AUC", rand("isles24_lvo_side"), None, None,
            frozen("isles24_lvo_side", "isles24_lvo_side")),
-          ("MS3SEG · MS lesion load", "R²", rand("ms3seg_lesion_load"), None, None, frozen("ms3seg_lesion_load"))])
+          ("MS3SEG · MS lesion load", "R²", rand("ms3seg_lesion_load"), None, None, frozen("ms3seg_lesion_load", "ms3seg_lesion_load"))])
 NOTES = {
     "T1": "Single-task: best of three from-scratch architectures per task "
           "family. * supervised or fine-tuned published model on its own split (Pillar-0; RSNA 2019 winner; nnU-Net and "

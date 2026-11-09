@@ -28,8 +28,8 @@ external cohorts it never trained on.
      epidural head loses nothing across sites (RSNA test .878, CQ500 .882). Zero-shot beat every readout fitted on
      CQ500's own labels.
    - *Transfer to unseen tasks*: the frozen encoder matches the best published frozen foundation models (ADNI CN vs AD
-     .918 vs .922, CN vs MCI .757 vs .757, UCSF IDH .915 vs .901) and clearly beats a random-init encoder (e.g.
-     CN vs MCI .757 vs .641, MMSE .375 vs .198, fracture .854 vs .627). With an attention readout picked on
+     .918 vs .922, CN vs MCI .768 vs .757, UCSF IDH .915 vs .901) and clearly beats a random-init encoder (e.g.
+     CN vs MCI .768 vs .641, MMSE .375 vs .198, fracture .854 vs .627). With an attention readout picked on
      validation, CQ500's 8-finding macro AUC rose from .886 to .914 (fracture .759 → .854, SAH .869 → .940).
    - *Multitask beats single-task where data is scarce*: enhancing tumour Dice .656 vs .331, whole tumour .645 vs
      .542, age R² .922 vs .749, sex AUC .935 vs .590, 12-month survival AUC .743 vs .603.

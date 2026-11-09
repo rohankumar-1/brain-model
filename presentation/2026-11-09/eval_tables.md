@@ -41,7 +41,7 @@ Frozen benchmark.
 | Task | Metric | Single-task | Literature | Ours |
 |---|---|---|---|---|
 | ADNI · CN vs AD | AUC | – | .922 | **.918**ᵃ |
-| ADNI · CN vs MCI | AUC | – | .757 | **.757**ᵃ |
+| ADNI · CN vs MCI | AUC | – | .757 | **.768** |
 | ADNI · MMSE | R² | – | .43 | **.375**ᵃ |
 | PPMI · Parkinson's vs control | AUC | – | .610 | **.514**ᵃ |
 | UCSF · IDH mutation | AUC | – | .901 | **.915**ᵃ |
