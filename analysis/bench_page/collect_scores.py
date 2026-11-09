@@ -9,7 +9,7 @@ from brain.downstream.models import resolve_model
 from brain.downstream.tasks import CQ500_LABELS, RSNA_LABELS
 from brain.eval.report import _suite_preds, fixed_heads, score_ci, suite_heads
 
-MODELS = ["BQ-random", "ct_fm", "ct_fm_triage", "brainiac", "BQ-v3", "BQ-R7", "BQ-R7-SSL", "BQ-R9", "BQ-R10", "BQ-R10-EMA", "BQ-R12", "BQ-R13", "BQ-R13-EMA", "BQ-R14", "BQ-R14-EMA", "BQ-R14F", "BQ-R16", "brainfm", "hlip"]
+MODELS = ["BQ-random", "ct_fm", "ct_fm_triage", "brainiac", "BQ-v3", "BQ-R7", "BQ-R7-SSL", "BQ-R9", "BQ-R10", "BQ-R10-EMA", "BQ-R12", "BQ-R13", "BQ-R13-EMA", "BQ-R14", "BQ-R14-EMA", "BQ-R14F", "BQ-R16", "BQ-FISO", "BQ-FNGEO", "brainfm", "hlip"]
 LABELS = {"cq500": CQ500_LABELS, "rsna_ich": RSNA_LABELS}
 b = load()
 t = suite_heads(); t = t[current_results(t, b)]
