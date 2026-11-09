@@ -44,7 +44,7 @@ def panel(ax, gidx):
     for t in (10, 100, 1000, 10000):
         for s in (-1, 1):
             xx = s * (GAP + x_of(t))
-            ax.axvline(xx, color=RULE, lw=0.6, zorder=0)
+            pass
     for gi in gidx:
         c = COLORS[gi]
         lab = SHORT.get(groups[gi], groups[gi])
@@ -56,7 +56,6 @@ def panel(ax, gidx):
             if r["train"]:
                 w = max(x_of(r["train"]), 0.04)
                 ax.barh(y, -w, left=-GAP, height=0.68, color=c, edgecolor="white", linewidth=0.5)
-                ax.text(-GAP - w - 0.06, y, f"{r['train']:,}", ha="right", va="center", fontsize=6.4, color=INK2)
             tv = r["test"] or r["ext"]
             if tv:
                 w = max(x_of(tv), 0.04)
@@ -65,7 +64,6 @@ def panel(ax, gidx):
                 else:
                     ax.barh(y, w, left=GAP, height=0.68, facecolor=c, edgecolor="white", linewidth=0.0,
                             hatch="///")
-                ax.text(GAP + w + 0.06, y, f"{tv:,}", ha="left", va="center", fontsize=6.4, color=INK2)
             y -= 1
         y -= 0.35
     ax.set_ylim(y + 0.2, 0.9)
@@ -83,27 +81,16 @@ def panel(ax, gidx):
 
 fig = plt.figure(figsize=(13.333, 7.5), dpi=200)
 fig.patch.set_facecolor("white")
-left = fig.add_axes([0.02, 0.135, 0.47, 0.73])
-right = fig.add_axes([0.51, 0.135, 0.47, 0.73])
+left = fig.add_axes([0.01, 0.12, 0.48, 0.83])
+right = fig.add_axes([0.51, 0.12, 0.48, 0.83])
 panel(left, [0, 1, 2, 3])
 panel(right, [4, 5, 6, 7])
-fig.text(0.02, 0.955, "Datasets: what BrainQuery trains on and what it is tested on", fontsize=17, fontweight="bold",
-         color=INK, ha="left", va="center")
-fig.text(0.02, 0.912, f"{tot['train']:,} training scans in {tot['n_train_sets']} cohorts  ·  {tot['test']:,} held-out "
-         f"test scans in those cohorts  ·  {tot['ext']:,} scans in {tot['n_ext_sets']} external cohorts never "
-         "trained on  ·  log scale, scans (each MRI sequence counts once)", fontsize=9.5, color=INK2, ha="left",
-         va="center")
 task_handles = [Patch(facecolor=COLORS[i], label=SHORT.get(g, g)) for i, g in enumerate(groups)]
 kind_handles = [Patch(facecolor="#8a8983", label="training scans"),
-                Patch(facecolor="#8a8983", alpha=0.42, label="held-out test split (same cohort)"),
-                Patch(facecolor="#8a8983", hatch="///", edgecolor="white", linewidth=0, label="external cohort (test only)")]
-l1 = fig.legend(handles=task_handles, loc="lower left", bbox_to_anchor=(0.02, 0.012), ncol=4, fontsize=8.4,
-                frameon=False, title="Task type", title_fontsize=8.6, alignment="left", handlelength=1.4,
-                columnspacing=1.4)
-l1.get_title().set_fontweight("bold")
-l2 = fig.legend(handles=kind_handles, loc="lower right", bbox_to_anchor=(0.985, 0.012), ncol=1, fontsize=8.4,
-                frameon=False, title="Block", title_fontsize=8.6, alignment="left", handlelength=1.4)
-l2.get_title().set_fontweight("bold")
+                Patch(facecolor="#8a8983", alpha=0.42, label="held-out test (same cohort)"),
+                Patch(facecolor="#8a8983", hatch="///", edgecolor="white", linewidth=0, label="external test cohort")]
+leg = fig.legend(handles=task_handles + kind_handles, loc="lower center", bbox_to_anchor=(0.5, 0.008), ncol=6,
+                 fontsize=8.6, frameon=False, handlelength=1.4, columnspacing=1.6)
 out = Path(sys.argv[1])
 out.parent.mkdir(parents=True, exist_ok=True)
 fig.savefig(out, dpi=200, facecolor="white")
