@@ -1,0 +1,173 @@
+<title>BrainQuery Datasets</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600&family=Source+Serif+4:opsz,wght@8..60,600&display=swap">
+<style>
+/* Layout: a population-pyramid chart, dataset names in a centre column, training scans left, test scans right. */
+:root {
+  --bg: #fcfcfb; --ink: #1d1d1b; --ink-2: #55544f; --ink-3: #8a8983; --rule: #e4e3de; --chip: #f1f0ec;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --serif: "Source Serif 4", Georgia, serif; --sans: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8d8c84; --rule: #34342f; --chip: #262624;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8d8c84; --rule: #34342f; --chip: #262624;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  color-scheme: dark; }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.45; }
+.page { max-width: 1120px; margin: 0 auto; padding-block: 28px 40px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { font-family: var(--serif); font-weight: 600; font-size: 30px; line-height: 1.15; margin: 0 0 6px; text-wrap: balance; }
+.lede { color: var(--ink-2); max-width: 70ch; margin: 0 0 18px; }
+.stats { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 0 0 18px; }
+.stat b { display: block; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--ink-2); font-size: 13px; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; margin: 0 0 10px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; padding: 5px 12px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--chip); color: var(--ink); font-weight: 600; }
+.seg button:focus-visible { outline: 2px solid var(--s1); outline-offset: -2px; }
+.key { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-2); }
+.key i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; background: var(--ink-3); }
+.key i.t { opacity: .45; }
+.chartbox { overflow-x: auto; }
+svg { display: block; }
+svg text { font-family: var(--sans); }
+.tip { position: fixed; pointer-events: none; background: var(--bg); color: var(--ink); border: 1px solid var(--rule);
+  border-radius: 8px; padding: 8px 10px; font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.12); max-width: 280px; z-index: 5; }
+.tip b { display: block; margin-bottom: 2px; }
+.tip .n { font-variant-numeric: tabular-nums; }
+.notes { color: var(--ink-2); font-size: 13px; max-width: 90ch; margin-top: 14px; }
+.notes p { margin: 4px 0; }
+details { margin-top: 14px; font-size: 13px; }
+summary { cursor: pointer; color: var(--ink-2); }
+table { border-collapse: collapse; margin-top: 8px; min-width: 560px; }
+th, td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--rule); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.tablebox { overflow-x: auto; }
+@media (prefers-reduced-motion: no-preference) { rect.b { transition: width .35s ease, x .35s ease; } }
+</style>
+
+<div class="page">
+  <h1>BrainQuery datasets: what the model trains on and what it is tested on</h1>
+  <p class="lede">Each row is a cohort. Blocks to the left are scans used for training (labelled train and validation
+    scans plus the self-supervised pool); blocks to the right are scans held out for testing: a training cohort's own
+    test split, or an external cohort the model never trains on. Rows are coloured by modality and target.</p>
+  <div class="stats" id="stats"></div>
+  <div class="bar">
+    <div class="seg" role="group" aria-label="Scale">
+      <button id="b-log" aria-pressed="true">Log scale</button><button id="b-lin" aria-pressed="false">Linear scale</button>
+    </div>
+    <div class="key"><span><i></i>training scans</span><span><i class="t"></i>held-out test split (same cohort)</span><span><i></i>external cohort (test only)</span></div>
+  </div>
+  <div class="chartbox"><svg id="chart" role="img" aria-label="Training and test scans per dataset"></svg></div>
+  <div class="notes">
+    <p>Counts are scans: every MRI sequence counts once, so a 4-sequence BraTS case is 4 scans. External sizes are the
+      most scans any of that cohort's benchmark tasks scored; for segmentation-transfer sets (INSTANCE, ISLES 2022, WMH),
+      the number of cases.</p>
+    <p>Removed from training so they can serve as external tests: ABIDE I, IXI, OASIS-1/-2, Pixar, RSNA Aneurysm, plus
+      every scan that duplicates a benchmark scan. NKI (5,948 scans) and HBN (8,478) are also held out of training but
+      not yet benchmarked, so they are not shown; BrainMetShare (624) is held out and unused.</p>
+  </div>
+  <details><summary>Table view</summary><div class="tablebox"><table id="tbl"></table></div></details>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+const D = {"groups": ["CT \u00b7 intracranial hemorrhage", "CT \u00b7 stroke and vessels", "CT \u00b7 pediatric and synthesis", "MRI \u00b7 tumour", "MRI \u00b7 neurodegeneration", "MRI \u00b7 development and psychiatry", "MRI \u00b7 lesions and small vessels", "MRI \u00b7 healthy and clinical"], "rows": [{"g": 0, "name": "RSNA ICH", "train": 21727, "test": 3269, "ext": 0, "note": "study labels for 5 bleed types"}, {"g": 0, "name": "HemSeg-200", "train": 451, "test": 64, "ext": 0, "note": "bleed masks on RSNA studies"}, {"g": 0, "name": "BHSD", "train": 163, "test": 27, "ext": 0, "note": "bleed masks on RSNA studies"}, {"g": 0, "name": "CQ500", "train": 0, "test": 0, "ext": 471, "note": "3-reader findings, external site"}, {"g": 0, "name": "INSTANCE 2022", "train": 0, "test": 0, "ext": 99, "note": "bleed masks, segmentation transfer"}, {"g": 1, "name": "RSNA Aneurysm (CTA + MRA)", "train": 0, "test": 0, "ext": 639, "note": "removed from training for the benchmark"}, {"g": 1, "name": "ISLES 2024 (NCCT + CTA)", "train": 0, "test": 0, "ext": 137, "note": "LVO side, 90-day outcome"}, {"g": 1, "name": "AISD", "train": 0, "test": 0, "ext": 52, "note": "acute infarct CT"}, {"g": 2, "name": "SynthRAD 2023 (CT + MR)", "train": 452, "test": 86, "ext": 0, "note": "paired CT / MR"}, {"g": 2, "name": "Pediatric Cranial CT", "train": 78, "test": 15, "ext": 0, "note": "age, sex, bleed negatives"}, {"g": 3, "name": "Yale brain metastases", "train": 28471, "test": 5194, "ext": 0, "note": "4 sequences"}, {"g": 3, "name": "BraTS glioma", "train": 5188, "test": 2315, "ext": 0, "note": "masks, 4 sequences"}, {"g": 3, "name": "BraTS meningioma", "train": 3293, "test": 700, "ext": 0, "note": "masks, 4 sequences"}, {"g": 3, "name": "UPenn-GBM", "train": 2248, "test": 436, "ext": 0, "note": "survival, MGMT"}, {"g": 3, "name": "BraTS-GoAT", "train": 1036, "test": 115, "ext": 0, "note": "masks, 4 sequences"}, {"g": 3, "name": "BraTS pediatric", "train": 484, "test": 88, "ext": 0, "note": "masks, 4 sequences"}, {"g": 3, "name": "UCSF-PDGM", "train": 0, "test": 0, "ext": 91, "note": "IDH, grade, MGMT, survival"}, {"g": 3, "name": "MSD brain tumour", "train": 0, "test": 0, "ext": 81, "note": "tumour burden"}, {"g": 4, "name": "ADNI", "train": 0, "test": 0, "ext": 468, "note": "CN / MCI / AD, MMSE"}, {"g": 4, "name": "OASIS-2", "train": 0, "test": 0, "ext": 373, "note": "CDR, MMSE"}, {"g": 4, "name": "PPMI", "train": 0, "test": 0, "ext": 222, "note": "Parkinson's vs control"}, {"g": 4, "name": "OASIS-1", "train": 0, "test": 0, "ext": 39, "note": "CDR, MMSE"}, {"g": 5, "name": "FOMO infant", "train": 1415, "test": 250, "ext": 0, "note": "0-2 years"}, {"g": 5, "name": "ID1000", "train": 789, "test": 139, "ext": 0, "note": "adults, demographics"}, {"g": 5, "name": "PIOP2", "train": 192, "test": 34, "ext": 0, "note": "young adults"}, {"g": 5, "name": "PIOP1", "train": 184, "test": 32, "ext": 0, "note": "young adults"}, {"g": 5, "name": "Pixar", "train": 0, "test": 0, "ext": 155, "note": "children and adults, age"}, {"g": 5, "name": "ABIDE I", "train": 0, "test": 0, "ext": 151, "note": "autism vs control"}, {"g": 6, "name": "ISLES 2022", "train": 0, "test": 0, "ext": 249, "note": "infarct masks, segmentation transfer"}, {"g": 6, "name": "ATLAS", "train": 0, "test": 0, "ext": 212, "note": "stroke lesion volume, time since stroke"}, {"g": 6, "name": "WMH challenge", "train": 0, "test": 0, "ext": 170, "note": "white-matter hyperintensity masks"}, {"g": 6, "name": "MS3SEG", "train": 0, "test": 0, "ext": 100, "note": "MS lesion load, age"}, {"g": 6, "name": "VALDO", "train": 0, "test": 0, "ext": 40, "note": "perivascular spaces"}, {"g": 7, "name": "FOMO healthy cohorts (19)", "train": 6801, "test": 1244, "ext": 0, "note": "pooled: CoRR, SLIM, WAND, M4Raw ..."}, {"g": 7, "name": "fastMRI+ clinical", "train": 849, "test": 150, "ext": 0, "note": "radiology findings"}, {"g": 7, "name": "IXI", "train": 0, "test": 0, "ext": 85, "note": "healthy adults, age"}], "tot": {"train": 73821, "test": 14158, "ext": 3834, "n_train_sets": 17, "n_ext_sets": 19}};
+const fmt = n => n.toLocaleString("en-US");
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let mode = "log";
+try { mode = localStorage.getItem("dsmode") || "log"; } catch (e) {}
+
+document.getElementById("stats").innerHTML = [
+  [fmt(D.tot.train), `training scans across ${D.tot.n_train_sets} cohorts`],
+  [fmt(D.tot.test), "held-out test scans in those cohorts"],
+  [fmt(D.tot.ext), `scans in ${D.tot.n_ext_sets} external test cohorts`],
+].map(([b, s]) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`).join("");
+
+const tbl = document.getElementById("tbl");
+tbl.innerHTML = "<tr><th>Group</th><th>Cohort</th><th class=num>Train</th><th class=num>Held-out test</th><th class=num>External test</th><th>Notes</th></tr>" +
+  D.rows.map(r => `<tr><td>${D.groups[r.g]}</td><td>${r.name}</td><td class=num>${r.train ? fmt(r.train) : ""}</td><td class=num>${r.test ? fmt(r.test) : ""}</td><td class=num>${r.ext ? fmt(r.ext) : ""}</td><td>${r.note}</td></tr>`).join("");
+
+const svg = document.getElementById("chart"), tip = document.getElementById("tip");
+const NS = "http://www.w3.org/2000/svg";
+const el = (t, a, p) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); (p || svg).appendChild(e); return e; };
+
+function draw() {
+  svg.innerHTML = "";
+  const W = Math.max(720, svg.parentElement.clientWidth), LAB = 200, PAD = 46, half = (W - LAB) / 2 - PAD;
+  const cx0 = PAD + half, cx1 = cx0 + LAB;            // left bars end at cx0, right bars start at cx1
+  const maxV = Math.max(...D.rows.map(r => Math.max(r.train, r.test, r.ext)));
+  const lmin = 1, lmax = Math.log10(maxV * 1.15);
+  const sc = mode === "log" ? v => v <= 10 ? 0 : (Math.log10(v) - lmin) / (lmax - lmin) * half : v => v / (maxV * 1.08) * half;
+  const ticks = mode === "log" ? [10, 100, 1000, 10000] : [0, 10000, 20000];
+  const RH = 23, GH = 30, TOP = 26;
+  let y = TOP;
+  const layout = [];
+  D.groups.forEach((g, gi) => { layout.push({ head: g, gi, y }); y += GH; D.rows.filter(r => r.g === gi).forEach(r => { layout.push({ r, y }); y += RH; }); y += 6; });
+  const H = y + 26;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("width", W); svg.setAttribute("height", H);
+  const ink2 = css("--ink-2"), ink3 = css("--ink-3"), rule = css("--rule"), ink = css("--ink");
+  // grid + tick labels, mirrored
+  for (const t of ticks) {
+    const dx = sc(t), lab = t >= 1000 ? (t / 1000) + "k" : String(t);
+    for (const [x, anchor] of [[cx0 - dx, "middle"], [cx1 + dx, "middle"]]) {
+      el("line", { x1: x, x2: x, y1: TOP - 6, y2: H - 22, stroke: rule, "stroke-width": 1 });
+      el("text", { x, y: H - 8, "text-anchor": anchor, "font-size": 12, fill: ink3 }).textContent = lab;
+      el("text", { x, y: TOP - 10, "text-anchor": anchor, "font-size": 12, fill: ink3 }).textContent = lab;
+    }
+  }
+  el("text", { x: cx0, y: 12, "text-anchor": "end", "font-size": 13, "font-weight": 600, fill: ink2 }).textContent = "← training scans";
+  el("text", { x: cx1, y: 12, "text-anchor": "start", "font-size": 13, "font-weight": 600, fill: ink2 }).textContent = "test scans →";
+  for (const L of layout) {
+    if (L.head) {
+      const c = css(`--s${L.gi + 1}`);
+      el("rect", { x: cx0 + 8, y: L.y + 11, width: 10, height: 10, rx: 2, fill: c });
+      el("text", { x: cx0 + 24, y: L.y + 20, "font-size": 13, "font-weight": 600, fill: ink }).textContent = L.head;
+      continue;
+    }
+    const r = L.r, c = css(`--s${r.g + 1}`), yb = L.y + 4, bh = RH - 8;
+    const g = el("g", { tabindex: 0, "aria-label": `${r.name}: ${r.train} training, ${r.test || r.ext} test` });
+    el("rect", { x: PAD, y: L.y, width: W - 2 * PAD, height: RH, fill: "transparent" }, g);   // hover target
+    el("text", { x: cx0 + LAB / 2, y: L.y + 16, "text-anchor": "middle", "font-size": 13, fill: ink }, g).textContent = r.name;
+    if (r.train) {
+      const w = Math.max(2, sc(r.train));
+      el("rect", { class: "b", x: cx0 - w, y: yb, width: w, height: bh, rx: 3, fill: c }, g);
+      el("text", { x: cx0 - w - 5, y: L.y + 16, "text-anchor": "end", "font-size": 12, fill: ink2, "font-variant-numeric": "tabular-nums" }, g).textContent = fmt(r.train);
+    }
+    const tv = r.test || r.ext;
+    if (tv) {
+      const w = Math.max(2, sc(tv));
+      el("rect", { class: "b", x: cx1, y: yb, width: w, height: bh, rx: 3, fill: c, "fill-opacity": r.test ? 0.45 : 1 }, g);
+      el("text", { x: cx1 + w + 5, y: L.y + 16, "font-size": 12, fill: ink2 }, g).textContent = fmt(tv) + (r.ext ? "  external" : "");
+    }
+    const show = e => {
+      tip.innerHTML = `<b>${r.name}</b>${D.groups[r.g]}<br>` +
+        (r.train ? `<span class=n>${fmt(r.train)}</span> training scans<br>` : "") +
+        (r.test ? `<span class=n>${fmt(r.test)}</span> held-out test scans<br>` : "") +
+        (r.ext ? `<span class=n>${fmt(r.ext)}</span> external test scans<br>` : "") + `<span style="color:var(--ink-2)">${r.note}</span>`;
+      tip.hidden = false;
+      const bx = e.clientX ?? g.getBoundingClientRect().left, by = e.clientY ?? g.getBoundingClientRect().top;
+      tip.style.left = Math.min(bx + 14, innerWidth - 300) + "px"; tip.style.top = (by + 14) + "px";
+    };
+    g.addEventListener("mousemove", show); g.addEventListener("focus", show);
+    g.addEventListener("mouseleave", () => tip.hidden = true); g.addEventListener("blur", () => tip.hidden = true);
+  }
+}
+function setMode(m) {
+  mode = m; try { localStorage.setItem("dsmode", m); } catch (e) {}
+  document.getElementById("b-log").setAttribute("aria-pressed", m === "log");
+  document.getElementById("b-lin").setAttribute("aria-pressed", m === "lin");
+  draw();
+}
+document.getElementById("b-log").onclick = () => setMode("log");
+document.getElementById("b-lin").onclick = () => setMode("lin");
+addEventListener("resize", draw);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+new MutationObserver(draw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+setMode(mode);
+</script>

@@ -117,16 +117,16 @@ T3 = ("Transfer: task never trained, frozen encoder + small readout fitted on th
            frozen("isles24_lvo_side", "isles24_lvo_side")),
           ("MS3SEG · MS lesion load", "R²", rand("ms3seg_lesion_load"), None, None, frozen("ms3seg_lesion_load"))])
 NOTES = {
-    "T1": "Random: random-init encoder with a frozen readout. Single-task: best of three from-scratch architectures per task "
+    "T1": "Single-task: best of three from-scratch architectures per task "
           "family. * supervised or fine-tuned published model on its own split (Pillar-0; RSNA 2019 winner; nnU-Net and "
           "missing-modality models on T1c alone; BrainIAC).",
-    "T2": "Random: untrained heads (chance). Single-task specialist not yet scored on CQ500. * Chilamkurthy et al. 2018, "
+    "T2": "Single-task specialist not yet scored on CQ500. * Chilamkurthy et al. 2018, "
           "supervised on ~290k head CTs, CQ500 as its external test.",
-    "T3": "Random: random-init encoder, same readouts. Single-task models exist only for trained tasks. Literature: the best "
+    "T3": "Single-task models exist only for trained tasks. Literature: the best "
           "published frozen / linear-probe foundation model; * supervised model (no frozen result published). Ours: the "
           "readout picked on validation.",
 }
-COLS = ["Random init", "Single-task", "Literature", "Ours"]
+COLS = ["Single-task", "Literature", "Ours"]
 
 
 def fmt(v):
@@ -146,7 +146,7 @@ def draw(tag, spec_):
     ax.axis("off")
     ax.text(0.6, 8.35, title, fontsize=17, fontweight="bold", color="#1d1d1b", va="center")
     ax.text(0.6, 7.85, sub, fontsize=11.5, color="#55544f", va="center")
-    xs = [8.6, 10.5, 12.4, 14.6]
+    xs = [9.6, 12.0, 14.6]
     top, rh = 7.15, min(0.62, 5.6 / max(len(rows), 1))
     for x, c in zip(xs, COLS):
         ax.text(x, top, c, ha="center", va="center", fontsize=12.5, fontweight="bold",
@@ -162,9 +162,9 @@ def draw(tag, spec_):
         ax.text(5.9, y, metric, ha="center", va="center", fontsize=11.5, color="#55544f")
         ov, from14 = (ours if ours else (None, False))
         any_r14 |= bool(from14)
-        for x, v, bold in ((xs[0], r, False), (xs[1], s, False), (xs[2], lit, False)):
+        for x, v, bold in ((xs[0], s, False), (xs[1], lit, False)):
             ax.text(x, y, fmt(v), ha="center", va="center", fontsize=12.5, color="#1d1d1b" if v else "#a3a29b")
-        ax.text(xs[3], y, fmt(ov) + ("ᵃ" if from14 else ""), ha="center", va="center", fontsize=13.5,
+        ax.text(xs[2], y, fmt(ov) + ("ᵃ" if from14 else ""), ha="center", va="center", fontsize=13.5,
                 fontweight="bold", color="#1c5cab")
         ax.plot([0.6, 15.6], [y - rh / 2, y - rh / 2], color="#e1e0da", lw=0.8)
     note = NOTES[tag] + (" ᵃ R14-F; otherwise the new run." if any_r14 else " Ours: the new run.")
@@ -178,3 +178,20 @@ for tag, sp in (("T1", T1), ("T2", T2), ("T3", T3)):
     draw(tag, sp)
     print(tag, [(r[0], fmt(r[2]), fmt(r[3]), fmt(r[4]), fmt(r[5][0]) if r[5] else "–", "R14F" if r[5] and r[5][1] else "")
                 for r in sp[2]])
+
+
+# ---- the same tables as Markdown ---------------------------------------------------------------------------------
+md = ["# BrainQuery evaluation, 9 November 2026", "",
+      "**Ours** = best of our two models (the new full-suite run and R14-F); ᵃ marks R14-F, otherwise the new run. "
+      "**Literature**: \\* = supervised or fine-tuned published model, usually on its own split; unstarred = frozen or "
+      "linear-probe foundation model. – = no comparable value.", ""]
+for i, (tag, (title, sub, rows)) in enumerate((("T1", T1), ("T2", T2), ("T3", T3)), 1):
+    md += [f"## {i}. {title}", "", f"{sub[0].upper() + sub[1:]}.", "", "| Task | Metric | Single-task | Literature | Ours |",
+           "|---|---|---|---|---|"]
+    for name, metric, r, s_, lit, ours in rows:
+        ov, f14 = ours if ours else (None, False)
+        md.append(f"| {name} | {metric} | {fmt(s_)} | {fmt(lit).replace('*', chr(92) + '*')} | **{fmt(ov)}**"
+                  f"{'ᵃ' if f14 else ''} |")
+    md += ["", NOTES[tag].replace("*", "\\*"), ""]
+(OUT / "eval_tables.md").write_text("\n".join(md))
+print("markdown ->", OUT / "eval_tables.md")
