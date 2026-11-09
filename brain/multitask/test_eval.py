@@ -27,7 +27,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 
 from brain.common.paths import resolve
 from brain.downstream.metrics import balanced_accuracy
-from brain.multitask.data import checkpoint_stats, input_patch, load_labels, prepare
+from brain.multitask.data import checkpoint_stats, load_labels, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.fewshot import _loader, linear_probe, load_model
 
@@ -128,7 +128,8 @@ def main() -> None:
     for i, ck in enumerate([] if a.probe_only else a.ckpts):
         model, reg, cfg = (ref_model, ref_reg, ref_cfg) if i == 0 else load_model(Path(ck), dev)
         name = Path(ck).parent.name + "/" + Path(ck).stem
-        patch = input_patch(model, cfg)                  # native geometry: the ngeo stem's token patch
+        # the 1 mm patch: run_eval switches to the ngeo stem's patch for a mixed batch's native-geometry part itself
+        patch = tuple(model.backbone.patch_xyz)
         m_stats = checkpoint_stats(model.label_stats, labels_dir, stats)
         for t in tasks:
             if t not in reg.index or not test_ids[t]:

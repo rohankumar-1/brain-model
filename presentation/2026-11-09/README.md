@@ -43,6 +43,39 @@ external cohorts it never trained on.
    their labels, transfers to new tasks as well as the best published foundation models, and the remaining gap is
    resolution, which we are now training against."
 
+## Extra slides: what the model does and how it fits (all on the new run, held-out test scans)
+
+Suggested placement: after the headline evidence (5), before gap and plan (6). Strongest first.
+
+- `figures/extra/cq500_fewshot.png`: **"Reading a new hospital's CTs needs no labels from it."** The RSNA heads read
+  CQ500 zero-shot as well as readouts fitted with 8 labelled CQ500 positives (any bleed .908 vs .890, subarachnoid
+  .931 vs .877), and better with fewer.
+- `figures/extra/cq500_roc.png`: ROC curves of that zero-shot read, per finding, beside the supervised CQ500 reference.
+- `figures/audit/seg_examples.png`: reference vs predicted masks on typical test scans (the scans nearest each task's
+  median Dice, not the best). Median Dice: hemorrhage .76, whole tumour .73, enhancing tumour .85. These are medians
+  over 30-40 scans; the eval tables report means over all test scans, which a few complete misses pull down.
+- `figures/audit/anatomy.png`: every anatomy head at once on one MRI and one CT test scan (no reference shown: these
+  targets are SynthSeg pseudo-labels).
+- `figures/extra/regression.png`: predicted vs true age (R² .91, mean error 4.9 years, newborns to 90) and normalised
+  brain volume (R² .96) on 1,000 pooled CT + MRI test scans.
+- `figures/audit/attention_maps.png` and `attention_lesion.png`: **where task tokens look.** Hemorrhage and tumour
+  tokens put 6-8x their fair share of attention on CT bleeds and 2-6x on gliomas; age, brain-volume and ventricle
+  tokens about 1x (spread over the brain). Honest reading: lesion tokens find *any* lesion (the tumour token also looks
+  at bleeds); they were never trained to ignore the other kind.
+- `figures/audit/task_overlap_groups_last.png` (and the full `task_overlap_last.png`): which task groups attend to the
+  same places. Lesion-type groups (hemorrhage, lesions, tumour, radiology, diagnosis, clinical scores) share attention
+  (.45-.69); anatomy, volumes, asymmetry and CT measures overlap more with each other than with lesion groups;
+  demographics overlap little with anything. This matches the earlier gradient-conflict finding (local lesion tasks vs
+  global anatomy tasks). Caveat: last-layer attention is concentrated on few image tokens, so some unrelated tasks
+  (e.g. age and CT skull density) have near-identical maps.
+- `figures/audit/fit_by_data.png`: **data-rich tasks are not memorised; small cohorts are.** Same heads on training vs
+  test scans: median train - test gap +0.02 for the 39 tasks with >= 5,000 labelled scans, +0.10 for the 21 with
+  < 2,000 (MGMT, survival, neuro diagnosis, MMSE grade near 1.0 on training scans). Message: for the main tasks more
+  compute / resolution should still pay; for rare tasks the limit is data. (It does *not* show uniform underfitting.)
+
+Native-CT model (finished 14:10, not in the headline): CQ500 zero-shot below the 1 mm model on every finding (any bleed
+.886 vs .908, subdural .841 vs .915); its new stem needs a warm-up before a fair comparison.
+
 ## Caveats to keep on the slides or in speaker notes
 
 - Literature values use their own splits and often more labels or sequences; starred (\*) values are supervised or
@@ -71,6 +104,9 @@ external cohorts it never trained on.
 | `data/cq500_from_rsna_heads_*.csv` | CQ500 read by the RSNA heads: zero-shot and few-shot arms |
 | `data/validation_new_run_vs_r16.csv` | Validation score per task group, new run vs R16 |
 | `data/datasets.json` | Per-cohort train / test / external scan counts and totals |
+| `figures/audit/*.png`, `figures/extra/*.png` | Model-audit and extra result slides, 16:9 (see "Extra slides") |
+| `data/train_vs_test_fit.csv` | Per task: own-head score on training vs test scans, labelled training scans |
+| `data/task_attention_overlap.csv` | Task-token x task-token attention-map similarity (header = token's first task) |
 
 Model names: **new run** = `full_iso_bank` (R14-F + 30k steps with the learned window bank on the re-encoded store,
 1 mm grid); **R14-F** = the previous best run; **R16** = the stopped predecessor recipe. Published models run through
