@@ -32,6 +32,8 @@ models:
   BQ-R14-EMA:     {ckpt: runs/multitask/r14/last_ema.pt, note: "R14's weight average (decay 0.999) at step 100k"}
   BQ-R14F:        {ckpt: runs/multitask/r14f/last.pt, note: "R14 + 15k steps with study-level input: a study's co-registered sequences fused inside the encoder after block 8 (configs/multitask/r14f.yaml); scored on single scans here"}
   BQ-R16:         {ckpt: runs/multitask/r16/last.pt, note: "R14-F + 30k steps: labels v12 (T1c-only enhancing / core, CT HU masks, lesion-aware anatomy, Pedi-CT), subject-balanced sampling, training decontamination, anchor-only image measures under fusion (configs/multitask/r16.yaml)"}
+  BQ-FISO:        {ckpt: runs/multitask/full_iso_bank/last.pt, note: "R14-F + 30k steps, R16 recipe + shared learned window bank (6 asinh windows, warm start = R14-F input), re-encoded int16 store, every scan 1 mm, global batch 12 (configs/multitask/full_iso_bank.yaml)"}
+  BQ-FNGEO:       {ckpt: runs/multitask/full_ngeo_bank/last.pt, note: "as BQ-FISO but CT read at native geometry (0.5 mm in-plane, native slices, in-plane stem) mixed with 1 mm MRI (configs/multitask/full_ngeo_bank.yaml); frozen benchmark CT goes through the 1 mm stem"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
   regional_stats:
