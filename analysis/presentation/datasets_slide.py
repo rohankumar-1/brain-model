@@ -40,7 +40,7 @@ SPAN = x_of(HI)
 
 def panel(ax, gidx):
     y = 0
-    ax.set_xlim(-(GAP + SPAN), GAP + SPAN)
+    ax.set_xlim(-(GAP + SPAN + 0.55), GAP + SPAN + 0.15)
     for t in (10, 100, 1000, 10000):
         for s in (-1, 1):
             xx = s * (GAP + x_of(t))
@@ -56,6 +56,7 @@ def panel(ax, gidx):
             if r["train"]:
                 w = max(x_of(r["train"]), 0.04)
                 ax.barh(y, -w, left=-GAP, height=0.68, color=c, edgecolor="white", linewidth=0.5)
+                ax.text(-GAP - w - 0.06, y, f"{r['train']:,}", ha="right", va="center", fontsize=7.2, color=INK2)
             tv = r["test"] or r["ext"]
             if tv:
                 w = max(x_of(tv), 0.04)
@@ -64,6 +65,7 @@ def panel(ax, gidx):
                 else:
                     ax.barh(y, w, left=GAP, height=0.68, facecolor=c, edgecolor="white", linewidth=0.0,
                             hatch="///")
+                ax.text(GAP + w + 0.06, y, f"{tv:,}", ha="left", va="center", fontsize=7.2, color=INK2)
             y -= 1
         y -= 0.35
     ax.set_ylim(y + 0.2, 0.9)
