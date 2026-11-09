@@ -56,6 +56,13 @@ Suggested placement: after the headline evidence (5), before gap and plan (6). S
   over 30-40 scans; the eval tables report means over all test scans, which a few complete misses pull down.
 - `figures/audit/anatomy.png`: every anatomy head at once on one MRI and one CT test scan (no reference shown: these
   targets are SynthSeg pseudo-labels).
+- `figures/extra/mt_vs_single.png`: **one model matches the specialists where they do well and rescues them where
+  they fail.** Per trained task, the new run's own head vs the best from-scratch single-task model (57 tasks): within
+  ±0.03 on 26 (anatomy masks, hemorrhage types), ahead by > 0.03 on 21 (tumour sub-regions +0.28-0.32, sex, diagnoses,
+  survival, tumour type, age), behind by > 0.03 on 10 (CT density / CSF fraction, MRI edema, artifact and mass,
+  MGMT, epidural). Gain does not depend much on labelled-data size (median +0.01 below 5,000 scans, 0.00 above);
+  it is largest where single-task training struggles. Caveat: specialists were scored in earlier runs; test scans come
+  from the same test splits but label tables may differ slightly.
 - `figures/extra/regression.png`: predicted vs true age (R² .91, mean error 4.9 years, newborns to 90) and normalised
   brain volume (R² .96) on 1,000 pooled CT + MRI test scans.
 - `figures/audit/attention_maps.png` and `attention_lesion.png`: **where task tokens look.** Hemorrhage and tumour
