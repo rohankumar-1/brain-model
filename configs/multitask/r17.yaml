@@ -130,13 +130,13 @@ aug:
 loss: {seg_stride: 2, uncertainty_clamp: [1.0, 2.0], token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
   negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
 optim:
-  lr: 0.0003                       # PROVISIONAL: set with the batch size after the memory / throughput test
+  lr: 0.0003                       # global batch 16 (4 GPUs x 4); smoke 28589306: stable, gnorm falling
   enc_lr_mult: 1.0                 # from scratch: the encoder trains at the full LR
   layer_decay: 1.0
   weight_decay: 0.05
   warmup_steps: 5000
   clip_grad: 1.0
-  batch_size: 3                    # PROVISIONAL anchors per GPU (ViT-B + conv stems: measure on an L40S); 4 GPUs
+  batch_size: 4                    # anchors per GPU; smoke 28589306: peak 26.9 GiB of 46 on an L40S, ~18 vol/s on 4 GPUs
   schedule: wsd
   decay_steps: 25000
   betas: [0.9, 0.95]             # from scratch: a faster second moment recovers from loss spikes
