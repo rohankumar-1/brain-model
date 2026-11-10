@@ -138,6 +138,9 @@ def _multitask_defaults() -> dict[str, Any]:
                   "regression": {"kind": "scalar", "bins": 80, "range": [-5.0, 5.0], "sigma_ratio": 0.75},
                   # a logit per encoder token for a slot (BrainQuery.token_logits), for loss.token_weight / slice_weight
                   "token_map": {"enabled": False, "dim": 64},
+                  # multiple-instance binary readout for the registry's ``pool: mil`` tasks (needs token_map): the
+                  # slot's token map soft-max pooled and added to its logit (BrainQuery.mil_logits)
+                  "mil": {"enabled": False},
                   # shared learned window bank (brain.models.window_bank; CONTRACT 4): the encoder takes native units and
                   # windows them through k learnable asinh windows (k input channels); off = the fixed windows
                   "window_bank": {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1,

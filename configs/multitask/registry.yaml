@@ -99,6 +99,7 @@ tasks:
   # The six findings share one task token (``token``, used with model.task_tokens.share): one token answers them all,
   # each read through its own offset.
   - id: hemorrhage_any
+    pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions:
@@ -106,27 +107,32 @@ tasks:
       - "Detect bleeding inside the skull."
     sources: [{source: rsna, subtype: any}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_epidural
+    pool: mil
     fine: true
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an epidural hematoma?", "Detect blood between the skull and the dura."]
     sources: [{source: rsna, subtype: epidural}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_intraparenchymal
+    pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an intraparenchymal hemorrhage?", "Detect bleeding within the brain tissue."]
     sources: [{source: rsna, subtype: intraparenchymal}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_intraventricular
+    pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there intraventricular hemorrhage?", "Detect blood inside the ventricles."]
     sources: [{source: rsna, subtype: intraventricular}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_subarachnoid
+    pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there subarachnoid hemorrhage?", "Detect blood in the subarachnoid space and sulci."]
     sources: [{source: rsna, subtype: subarachnoid}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
   - id: hemorrhage_subdural
+    pool: mil
     fine: true
     token: hemorrhage_findings
     type: binary
@@ -500,6 +506,7 @@ tasks:
       - "Read the scan as a radiologist: anything beyond age-expected change?"
     sources: [{source: fastmri_findings, finding: mri_normal_for_age}]
   - id: mri_small_vessel_disease
+    pool: mil
     group: radiology
     token: radiology_findings
     type: binary
@@ -508,6 +515,7 @@ tasks:
       - "Is there global chronic white matter ischemic change?"
     sources: [{source: fastmri_findings, finding: mri_small_vessel_disease}]
   - id: mri_wm_lesion
+    pool: mil
     group: radiology
     token: radiology_findings
     fine: true
@@ -517,6 +525,7 @@ tasks:
       - "Find nonspecific white matter hyperintensities or lesions."
     sources: [{source: fastmri_findings, finding: mri_wm_lesion}]
   - id: mri_postop
+    pool: mil
     group: radiology
     token: radiology_findings
     needs_skull: true
@@ -526,6 +535,7 @@ tasks:
       - "Are there post-surgical or post-treatment changes?"
     sources: [{source: fastmri_findings, finding: mri_postop}]
   - id: mri_mass
+    pool: mil
     group: radiology
     token: radiology_findings
     type: binary
@@ -534,6 +544,7 @@ tasks:
       - "Detect a mass lesion in or around the brain."
     sources: [{source: fastmri_findings, finding: mri_mass}]
   - id: mri_edema
+    pool: mil
     group: radiology
     token: radiology_findings
     type: binary
@@ -550,6 +561,7 @@ tasks:
       - "Is there ventriculomegaly on this MRI?"
     sources: [{source: fastmri_findings, finding: mri_enlarged_ventricles}]
   - id: mri_infarct
+    pool: mil
     group: radiology
     token: radiology_findings
     fine: true

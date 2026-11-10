@@ -114,6 +114,12 @@ class MultitaskDataset(Dataset):
                 labels = drop_untrusted_labels(labels, self._ngeo_untrusted)
             self.ngeo_root = Path(self.ngeo.get("root") or store_root)
             self._ngeo_rel = dict(zip(ngi["volume_id"].astype(str), ngi["path"].astype(str)))
+            # the copy's slice thickness (its slices may be re-sliced thicker than the 1 mm source, ``synth_thick``)
+            thick = pd.concat([pd.to_numeric(ngi.get(c, pd.Series(np.nan, index=ngi.index)), errors="coerce")
+                               for c in ("slice_mm", "thick_mm")], axis=1).max(axis=1)
+            self._ngeo_thick = dict(zip(ngi["volume_id"].astype(str), thick.fillna(0.0).astype(float)))
+            # tasks whose target is only trusted on thin CT (registry ct_max_thick_mm): read at 1 mm from a thicker copy
+            self._thin_only = {i: t.ct_max_thick_mm for i, t in enumerate(reg.tasks) if t.ct_max_thick_mm is not None}
             # mask name (lower case) -> ngeo mask path per scan, from the index's mask_<name>_ngeo columns
             cols = {c[5:-5]: c for c in ngi.columns if c.startswith("mask_") and c.endswith("_ngeo")}
             self._ngeo_masks = {str(v): {m: str(r[c]) for m, c in cols.items() if isinstance(r[c], str) and r[c]}
@@ -473,11 +479,16 @@ class MultitaskDataset(Dataset):
 
     def _ngeo_ok(self, vid: str, drawn, masked: bool) -> bool:
         """Mixed mode: whether this sample can be read at native geometry. Not when it is a masked (reconstruction)
-        sample, asks a dense (synthesis / reconstruction) slot, may get study partners, or asks a mask the prep did
-        not copy to the ngeo grid; those samples come from the 1 mm store, so every label keeps training."""
+        sample, asks a dense (synthesis / reconstruction) slot, may get study partners, asks a mask the prep did
+        not copy to the ngeo grid, or asks a thin-CT-only task (registry ``ct_max_thick_mm``) of a copy with thicker
+        slices (SynthRAD's 1 mm CT is re-sliced to 5 mm there: full_ngeo_bank learned those six SynthSeg structures on
+        CT from 5 mm slabs only, and predicted none); those samples come from the 1 mm store, so every label keeps
+        training."""
         if masked or (self.study and self.partners.get(vid)):
             return False
         have = self._ngeo_masks.get(vid) or {}
+        if needs_thin_ct(drawn, self._thin_only, self._ngeo_thick.get(vid, 0.0)):
+            return False                  # a thin-CT-only target (small SynthSeg structures) on a re-sliced copy
         for _, _, ref in drawn:
             if ref == "@recon" or ref.startswith("@synth:"):
                 return False
@@ -689,6 +700,12 @@ def collate_mixed(batch: list[dict], pad_multiple: int = 4) -> dict:
     ngeo = [b for b in batch if "affine" in b]
     return {"mixed": True, "iso": collate(iso) if iso else None,
             "ngeo": collate_ngeo(ngeo, pad_multiple) if ngeo else None}
+
+
+def needs_thin_ct(drawn, thin_only: dict[int, float], thick_mm: float) -> bool:
+    """Whether a sample's drawn tasks include one only trusted on CT slices at most ``thin_only[t]`` mm thick while the
+    native-geometry copy's slices are ``thick_mm`` thick (then it is read from the 1 mm store)."""
+    return any(t in thin_only and thick_mm > thin_only[t] for t, _, _ in drawn)
 
 
 def mixed_parts(raw: dict) -> list[dict]:

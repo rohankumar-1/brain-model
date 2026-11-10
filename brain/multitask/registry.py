@@ -60,10 +60,20 @@ class Task:
     fine: bool = False               # small target (aneurysm, vessel, thin bleed): with ``aug.task_aware`` no blur,
                                      # field-of-view cut or skull stripping on a scan asked it
     sparse: bool = False             # tiny segmentation target many scans lack: losses.sparse_seg_loss
+    pool: str = "token"              # binary readout: "token" (the task token) or "mil" (multiple-instance: the task
+                                     # token's per-location logits, soft-max pooled, plus the token logit; BrainQuery)
 
     @property
     def trained(self) -> bool:
         return self.role == "train"
+
+    @property
+    def ct_max_thick_mm(self) -> float | None:
+        """The thinnest ``ct_max_thick_mm`` of the task's sources (its target is only trusted on CT slices at most this
+        thick), or None. Native-geometry copies are re-sliced, so a sample asking it is read at 1 mm when its copy's
+        slices are thicker (data.MultitaskDataset._ngeo_ok)."""
+        v = [float(s["ct_max_thick_mm"]) for s in self.sources if s.get("ct_max_thick_mm") is not None]
+        return min(v) if v else None
 
 
 TRAINABLE_TYPES = ("binary", "regression", "multiclass", "segmentation", "dense")  # types slot_losses has a loss for
@@ -132,10 +142,12 @@ def load_registry(path: str | Path | None = None) -> Registry:
                     token=t.get("token"), ssl=bool(t.get("ssl", False)),
                     role=str(t.get("role", "train")), analog=t.get("analog"),
                     needs_skull=bool(t.get("needs_skull", False)), fine=bool(t.get("fine", False)),
-                    sparse=bool(t.get("sparse", False)))
+                    sparse=bool(t.get("sparse", False)), pool=str(t.get("pool", "token")))
         task.group = str(t.get("group") or default_group(task.id, task.role))
         if task.type not in TYPES:
             raise ValueError(f"task {task.id}: unknown type {task.type}")
+        if task.pool not in ("token", "mil") or (task.pool == "mil" and task.type != "binary"):
+            raise ValueError(f"task {task.id}: pool {task.pool!r} (token, or mil for binary tasks)")
         if task.role not in ROLES:
             raise ValueError(f"task {task.id}: unknown role {task.role}")
         if task.type == "multiclass" and len(task.classes) < 2:

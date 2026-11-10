@@ -264,6 +264,17 @@ class BrainQuery(nn.Module):
             dk = int(tm.get("dim", 64))
             self.tok_q, self.tok_k = nn.Linear(dim, dk), nn.Linear(d_enc, dk)
             self.tok_bias = nn.Parameter(torch.tensor(-3.0))          # prior ~5% of tokens on
+        # multiple-instance binary readout (registry ``pool: mil``): the slot's token map (its per-location logits)
+        # soft-max pooled over the scan's foreground tokens, (1 / r) log mean exp(r l), added to the task token's own
+        # logit; r per task, learned (large: one location decides, a focal finding; small: the mean, a diffuse one)
+        # (``model.mil.enabled``; off in older configs, so their checkpoints load and answer unchanged)
+        mil_on = bool((cfg.get("mil") or {}).get("enabled", False))
+        self.register_buffer("mil", torch.tensor([mil_on and t.pool == "mil" for t in reg.tasks]), persistent=False)
+        self.mil_logr = None
+        if bool(self.mil.any()):
+            if self.tok_q is None:
+                raise ValueError("registry pool: mil needs model.token_map.enabled (the per-location logits)")
+            self.mil_logr = nn.Parameter(torch.full((n_tasks,), math.log(2.0)))
         self.cls_query = nn.Linear(dim, dim)
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
         self.survival = mlp(dim, dim, 1)        # no survival task is trained or asked: kept so checkpoints load
@@ -466,6 +477,23 @@ class BrainQuery(nn.Module):
             out["regression_hl"] = (lg, self.reg_edges, self.reg_sigma)
         return out
 
+    def mil_logits(self, enc: dict, z: torch.Tensor, task: torch.Tensor, keep: torch.Tensor) -> torch.Tensor | None:
+        """(B, K) pooled token-map logits of the ``pool: mil`` slots (0 elsewhere), to add to ``heads``' binary logit;
+        None when no such slot is asked. ``keep`` (B, N): the foreground tokens pooled over."""
+        if self.mil_logr is None:
+            return None
+        m = self.mil[task.clamp_min(0)] & (task >= 0)
+        if not bool(m.any()):
+            return None
+        pairs = m.nonzero()
+        lg = self.token_logits(enc, z, pairs).float()                               # (Q, N)
+        kp = keep[pairs[:, 0]].bool()
+        r = self.mil_logr[task[pairs[:, 0], pairs[:, 1]]].float().exp().clamp(0.05, 50.0).unsqueeze(-1)
+        pooled = (torch.logsumexp((lg * r).masked_fill(~kp, float("-inf")), -1)
+                  - kp.sum(-1).clamp_min(1).float().log()) / r[:, 0]
+        add = torch.zeros(task.shape, device=z.device, dtype=pooled.dtype)
+        return add.index_put((pairs[:, 0], pairs[:, 1]), pooled)
+
     def token_logits(self, enc: dict, z: torch.Tensor, pairs: torch.Tensor) -> torch.Tensor:
         """(Q, N) token-map logits of the slots ``pairs`` (Q, 2) = (row, slot), in the encoder's (z, y, x) token order."""
         tokens = enc["tokens"]
@@ -511,6 +539,9 @@ class BrainQuery(nn.Module):
         z = self.slots_alone(enc, task, keep) if alone else self.slots(enc, task, keep)
         z = self.member(z, task)
         out = self.heads(z, task)
+        mil = self.mil_logits(enc, z, task, keep)
+        if mil is not None:
+            out["binary"] = out["binary"] + mil.to(out["binary"].dtype)
         out["seg"] = out["dense"] = out["tok"] = None
         if tok_pair is not None and len(tok_pair) and self.tok_q is not None:
             out["tok"] = self.token_logits(enc, z, tok_pair)
