@@ -40,14 +40,14 @@ Frozen benchmark.
 
 | Task | Metric | Single-task | Literature | Ours |
 |---|---|---|---|---|
-| ADNI · CN vs AD | AUC | – | .922 | **.918**ᵃ |
+| ADNI · CN vs AD | AUC | – | .922 | **.921**ᵃ |
 | ADNI · CN vs MCI | AUC | – | .757 | **.768** |
 | ADNI · MMSE | R² | – | .43 | **.375**ᵃ |
-| PPMI · Parkinson's vs control | AUC | – | .610 | **.514**ᵃ |
-| UCSF · IDH mutation | AUC | – | .901 | **.915**ᵃ |
+| PPMI · Parkinson's vs control | AUC | – | .610 | **.554** |
+| UCSF · IDH mutation | AUC | – | .901 | **.922** |
 | CQ500 · calvarial fracture | AUC | – | .962\* | **.854** |
 | CQ500 · midline shift | AUC | – | .970\* | **.944**ᵃ |
 | ISLES 2024 · LVO side (CTA) | AUC | – | – | **.955**ᵃ |
-| MS3SEG · MS lesion load | R² | – | – | **.751**ᵃ |
+| MS3SEG · MS lesion load | R² | – | – | **.757**ᵃ |
 
 Single-task models exist only for trained tasks. Literature: the best published frozen / linear-probe foundation model; \* supervised model (no frozen result published). Ours: the readout picked on validation.
