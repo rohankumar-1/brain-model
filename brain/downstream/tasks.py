@@ -214,12 +214,6 @@ def _bundle_from_frame(
     )
 
 
-def _binarize(frame: pd.DataFrame, labels: list[str], threshold: float) -> np.ndarray:
-    out = pd.DataFrame(index=frame.index)
-    for col in labels:
-        out[col] = (pd.to_numeric(frame[col], errors="coerce") >= threshold).astype(np.int64)
-    return out.to_numpy(dtype=np.int64)
-
 
 # Label tables copied from the raw dataset folders into the store (pool keeps only archives): read them there first.
 LABEL_SOURCES = PROCESSED_ROOT / "labels" / "sources"
@@ -1101,10 +1095,15 @@ BENCH_EXCLUDE = Path(__file__).resolve().parents[2] / "configs" / "bench" / "exc
 
 
 def bench_exclusions() -> set[str]:
+    """The benchmark's decontamination exclusions (``BRAIN_BENCH_EXCLUDE``: another list, or ``none`` to disable). The
+    public list must exist (a missing file would silently evaluate on duplicates); its git-ignored ``.private.csv`` twin
+    (ADNI / PPMI rows under data-use agreements) is read when present."""
     path = os.environ.get("BRAIN_BENCH_EXCLUDE", str(BENCH_EXCLUDE))
     if path == "none":
         return set()
-    # rows of DUA cohorts (ADNI / PPMI ids may not be published) live in a git-ignored, owner-only twin file
+    if not Path(path).exists():
+        raise FileNotFoundError(f"benchmark exclusion list {path} is missing (BRAIN_BENCH_EXCLUDE=none to evaluate "
+                                f"without decontamination)")
     paths = [Path(path), Path(path).with_name(Path(path).stem + ".private.csv")]
     return set().union(*(set(pd.read_csv(q)["volume_id"].astype(str)) for q in paths if q.exists()))
 
@@ -1123,13 +1122,13 @@ def drop_volumes(task: TaskBundle, drop: set[str]) -> TaskBundle:
 
 
 def load_task(name: str, volumes: pd.DataFrame, **kw) -> TaskBundle:
-    """A downstream task, without the benchmark's decontamination exclusions (``bench_exclusions``)."""
+    """A downstream task, minus the benchmark's decontamination exclusions (``bench_exclusions``)."""
     task = _load_task(name, volumes, **kw)
     drop = bench_exclusions()
     out = drop_volumes(task, drop) if drop else task
     if len(out.volume_ids) != len(task.volume_ids):
         print(f"[task] {name}: {len(task.volume_ids) - len(out.volume_ids)} volumes excluded (benchmark "
-              f"decontamination, {BENCH_EXCLUDE.name})", flush=True)
+              f"decontamination, {Path(os.environ.get('BRAIN_BENCH_EXCLUDE', str(BENCH_EXCLUDE))).name})", flush=True)
     return out
 
 

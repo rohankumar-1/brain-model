@@ -380,6 +380,7 @@ class BrainEncoder(nn.Module):
             raise ValueError(f"n_cls must be 0 or 1, got {n_cls}")
         self.prefix = nn.Parameter(torch.zeros(1, self.n_prefix, dim)) if self.n_prefix else None
         self.apply(self._init_weights)
+        self._init_stems()
         if self.prefix is not None:
             nn.init.trunc_normal_(self.prefix, std=0.02)
         self.meta_emb: nn.Embedding | None = None
@@ -408,6 +409,7 @@ class BrainEncoder(nn.Module):
         self.ngeo_embed = NgeoStemEmbed(self.in_chans, self.embed_dim, self.ngeo_patch_xyz, tuple(int(w) for w in widths),
                                         self.checkpoint_blocks).to(p.device)
         self.ngeo_embed.apply(self._init_weights)
+        self._init_stems()
 
     def enable_fusion(self, after_block: int, heads: int | None = None) -> None:
         """Study-level input (``SequenceFusion``): a study's scans run blocks [0, after_block) as separate rows, are
@@ -422,6 +424,15 @@ class BrainEncoder(nn.Module):
     @property
     def n_prefix(self) -> int:
         return self.n_cls + self.n_registers
+
+    def _init_stems(self) -> None:
+        """He init for the convolution stems (1 mm ``ConvStemEmbed3D``, native-geometry ``NgeoStemEmbed``); their
+        token projection ``proj`` keeps the ViT init."""
+        from brain.models.patch_embed import init_stem_convs
+
+        for emb in (self.patch_embed, getattr(self, "ngeo_embed", None)):
+            if emb is not None and hasattr(emb, "stem"):
+                init_stem_convs(emb.stem)
 
     @staticmethod
     def _init_weights(m: nn.Module) -> None:

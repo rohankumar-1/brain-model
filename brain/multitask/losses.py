@@ -222,7 +222,15 @@ class Balancer(nn.Module):
     def __init__(self, n_tasks: int, group_of: list[int] | None = None, group_weight: list[float] | None = None,
                  clamp: float | None = None):
         super().__init__()
-        self.clamp = float(clamp) if clamp else None
+        # ``clamp``: c (s in [-c, c]) or [lo, hi] (s in [-lo, hi]): the task weight exp(-s) within [e^-hi, e^lo]. An
+        # asymmetric clamp lets noisy tasks be down-weighted further without letting small-loss types (dense Huber,
+        # Dice, HL-Gauss near 0) be up-weighted further: s* = log L follows each loss type's units
+        if clamp is None or clamp == 0:
+            self.clamp = None
+        elif isinstance(clamp, (list, tuple)):
+            self.clamp = (float(clamp[0]), float(clamp[1]))
+        else:
+            self.clamp = (float(clamp), float(clamp))
         self.data_term: torch.Tensor | None = None
         # the retired ``ema`` mode's running means: unused, kept so saved balancer states (R14 -> R14-F) load strictly
         self.register_buffer("ema", torch.zeros(n_tasks))
@@ -252,7 +260,12 @@ class Balancer(nn.Module):
         return total, per_task.detach()
 
     def _log_var(self) -> torch.Tensor:
-        return self.log_var if self.clamp is None else self.clamp * torch.tanh(self.log_var / self.clamp)
+        """s, soft-clamped (tanh, slope 1 at 0) to [-lo, hi]."""
+        if self.clamp is None:
+            return self.log_var
+        lo, hi = self.clamp
+        v = self.log_var
+        return torch.where(v < 0, lo * torch.tanh(v / lo), hi * torch.tanh(v / hi))
 
     def _group_mean(self, scaled: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
         """Mean over the present tasks of each group, then the weighted mean over present groups."""

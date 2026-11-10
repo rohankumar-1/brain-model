@@ -76,3 +76,23 @@ def test_uncertainty_weights_are_clamped_and_the_data_term_stays_positive():
     loss = torch.tensor([[0.05, 0.05, 0.05]])
     total, _ = bal(loss, torch.ones_like(loss, dtype=torch.bool), torch.tensor([[0, 1, 2]]))
     assert float(bal.data_term) > 0 and float(total) < float(bal.data_term)    # the +s part can push the total down
+
+
+def test_balancer_asymmetric_clamp_bounds_the_task_weights():
+    """``uncertainty_clamp: [lo, hi]``: s within [-lo, hi], weights exp(-s) within [e^-hi, e^lo]; a scalar is symmetric."""
+    import math
+
+    import torch
+
+    from brain.multitask.losses import Balancer
+
+    b = Balancer(3, clamp=[1.0, 2.0])
+    with torch.no_grad():
+        b.log_var.copy_(torch.tensor([-50.0, 0.0, 50.0]))
+    w = b.weights()
+    assert math.isclose(float(w[0]), math.e, rel_tol=1e-4) and float(w[1]) == 1.0
+    assert math.isclose(float(w[2]), math.exp(-2.0), rel_tol=1e-4)
+    s = Balancer(1, clamp=1.0)
+    with torch.no_grad():
+        s.log_var.fill_(50.0)
+    assert math.isclose(float(s.weights()[0]), math.exp(-1.0), rel_tol=1e-4)

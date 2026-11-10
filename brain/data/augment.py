@@ -344,11 +344,11 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"], skip=protect)
     if _enabled(aug.get("ct_physical")):          # CT physical augmentations in native units, as in the native path,
-        x = ct_physical(x, modality, aug["ct_physical"])   # so fixed-window and bank arms share one recipe
+        x = ct_physical(x, modality, aug["ct_physical"], skip=protect)   # fixed-window and bank arms: one recipe
     if _enabled(aug.get("through_plane")):
         x = through_plane(x, aug["through_plane"], thick, skip=sharp)
     if _enabled(aug.get("kernel")):
-        x = recon_kernel(x, modality, aug["kernel"], skip_blur=sharp)
+        x = recon_kernel(x, modality, aug["kernel"], skip_blur=sharp, skip=protect)
     noise = aug.get("noise") or {}
     if _enabled(noise):
         x, noisy = rician_noise(x, modality, noise) if str(noise.get("kind", "gaussian")) == "rician" else (x, None)
@@ -379,11 +379,15 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
     return y
 
 
-def ct_physical(x: torch.Tensor, modality: torch.Tensor, cfg: dict) -> torch.Tensor:
+def ct_physical(x: torch.Tensor, modality: torch.Tensor, cfg: dict, skip: torch.Tensor | None = None) -> torch.Tensor:
     """CT rows: a scanner calibration error, ``HU' = HU * (1 + s) + o`` with ``o ~ U(+-offset_hu)`` and
-    ``s ~ U(+-scale)``, applied to the foreground only (air stays at the floor)."""
+    ``s ~ U(+-scale)``, applied to the foreground only (air stays at the floor). ``skip`` rows (live intensity targets:
+    CT densities measured from the unaugmented scan) are left alone: a +-10 HU shift is three standard deviations of
+    brain density, a label the model cannot see."""
     r, dev = x.shape[0], x.device
     on = (torch.rand(r, device=dev) < float(cfg["p"])) & (modality.reshape(r).to(dev) == MOD_CT)
+    if skip is not None:
+        on &= ~skip.to(dev)
     idx = on.nonzero(as_tuple=True)[0]
     if idx.numel():
         o = float(cfg.get("offset_hu", 10.0))
@@ -395,12 +399,15 @@ def ct_physical(x: torch.Tensor, modality: torch.Tensor, cfg: dict) -> torch.Ten
     return x
 
 
-def recon_kernel(x: torch.Tensor, modality: torch.Tensor, cfg: dict, skip_blur: torch.Tensor | None = None) -> torch.Tensor:
+def recon_kernel(x: torch.Tensor, modality: torch.Tensor, cfg: dict, skip_blur: torch.Tensor | None = None,
+                 skip: torch.Tensor | None = None) -> torch.Tensor:
     """CT rows: a different reconstruction kernel, in-plane only (the rows / columns of an axial slice: y and x): a
     softer kernel as a Gaussian blur (``sigma_vox``), or with probability ``sharpen`` a sharper one as an unsharp mask
     ``x + a (x - blur(x))`` (``amount``). ``skip_blur`` rows (small targets) are only ever sharpened."""
     r, dev = x.shape[0], x.device
     on = (torch.rand(r, device=dev) < float(cfg["p"])) & (modality.reshape(r).to(dev) == MOD_CT)
+    if skip is not None:                      # live intensity targets (calcification: a voxel fraction above a HU cut)
+        on &= ~skip.to(dev)
     sharp = torch.rand(r, device=dev) < float(cfg.get("sharpen", 0.5))
     if skip_blur is not None:
         sharp = sharp | skip_blur.to(dev)
@@ -429,11 +436,11 @@ def _appearance_native(x, modality, aug, thick, protect, sharp) -> torch.Tensor:
     if _enabled(aug.get("bias")):
         x = bias_field(x, modality, aug["bias"], skip=protect)          # MRI rows only
     if _enabled(aug.get("ct_physical")):
-        x = ct_physical(x, modality, aug["ct_physical"])
+        x = ct_physical(x, modality, aug["ct_physical"], skip=protect)
     if _enabled(aug.get("through_plane")):
         x = through_plane(x, aug["through_plane"], thick, skip=sharp)
     if _enabled(aug.get("kernel")):
-        x = recon_kernel(x, modality, aug["kernel"], skip_blur=sharp)
+        x = recon_kernel(x, modality, aug["kernel"], skip_blur=sharp, skip=protect)
     noise = aug.get("noise") or {}
     noisy = torch.zeros(r, dtype=torch.bool, device=dev)
     if _enabled(noise) and str(noise.get("kind", "gaussian")) == "rician":

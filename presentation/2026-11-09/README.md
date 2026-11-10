@@ -118,3 +118,14 @@ Native-CT model (finished 14:10, not in the headline): CQ500 zero-shot below the
 Model names: **new run** = `full_iso_bank` (R14-F + 30k steps with the learned window bank on the re-encoded store,
 1 mm grid); **R14-F** = the previous best run; **R16** = the stopped predecessor recipe. Published models run through
 our benchmark: CT-FM, BrainIAC, BrainFM, HLIP.
+
+## Correction (10 November 2026)
+
+The tables above (`eval_tables.md`, `figures/eval_t*.png`) chose "Ours" per row as the better of two models **on the
+test score**, a mild selection on test. `eval_tables_valpick.md` and `figures/valpick/` are the corrected versions:
+tables 1-2 use the new run's own heads throughout (fixed in advance; zero-shot has no validation to choose on), and in
+table 3 both the model and its readout are picked on validation. Changes: ADNI CN vs MCI .768 -> .754 (literature .757:
+a tie, not a win), ADNI CN vs AD .921 -> .912, MMSE .375 -> .353, RSNA any bleed .964 -> .962, subdural .931 -> .925,
+age .922 -> .908, CQ500 zero-shot any bleed .917 -> .908, IPH .903 -> .893, SAH .935 -> .930, EDH .882 unchanged,
+MS lesion load .757 -> .729. UCSF IDH (.922 vs .901) and CQ500 intraventricular (.981 vs .931) are unchanged.
+Use the corrected tables from now on.

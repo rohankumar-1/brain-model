@@ -38,7 +38,7 @@ from brain.common.paths import REPO_ROOT
 RECORD_VERSION = 1
 RESULTS_ROOT = Path(os.environ.get("BRAIN_RESULTS", REPO_ROOT / "results"))
 # environment settings that change what an evaluation computes (recorded with every result)
-ENV_FLAGS = ("BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_STRIPPED", "OMP_NUM_THREADS")
+ENV_FLAGS = ("BRAIN_RSNA_MAX_TRAIN", "BRAIN_RSNA_MAX_EVAL", "BRAIN_STRIPPED", "BRAIN_BENCH_EXCLUDE", "OMP_NUM_THREADS")
 
 
 def now_utc() -> str:

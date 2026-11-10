@@ -141,6 +141,9 @@ def _multitask_defaults() -> dict[str, Any]:
                   # multiple-instance binary readout for the registry's ``pool: mil`` tasks (needs token_map): the
                   # slot's token map soft-max pooled and added to its logit (BrainQuery.mil_logits)
                   "mil": {"enabled": False},
+                  # from-scratch ViT only (an init_from encoder keeps its own): stochastic depth (max rate, linear over
+                  # depth), LayerScale init (None: off), RoPE shortest period in mm (None: the original 6.3 mm)
+                  "drop_path": 0.0, "layer_scale": None, "rope_min_period_mm": None,
                   # shared learned window bank (brain.models.window_bank; CONTRACT 4): the encoder takes native units and
                   # windows them through k learnable asinh windows (k input channels); off = the fixed windows
                   "window_bank": {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1,
@@ -266,7 +269,8 @@ for _name, _c in _DEFAULTS.items():
     # shortcut against a modality-agnostic encoder (runs saved with it on keep it)
     _c["model"].setdefault("meta", {"enabled": False, "drop": 0.2})
     if _name in ("multitask", "joint"):
-        # uncertainty balancing: log-variances soft-clamped to +-uncertainty_clamp (task weights within e^+-clamp)
+        # uncertainty balancing: log-variances soft-clamped to +-uncertainty_clamp (task weights within e^+-clamp), or
+        # [lo, hi]: s in [-lo, hi], task weights within [e^-hi, e^lo]
         _c["loss"].setdefault("uncertainty_clamp", 1.0)
 
 

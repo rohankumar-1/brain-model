@@ -173,6 +173,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reset-schedule", action="store_true",
                    help="on resume, start the config's LR schedule (lr, warmup, max_steps) afresh at the resume step "
                         "instead of keeping the saved one")
+    p.add_argument("--extend", action="store_true",
+                   help="on resume, lengthen (or shorten) the saved LR schedule to the config's max_steps / decay_steps "
+                        "without re-warming: a WSD run continues its stable phase and decays at the new end")
     p.add_argument("--synthetic", action="store_true", help="tiny phantom volumes, no store")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="dotted config override, repeatable (e.g. --set optim.lr=1e-4)")
@@ -207,7 +210,7 @@ def run(argv: list[str] | None = None) -> None:
         resume_from = out_cfg.get("resume_from")
         resume_src = find_resume(out_dir, resolve(resume_from) if resume_from else None)
     if resume_src is not None:
-        ckpt = load_ckpt(resume_src, rt.device)
+        ckpt = load_ckpt(resume_src, "cpu")       # to CPU: the trainer / EMA copy what they need onto the GPU
         if not state_is_finite(ckpt["model"]):
             log(f"[resume] ignored {resume_src}: checkpoint contains NaN/Inf weights")
             ckpt, resume_src = None, None
@@ -229,6 +232,9 @@ def run(argv: list[str] | None = None) -> None:
     saved = (ckpt or {}).get("schedule")
     if saved and not args.reset_schedule and saved != schedule:
         log(f"[resume] keeping the saved LR schedule {saved} (config gives {schedule}; --reset-schedule to adopt)")
+    if saved and getattr(args, "extend", False) and not args.reset_schedule:
+        saved = {**saved, "max_steps": schedule["max_steps"], "decay_steps": schedule["decay_steps"]}
+        log(f"[resume] --extend: saved schedule now ends at {saved['max_steps']} (decay {saved['decay_steps']})")
     schedule = resume_schedule(saved, schedule, step, args.reset_schedule)
     max_steps = int(schedule["max_steps"])
     args.max_steps = max_steps                         # the trainer reads it too (end-of-run prefetch)
@@ -264,6 +270,7 @@ def run(argv: list[str] | None = None) -> None:
         best_ema = float(ckpt.get("best_ema", best_ema))
     if ema is not None:
         log(f"[ema] decay {ema.decay} (updates so far {ema.n})")
+    ckpt = None                                         # everything is loaded: free the resumed checkpoint
 
     def save(path: Path, model_only: bool = False) -> None:
         if not finite_params(trainer.module):
@@ -303,7 +310,11 @@ def run(argv: list[str] | None = None) -> None:
         acc += torch.stack([metrics[k].detach().float() for k in keys])
         step, seen = step + 1, seen + 1
         if step % log_every == 0 or step <= 3:
-            a = (acc / seen).tolist()
+            # every rank's window (the same steps on every rank, so the collective lines up): the logged numbers are
+            # the whole batch's, and a non-finite window stops every rank, not rank 0 alone
+            if rt.world > 1:
+                torch.distributed.all_reduce(acc)
+            a = (acc / (seen * rt.world)).tolist()
             if not all(math.isfinite(v) for v in a):
                 log(f"[nan] non-finite loss at step {step}: {dict(zip(keys, a))}; not writing a checkpoint")
                 raise SystemExit(2)
@@ -311,8 +322,13 @@ def run(argv: list[str] | None = None) -> None:
             cells.update(trainer.log_extras())
             cells["lr"] = f"{lr:.2e}"
             cells[f"{trainer.unit}/s"] = f"{seen * trainer.batch_units / max(time.time() - t0, 1e-6):.1f}"
-            if rt.device.type == "cuda":
-                cells["peak"] = f"{torch.cuda.max_memory_reserved() / 2**30:.1f}GiB"
+            if rt.device.type == "cuda":                 # the window's peak, the largest over ranks
+                peak = torch.tensor(torch.cuda.max_memory_reserved() / 2**30, device=rt.device)
+                if rt.world > 1:
+                    torch.distributed.all_reduce(peak, op=torch.distributed.ReduceOp.MAX)
+                cells["peak"] = f"{float(peak):.1f}GiB"
+                torch.cuda.reset_peak_memory_stats()
+            cells["time"] = time.strftime("%H:%M")
             put(f"[step {step:>{step_w}}/{max_steps}]", cells)
             acc.zero_()
             seen, t0 = 0, time.time()
@@ -338,9 +354,11 @@ def run(argv: list[str] | None = None) -> None:
                         if persist:
                             save_ema(out_dir / "best_ema.pt")
                         log(f"[best-ema] step {step} val_{best_metric}={best_ema:.4f} -> best_ema.pt")
-                (out_dir / "metrics.json").write_text(json.dumps(
+                tmp = out_dir / "metrics.json.tmp"            # atomic: a reader never sees half a file
+                tmp.write_text(json.dumps(
                     {"history": history, "best_val": best_val if math.isfinite(best_val) else None,
                      "best_step": best_step, "best_metric": best_metric}, indent=2) + "\n")
+                tmp.replace(out_dir / "metrics.json")
         if rt.main and persist and step % int(t_cfg["ckpt_every"]) == 0:
             save(last_path)
             if step % int(t_cfg["keep_every"]) == 0:      # keep_full: with optimizer state, to branch a cooldown

@@ -47,6 +47,15 @@ class PatchEmbed3D(nn.Module):
         return tokens, (nz, ny, nx)
 
 
+def init_stem_convs(stem: nn.Module) -> None:
+    """He (fan-in) initialisation of a convolution stem's kernels. Under GroupNorm these kernels are scale-invariant,
+    so the ViT's generic trunc-normal 0.02 makes each Adam step a large relative change (~1.5% per step for a 6-channel
+    3^3 kernel at lr 3e-4) and the stem's early updates noisy; He init puts the weight norm where the step is small."""
+    for m in stem.modules():
+        if isinstance(m, nn.Conv3d):
+            nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
+
+
 class ConvStemEmbed3D(PatchEmbed3D):
     """Two strided convolution stages before the token grid (2026-11-03): each halves every axis (3^3 convolution,
     GroupNorm, GELU, then a residual block), and ``proj`` patchifies the quarter-resolution features into tokens. A

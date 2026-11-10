@@ -79,11 +79,15 @@ def slots_with_attention(model, enc: dict, task: torch.Tensor, keep: torch.Tenso
     return model.out_norm(q), torch.stack(attn)
 
 
-def task_scalar(model, z: torch.Tensor, task: torch.Tensor, kind: str) -> torch.Tensor:
-    """The task's scalar output per slot: binary logit, regression value, or the predicted class's logit."""
-    out = model.heads(model.member(z, task), task)
+def task_scalar(model, z: torch.Tensor, task: torch.Tensor, kind: str, enc: dict | None = None,
+                keep: torch.Tensor | None = None) -> torch.Tensor:
+    """The task's scalar output per slot: binary logit (with its multiple-instance term for ``pool: mil`` tasks when
+    ``enc`` / ``keep`` are given, as in ``BrainQuery.forward``), regression value, or the predicted class's logit."""
+    z = model.member(z, task)
+    out = model.heads(z, task)
     if kind == "binary":
-        return out["binary"]
+        mil = model.mil_logits(enc, z, task, keep) if enc is not None and keep is not None else None
+        return out["binary"] if mil is None else out["binary"] + mil.to(out["binary"].dtype)
     if kind == "regression":
         return out["regression"]
     if kind == "multiclass":
@@ -100,7 +104,7 @@ def grad_x_token(model, enc: dict, keep: torch.Tensor, t: int, kind: str) -> np.
     task = torch.tensor([[t]], device=tokens.device)
     with torch.enable_grad():
         z = model.slots(e, task, keep)
-        y = task_scalar(model, z, task, kind).sum()
+        y = task_scalar(model, z, task, kind, e, keep).sum()
         (g,) = torch.autograd.grad(y, tokens)
     return (g * tokens).sum(-1).abs()[0].detach().cpu().numpy()
 
@@ -348,7 +352,7 @@ def heatmaps(a) -> None:
         task = torch.tensor([[t]], device=dev)
         with torch.no_grad():
             z, attn = slots_with_attention(model, enc, task, keep)
-            y = float(task_scalar(model, z, task, kind)[0, 0])
+            y = float(task_scalar(model, z, task, kind, enc, keep)[0, 0])
         has_cls = enc.get("cls") is not None
         att = attn[:, 0, 0].float().cpu().numpy()                        # (L, n_kv)
         cls_w = att[:, 0] if has_cls else np.zeros(len(att))

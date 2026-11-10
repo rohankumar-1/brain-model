@@ -4,8 +4,11 @@
 #
 #   sbatch -p pi_dbertsim -G l40s:4 -c 48 --mem=360G -t 2-00:00:00 -J r14f \
 #     --export=ALL,METHOD=multitask,EXPECT_GPUS=4,CONFIG=configs/multitask/r14f.yaml jobs/train.sbatch
-#   EXTRA_ARGS="--reset-schedule" (or "--set optim.lr=3e-4") adds trainer arguments; NO_RESUME=1 starts fresh.
-# METHOD: lejepa3d | multitask | joint (required with CONFIG). EXPECT_GPUS aborts if the allocation differs.
+#   EXTRA_ARGS="--reset-schedule" (or "--set optim.lr=3e-4") adds trainer arguments; NO_RESUME=1 starts fresh (first
+#   start only: a requeued segment always resumes). METHOD: lejepa3d | multitask | joint (required with CONFIG).
+#   EXPECT_GPUS aborts if the allocation differs. Requeue: after a clean stop at the time limit (the trainer's flag), after
+#   a stop request the trainer did not finish (killed during validation), and after a crash that followed progress
+#   (last.pt newer than at the start; at most MAX_CRASH_REQUEUES, default 10); never after a non-finite abort (rc 2/4/5).
 
 #SBATCH -p mit_normal_gpu
 #SBATCH --exclude=node3006          # broken CUDA install (torch sees no GPU)
@@ -17,7 +20,7 @@
 #SBATCH -t 06:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --signal=B:TERM@180
+#SBATCH --signal=B:TERM@600
 #SBATCH -o logs/train_%j.out
 #SBATCH -e logs/train_%j.out
 
@@ -41,6 +44,17 @@ rm -f "$REQUEUE_FLAG" "$STOP_FILE"
 echo "[host] $(hostname) $(date -Is) gpus=${NGPU} cpus=${SLURM_CPUS_PER_TASK:-?} method=${METHOD} config=${CONFIG}"
 nvidia-smi -L || true
 
+RESTARTS="${SLURM_RESTART_COUNT:-0}"
+if [ -n "${NO_RESUME:-}" ] && [ "$RESTARTS" -gt 0 ]; then
+  echo "[resume] NO_RESUME ignored: requeued segment ${RESTARTS} resumes from last.pt"
+  NO_RESUME=""
+fi
+# the run's last.pt, to tell a crash after progress from one before it (OUT_DIR overrides the config's)
+OUT_DIR="${OUT_DIR:-$("$PY" -c "import sys, yaml; print((yaml.safe_load(open(sys.argv[1])).get('output') or {}).get('out_dir', ''))" "$CONFIG" 2>/dev/null)}"
+LAST="${OUT_DIR:+${OUT_DIR}/last.pt}"
+LAST_T0=$( [ -n "$LAST" ] && stat -c %Y "$LAST" 2>/dev/null || echo 0 )
+STOP_ASKED=0
+
 ARGS=(-m brain.train "$METHOD" --config "$CONFIG" ${NO_RESUME:+--no-resume} ${EXTRA_ARGS:-})
 if [ "$NGPU" -gt 1 ]; then
   "$PY" -m torch.distributed.run --standalone --nproc_per_node="$NGPU" "${ARGS[@]}" &
@@ -52,11 +66,12 @@ PID=$!
 # Slurm's warning SIGTERM (--signal=B:TERM@180) reaches this shell only. Ask the trainer to stop through STOP_FILE:
 # it notices within ``train.stop_poll`` steps, writes last.pt, sets REQUEUE_FLAG and exits cleanly. (Forwarding the
 # signal through torchrun kills the ranks and their DataLoader workers before they can checkpoint.) If it has not
-# exited after 150 s, fall back to the signal.
+# exited after 500 s (a validation pass may be running: the trainer polls between steps), fall back to the signal.
 on_term() {
+  STOP_ASKED=1
   touch "$STOP_FILE"
   echo "[stop] $(date -Is) asked the trainer to checkpoint and stop"
-  ( sleep 150; kill -0 "$PID" 2>/dev/null && kill -TERM "$PID" 2>/dev/null ) &
+  ( sleep 500; kill -0 "$PID" 2>/dev/null && kill -TERM "$PID" 2>/dev/null ) &
 }
 trap on_term TERM
 wait "$PID"; rc=$?
@@ -64,9 +79,19 @@ if [ "$rc" -gt 128 ]; then wait "$PID"; rc=$?; fi
 echo "[exit] rc=${rc} $(date -Is)"
 
 rm -f "$STOP_FILE"
+LAST_T1=$( [ -n "$LAST" ] && stat -c %Y "$LAST" 2>/dev/null || echo 0 )
+requeue=""
 if [ -f "$REQUEUE_FLAG" ]; then
-  rm -f "$REQUEUE_FLAG"
-  echo "[requeue] resuming from last.pt"
+  requeue="clean stop"
+elif [ "$STOP_ASKED" -eq 1 ] && [ "$rc" -ne 0 ]; then
+  requeue="stop requested, trainer did not finish"
+elif [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ] && [ "$rc" -ne 4 ] && [ "$rc" -ne 5 ] && [ "$LAST_T1" -gt "$LAST_T0" ] \
+     && [ "$RESTARTS" -lt "${MAX_CRASH_REQUEUES:-10}" ]; then
+  requeue="crash after progress (rc=${rc}, restart ${RESTARTS})"
+fi
+rm -f "$REQUEUE_FLAG"
+if [ -n "$requeue" ]; then
+  echo "[requeue] ${requeue}: resuming from last.pt"
   scontrol requeue "$SLURM_JOB_ID"
 fi
 exit "$rc"

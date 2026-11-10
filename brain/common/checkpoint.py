@@ -34,7 +34,3 @@ def find_resume(out_dir: Path, resume_from: Path | None = None) -> Path | None:
     if resume_from is not None and Path(resume_from).exists():
         return Path(resume_from)
     return None
-
-
-def strip_module_prefix(state: dict[str, Any]) -> dict[str, Any]:
-    return {k.removeprefix("module."): v for k, v in state.items()}

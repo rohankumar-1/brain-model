@@ -8,10 +8,12 @@
 #   * native-CT routing fix: samples asking a thin-CT-only target (registry ct_max_thick_mm) read the 1 mm copy when
 #     the native copy is re-sliced thicker (SynthRAD 1 mm -> 5 mm), data.needs_thin_ct;
 #   * rare tasks up-weighted less (tasks.rare_beta 0.5 -> 0.25: small cohorts were memorised, train - test +0.10),
-#     uncertainty clamp 1 -> 2 (37 / 68 learned weights sat at the old clamp), hippocampal / cortical asymmetry
-#     dropped (test R2 0.05 / 0.00);
-#   * from-scratch optimisation: encoder at the full LR, no layer decay, longer warmup, task-token write bias off
-#     (it eased a warm start).
+#     uncertainty clamp asymmetric [1, 2] (weights e^-2 .. e^1: noisy tasks can drop further, small-loss types are not
+#     up-weighted more), hippocampal / cortical asymmetry dropped (test R2 0.05 / 0.00);
+#   * from-scratch optimisation: encoder at the full LR, no layer decay, warmup 5000, AdamW beta2 0.95, drop path 0.1,
+#     LayerScale 0.1, RoPE min period 32 mm, He-initialised stems, task-token write bias off (it eased a warm start);
+#   * audit fixes (2026-11-10): regression stats for the six mixed live tasks (labels v12 stats.json had none), CT
+#     calibration / kernel augmentations skip live CT-density rows, per-rank loader seeds, rank-agreed NaN skips.
 #   4 GPUs on pi_dbertsim; 2-day job limit: resume segments (output.resume_from: last.pt of this run).
 seed: 42
 data:
@@ -47,6 +49,9 @@ model:
   size: base
   conv_stem: [32, 64]
   mil: {enabled: true}
+  drop_path: 0.1                 # stochastic depth (max, linear over depth): small cohorts were memorised
+  layer_scale: 0.1               # LayerScale init (CaiT, depth 12): steadier from-scratch ViT-B residual stream
+  rope_min_period_mm: 32         # RoPE without the sub-Nyquist (< 2 x 16 mm token) frequencies, same code for both grids
   checkpoint: true
   taps: [3, 7]
   slot: {dim: 256, layers: 3, heads: 8}
@@ -122,19 +127,19 @@ aug:
   skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
   synth_contrast: {p: 0.1}
   task_aware: true
-loss: {seg_stride: 2, uncertainty_clamp: 2.0, token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+loss: {seg_stride: 2, uncertainty_clamp: [1.0, 2.0], token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
   negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
 optim:
   lr: 0.0003                       # PROVISIONAL: set with the batch size after the memory / throughput test
   enc_lr_mult: 1.0                 # from scratch: the encoder trains at the full LR
   layer_decay: 1.0
   weight_decay: 0.05
-  warmup_steps: 3000
+  warmup_steps: 5000
   clip_grad: 1.0
   batch_size: 3                    # PROVISIONAL anchors per GPU (ViT-B + conv stems: measure on an L40S); 4 GPUs
   schedule: wsd
   decay_steps: 25000
-  betas: [0.9, 0.999]
+  betas: [0.9, 0.95]             # from scratch: a faster second moment recovers from loss spikes
 train: {max_steps: 150000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
   ema_decay: 0.999, keep_full: false}
 output: {out_dir: runs/multitask/r17, resume_from: null}

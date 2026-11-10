@@ -12,6 +12,7 @@ checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``task
 from __future__ import annotations
 
 import torch
+import torch.distributed as dist
 
 from brain.common.optim import NO_DECAY_SUFFIXES, NO_DECAY_TABLES, POST_BLOCKS
 from brain.common.paths import resolve
@@ -63,6 +64,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         for k, v in (scfg.get("model") or {}).items():
             if k not in ("checkpoint",) and k not in m:
                 m[k] = v
+        for k in ("drop_path", "layer_scale", "rope_min_period_mm"):    # the encoder's own (defaults are scratch-only)
+            m[k] = (scfg.get("model") or {}).get(k, {"drop_path": 0.0}.get(k))
         if bank_of(enc) is not None:            # the encoder's own windows: its bank's config, whatever this one says
             m["window_bank"] = {**(scfg.get("model") or {}).get("window_bank", {}), "enabled": True}
         elif bank_cfg(m) is not None:           # bank warm start: input conv widened, outputs unchanged at init
@@ -113,6 +116,13 @@ def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, lay
                 scale = enc_mult * layer_decay ** (depth - 1 - int(name.split(".")[2]))
             elif name.startswith(tuple("backbone." + m for m in POST_BLOCKS)):
                 scale = enc_mult                                    # final norm / heads: the deepest block's LR
+            elif name.startswith("backbone.fusion."):               # sits after block fuse_after: that block's LR
+                after = int(getattr(model.backbone, "fuse_after", depth - 1))
+                scale = enc_mult * layer_decay ** (depth - 1 - after)
+            elif name.startswith("backbone.ngeo_embed."):
+                # the native-geometry stem is added to (warm-started) encoders fresh: at the embedding's decayed LR it
+                # trained at layer_decay ** depth (0.75 ** 12 = 3%) of the LR in full_ngeo_bank
+                scale = enc_mult
             else:
                 scale = enc_mult * layer_decay ** depth
         skip = p.ndim < 2 or name.endswith(NO_DECAY_SUFFIXES) or any(k in name for k in NO_DECAY_TABLES)
@@ -318,9 +328,9 @@ class Trainer(engine.Trainer):
         with torch.autocast(**self.amp):
             out = self.net(*args, **kw)
         total, per_task, has = self.task_loss(out, b, pairs)
-        self.apply(total, step)
+        ok = self.apply(total, step)
         self.log_tasks(per_task, has, b)
-        return {"loss": total.detach(), "k": (b["task"] >= 0).float().sum(1).mean()}
+        return {**self.step_metrics(total, ok), "k": (b["task"] >= 0).float().sum(1).mean()}
 
     # the step in parts, so brain.train.joint adds its SSL branch without a second copy of the task side
     def task_batch(self) -> dict:
@@ -384,31 +394,54 @@ class Trainer(engine.Trainer):
         has = torch.cat([pad(x, False) for x in hass])
         task = torch.cat([pad(x, -1) for x in tasks])
         total, per_task = self.balancer(loss, has, task)
-        self.apply(total, step)
+        ok = self.apply(total, step)
         self.log_tasks(per_task, has, {"task": task})
         if raw.get("ngeo") is not None:          # logged: ngeo rows / labelled slots per batch, their mean slot loss
             h = hass[-1].detach()
             self.ng_acc += torch.stack([torch.tensor(float(len(raw["ngeo"]["task"])), device=h.device),
                                         h.float().sum(), (losses[-1].detach() * h).sum() / h.sum().clamp_min(1)])
         self.ng_n += 1
-        return {"loss": total.detach(), "k": (task >= 0).float().sum(1).mean()}
+        return {**self.step_metrics(total, ok), "k": (task >= 0).float().sum(1).mean()}
 
-    def apply(self, total: torch.Tensor, step: int) -> None:
+    MAX_CONSECUTIVE_SKIPS = 50
+
+    def apply(self, total: torch.Tensor, step: int) -> torch.Tensor:
         """Backward, clip, and the update; a non-finite loss or gradient (one bad batch) skips the update instead of
-        writing NaN into every weight. The optimizer's step is taken on every rank alike (the norm is of DDP-averaged
-        gradients)."""
+        writing NaN into every weight. The skip decision is agreed across ranks (a rank whose own loss is non-finite
+        while the averaged gradient is finite would otherwise skip alone and the replicas drift apart), so every rank
+        steps or skips together. Returns that decision; ``MAX_CONSECUTIVE_SKIPS`` skips in a row end the run on every
+        rank (the weights or the data are broken, not one batch)."""
         total.backward()
         self.balancer.sync_grads()
         norm = torch.nn.utils.clip_grad_norm_(self.raw.parameters(), self.clip)
-        ok = torch.isfinite(norm) & torch.isfinite(total.detach())
+        ok = (torch.isfinite(norm) & torch.isfinite(total.detach())).to(torch.int32)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(ok, op=dist.ReduceOp.MIN)
+        ok = ok.bool()
+        self.last_norm = norm.detach()
         if bool(ok):
             self.opt.step()
+            self.n_consecutive = 0
         else:
             self.opt.zero_grad(set_to_none=True)
             self.n_skipped = getattr(self, "n_skipped", 0) + 1
+            self.n_consecutive = getattr(self, "n_consecutive", 0) + 1
             if self.n_skipped <= 5 or self.n_skipped % 100 == 0:
                 print(f"[nan] step {step}: non-finite loss / gradient, update skipped ({self.n_skipped} so far)",
                       flush=True)
+            if self.n_consecutive >= self.MAX_CONSECUTIVE_SKIPS:
+                print(f"[nan] {self.n_consecutive} consecutive skipped updates at step {step}: stopping", flush=True)
+                raise SystemExit(5)
+        return ok
+
+    def step_metrics(self, total: torch.Tensor, ok: torch.Tensor) -> dict[str, torch.Tensor]:
+        """What the engine logs per step: the balanced loss (0 for a skipped update, so one bad batch does not turn the
+        window's average non-finite), the pre-clip gradient norm, whether it was clipped, whether the update was
+        skipped."""
+        zero = torch.zeros((), device=total.device)
+        norm = self.last_norm.float()
+        return {"loss": torch.where(ok, total.detach().float(), zero), "gnorm": torch.where(ok, norm, zero),
+                "clip": ((norm > self.clip) & ok).float(), "skip": (~ok).float()}
 
     def log_tasks(self, per_task: torch.Tensor, has: torch.Tensor, b: dict) -> None:
         present = torch.zeros_like(per_task, dtype=torch.bool)

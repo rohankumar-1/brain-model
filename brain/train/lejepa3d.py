@@ -55,6 +55,8 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         n_cls=int(m.get("n_cls", 0)),
         n_registers=int(m.get("n_registers", 0)),
         drop_path=float(m.get("drop_path", 0.0)),          # stochastic depth (max rate, linear over depth)
+        layer_scale=m.get("layer_scale"),                 # LayerScale init (None: off); frozen evaluation reads it too
+        mlp=str(m.get("mlp", "gelu")),
     ).to(device)
     return attach_bank(enc, m)
 

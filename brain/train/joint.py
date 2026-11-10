@@ -159,9 +159,10 @@ class Trainer(multitask.Trainer):
             self.log_tasks(per_task, has, b)
             self.d_sum += self.balancer.data_term.detach()
             self.d_cnt += 1
-        self.apply(total, step)
-        res = {k: parts[k].detach() for k in self.ssl_keys}
-        res["loss"] = total.detach()
+        ok = self.apply(total, step)
+        res = {k: torch.where(ok, parts[k].detach().float(), torch.zeros((), device=total.device))
+               for k in self.ssl_keys}
+        res.update(self.step_metrics(total, ok))
         return res
 
     def _norm(self, name: str, loss: torch.Tensor, scale: torch.Tensor | None = None) -> torch.Tensor:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 import signal
 from dataclasses import dataclass
@@ -44,7 +45,9 @@ def init_runtime(seed: int) -> Runtime:
     device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
     if world > 1:
         torch.cuda.set_device(device)
-        dist.init_process_group("nccl")
+        # 60 min: rank 0 alone runs validation (live + EMA) and writes checkpoints while the other ranks wait in their
+        # next collective; the default 10 min NCCL timeout is within reach of a ViT-B validation on slow scratch I/O
+        dist.init_process_group("nccl", timeout=datetime.timedelta(minutes=60))
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
     torch.set_num_threads(1)

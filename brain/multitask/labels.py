@@ -835,17 +835,25 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
 
 def regression_stats(reg: Registry, labels: pd.DataFrame, volumes: pd.DataFrame, live_sample: int,
                      workers: int, seed: int = 0) -> dict[str, dict[str, float]]:
+    """Mean / std of every trained regression target on the train split. A task whose rows are partly live (``@live:``,
+    measured from the scan while training) and partly precomputed pools both: the precomputed train values and the
+    live values of a sample of its train scans. (Until 2026-11-10 a task was called live only when its first row was:
+    six mixed tasks, the CT measures and the asymmetries, got no stats at all and trained on raw values, clipped by
+    HL-Gauss; warm-started runs carried older stats in their checkpoints and were spared.)"""
     stats = {}
+    live_tasks, fixed = {}, {}
     for t in reg.trained:
         if t.type != "regression":
             continue
         rows = labels[(labels["task"] == t.id) & (labels["use"] == "train") & (labels["split"] == "train")]
-        live = rows["ref"].astype(str).str.startswith("@live:")
-        if not live.any():
-            y = rows["value"].astype(float)
+        refs = rows["ref"].astype(str)
+        live = refs.str.startswith("@live:")
+        fixed[t.id] = rows.loc[~live, "value"].astype(float).dropna()
+        if live.any():
+            live_tasks[t.id] = refs[live].iloc[0]
+        else:
+            y = fixed[t.id]
             stats[t.id] = {"mean": float(y.mean()), "std": float(y.std() + 1e-6), "n": int(len(y))}
-    live_tasks = {t.id: str(r) for t in reg.trained
-                  for r in labels.loc[labels["task"] == t.id, "ref"].head(1) if str(r).startswith("@live:")}
     if live_tasks:
         cand = labels[labels["task"].isin(list(live_tasks)) & (labels["split"] == "train")]["volume_id"].unique()
         mod = volumes.set_index("volume_id").loc[cand, "modality"].astype(str).str.lower()
@@ -861,8 +869,8 @@ def regression_stats(reg: Registry, labels: pd.DataFrame, volumes: pd.DataFrame,
             vals = pd.DataFrame(list(ex.map(_live_one, args, chunksize=8)), index=pick)
         for tid, ref in live_tasks.items():
             name = ref.split(":", 1)[1]
-            ok = labels[(labels["task"] == tid)]["volume_id"]
-            y = vals.loc[vals.index.isin(set(ok)), name].dropna()
+            ok = labels[(labels["task"] == tid) & labels["ref"].astype(str).str.startswith("@live:")]["volume_id"]
+            y = pd.concat([vals.loc[vals.index.isin(set(ok)), name].dropna().astype(float), fixed[tid]])
             stats[tid] = {"mean": float(y.mean()), "std": float(y.std() + 1e-6), "n": int(len(y)), "live": name}
     return stats
 
@@ -895,9 +903,23 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--qc-drop", choices=["tool", "all", "none"], default="tool",
                     help="labels dropped on scans failing brain_ok / reg_ok (build's qc_drop)")
+    ap.add_argument("--stats-only", action="store_true",
+                    help="recompute stats.json of the existing label table in --out (the old one kept as "
+                         "stats.<time>.json); the labels are not rebuilt")
     a = ap.parse_args()
     reg = load_registry(a.registry)
     volumes = pd.read_csv(DEFAULT_VOLUMES, low_memory=False)
+    if a.stats_only:
+        import time
+
+        labels = pd.read_parquet(a.out / "labels.parquet")
+        old = a.out / "stats.json"
+        if old.exists():
+            old.rename(a.out / f"stats.{time.strftime('%Y%m%d-%H%M%S')}.json")
+        stats = regression_stats(reg, labels, volumes, a.live_sample, a.workers)
+        old.write_text(json.dumps(stats, indent=2) + "\n")
+        print(json.dumps(stats, indent=1))
+        return
     # each label version computes its own registration-QC cache: re-registered volumes (infants) change their masks
     qc = registration_qc(volumes, a.workers, path=a.out / "regqc.parquet")
     print("[labels] registration QC fail share per family:\n"

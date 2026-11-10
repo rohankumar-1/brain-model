@@ -55,11 +55,12 @@ def test_mil_logits_pool_only_mil_slots_over_kept_tokens():
     add = m.mil_logits(enc, z, task, keep)
     assert add.shape == (b, 2)
     assert add[0, 1] == 0 and (add[1] == 0).all()                       # not MIL / padded slots untouched
-    lg = m.token_logits(enc, z, torch.tensor([[0, 0]]))[0, :6]          # the pooled value: a soft max over kept tokens
+    lg = m.token_logits(enc, z, torch.tensor([[0, 0]]))[0, :6] - m.tok_bias   # a soft max over kept tokens, no prior
     r = math.exp(float(m.mil_logr[REG.index["hemorrhage_any"]]))
     ref = (torch.logsumexp(r * lg, 0) - math.log(6)) / r
     assert torch.allclose(add[0, 0], ref, atol=1e-5)
     assert lg.mean() - 1e-5 <= add[0, 0] <= lg.max() + 1e-5
+    assert torch.isfinite(m.mil_logits(enc, z, task, torch.zeros(b, n, dtype=torch.bool))).all()   # no kept token
 
 
 def test_mil_adds_to_the_binary_logit_and_gets_gradients():
@@ -70,7 +71,8 @@ def test_mil_adds_to_the_binary_logit_and_gets_gradients():
     task = torch.tensor([[REG.index["hemorrhage_subdural"]], [REG.index["mri_mass"]]])
     add = m.mil_logits(enc, z, task, torch.ones(b, n, dtype=torch.bool))
     add.sum().backward()
-    assert z.grad.abs().sum() > 0 and m.mil_logr.grad.abs().sum() > 0
+    assert z.grad.abs().sum() > 0 and m.mil_logr.grad.abs().sum() > 0 and m.mil_bias.grad.abs().sum() > 0
+    assert m.tok_bias.grad is None or float(m.tok_bias.grad.abs()) < 1e-6        # the pooled logit leaves the prior alone
 
 
 def test_thin_ct_tasks_are_read_at_1mm_from_a_resliced_copy():

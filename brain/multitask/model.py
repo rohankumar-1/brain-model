@@ -264,9 +264,11 @@ class BrainQuery(nn.Module):
             dk = int(tm.get("dim", 64))
             self.tok_q, self.tok_k = nn.Linear(dim, dk), nn.Linear(d_enc, dk)
             self.tok_bias = nn.Parameter(torch.tensor(-3.0))          # prior ~5% of tokens on
-        # multiple-instance binary readout (registry ``pool: mil``): the slot's token map (its per-location logits)
-        # soft-max pooled over the scan's foreground tokens, (1 / r) log mean exp(r l), added to the task token's own
-        # logit; r per task, learned (large: one location decides, a focal finding; small: the mean, a diffuse one)
+        # multiple-instance binary readout (registry ``pool: mil``): the slot's token map (its per-location logits,
+        # without the map's shared prior bias) soft-max pooled over the scan's foreground tokens,
+        # (1 / r) log mean exp(r l), plus a per-task bias (zero at init, so a head starts at its token logit), added to
+        # the task token's own logit; r per task, learned, from 8 (large: one location decides, a focal finding;
+        # small: the mean, a diffuse one)
         # (``model.mil.enabled``; off in older configs, so their checkpoints load and answer unchanged)
         mil_on = bool((cfg.get("mil") or {}).get("enabled", False))
         self.register_buffer("mil", torch.tensor([mil_on and t.pool == "mil" for t in reg.tasks]), persistent=False)
@@ -274,9 +276,17 @@ class BrainQuery(nn.Module):
         if bool(self.mil.any()):
             if self.tok_q is None:
                 raise ValueError("registry pool: mil needs model.token_map.enabled (the per-location logits)")
-            self.mil_logr = nn.Parameter(torch.full((n_tasks,), math.log(2.0)))
+            self.mil_logr = nn.Parameter(torch.full((n_tasks,), math.log(8.0)))
+            self.mil_bias = nn.Parameter(torch.zeros(n_tasks))
         self.cls_query = nn.Linear(dim, dim)
         self.cls_emb = nn.Parameter(torch.randn(n_tasks, n_cls, dim) * 0.02)          # per (task, class)
+        if share:
+            # members of a shared token read it through ``cls_emb[t, 0]`` added to the normalised answer (norm ~ sqrt
+            # dim): at std 0.02 the six hemorrhage (or nine radiology) members start with near-identical answers and
+            # token maps; std 0.3 gives each a distinct reading from step 0 (loaded checkpoints overwrite it)
+            with torch.no_grad():
+                shared = torch.tensor([t.token is not None for t in reg.tasks])
+                self.cls_emb[shared, 0] = torch.randn(int(shared.sum()), dim) * 0.3
         self.survival = mlp(dim, dim, 1)        # no survival task is trained or asked: kept so checkpoints load
         seg_cfg = cfg.get("seg") or {}
         patch_zyx = tuple(int(p) for p in reversed(backbone.patch_xyz))
@@ -364,7 +374,11 @@ class BrainQuery(nn.Module):
             fuse = {"n_out": b, "index": index, "seq": seq}
             x = torch.cat([x, study["x"].to(x.dtype)])
             keep = torch.cat([keep, keep[row]])
-            meta = None if meta is None else torch.cat([meta, meta[row]])
+            # each partner's own META id (contrast): the anchor's would label a FLAIR partner as the anchor's T1
+            pmeta = study.get("pmeta")
+            if meta is not None:
+                meta = torch.cat([meta, pmeta.to(meta) if pmeta is not None and len(pmeta) == len(row)
+                                  else torch.zeros_like(meta[row])])
         n_rows = x.shape[0]
         if geo is not None:
             coords, pmm = geo["coords"].to(x.device), geo["pmm"].to(x.device)
@@ -480,17 +494,21 @@ class BrainQuery(nn.Module):
     def mil_logits(self, enc: dict, z: torch.Tensor, task: torch.Tensor, keep: torch.Tensor) -> torch.Tensor | None:
         """(B, K) pooled token-map logits of the ``pool: mil`` slots (0 elsewhere), to add to ``heads``' binary logit;
         None when no such slot is asked. ``keep`` (B, N): the foreground tokens pooled over."""
-        if self.mil_logr is None:
+        if getattr(self, "mil_logr", None) is None:
             return None
         m = self.mil[task.clamp_min(0)] & (task >= 0)
         if not bool(m.any()):
             return None
         pairs = m.nonzero()
-        lg = self.token_logits(enc, z, pairs).float()                               # (Q, N)
+        t = task[pairs[:, 0], pairs[:, 1]]
+        # the map's shared prior bias (tok_bias, tuned for token occupancy) left out: the pooled logit gets its own
+        # bias, so 12 binary tasks do not pull on the prior every segmentation task's map uses
+        lg = self.token_logits(enc, z, pairs).float() - self.tok_bias.float()      # (Q, N)
         kp = keep[pairs[:, 0]].bool()
-        r = self.mil_logr[task[pairs[:, 0], pairs[:, 1]]].float().exp().clamp(0.05, 50.0).unsqueeze(-1)
-        pooled = (torch.logsumexp((lg * r).masked_fill(~kp, float("-inf")), -1)
-                  - kp.sum(-1).clamp_min(1).float().log()) / r[:, 0]
+        r = self.mil_logr[t].float().exp().clamp(0.05, 50.0).unsqueeze(-1)
+        lse = torch.logsumexp((lg * r).masked_fill(~kp, float("-inf")), -1)
+        pooled = (lse - kp.sum(-1).clamp_min(1).float().log()) / r[:, 0]
+        pooled = torch.where(kp.any(-1), pooled, torch.zeros_like(pooled)) + self.mil_bias[t].float()   # no token: 0
         add = torch.zeros(task.shape, device=z.device, dtype=pooled.dtype)
         return add.index_put((pairs[:, 0], pairs[:, 1]), pooled)
 

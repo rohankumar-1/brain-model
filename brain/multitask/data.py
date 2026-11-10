@@ -117,7 +117,11 @@ class MultitaskDataset(Dataset):
             # the copy's slice thickness (its slices may be re-sliced thicker than the 1 mm source, ``synth_thick``)
             thick = pd.concat([pd.to_numeric(ngi.get(c, pd.Series(np.nan, index=ngi.index)), errors="coerce")
                                for c in ("slice_mm", "thick_mm")], axis=1).max(axis=1)
-            self._ngeo_thick = dict(zip(ngi["volume_id"].astype(str), thick.fillna(0.0).astype(float)))
+            self._ngeo_thick = dict(zip(ngi["volume_id"].astype(str), thick.fillna(np.inf).astype(float)))
+            # each scan's own 1 mm folder: a label mask from another folder (SynthRAD CT's anatomy masks come from the
+            # paired MR, ``synthrad/``) has no ngeo copy of its own; the ngeo index's mask of that name is the CT's
+            self._img_folder = dict(zip(volumes["volume_id"].astype(str),
+                                        volumes["image_path"].astype(str).map(lambda q: Path(q).parent.as_posix())))
             # tasks whose target is only trusted on thin CT (registry ct_max_thick_mm): read at 1 mm from a thicker copy
             self._thin_only = {i: t.ct_max_thick_mm for i, t in enumerate(reg.tasks) if t.ct_max_thick_mm is not None}
             # mask name (lower case) -> ngeo mask path per scan, from the index's mask_<name>_ngeo columns
@@ -190,12 +194,21 @@ class MultitaskDataset(Dataset):
         if "subject_id" not in meta:
             meta["subject_id"] = meta["volume_id"]
         self.df = meta[["volume_id", "image_path", "modality", "dataset_family", "thick_mm", "thick_axis", "subject_id"]]
-        self.thick = list(zip(self.df["thick_mm"].fillna(1.0).astype(float),
-                              self.df["thick_axis"].fillna(-1).astype(int)))
+        # a near-isotropic scan has no acquisition axis (the prep's argmax tie gave x): -1 lets the slice-thickness blur
+        # pick its usual mostly-axial axis instead of always blurring left-right
+        tmm = self.df["thick_mm"].fillna(1.0).astype(float)
+        tax = self.df["thick_axis"].fillna(-1).astype(int).where(tmm >= 1.2, -1)
+        self.thick = list(zip(tmm, tax))
         self.paths = self.df["image_path"].astype(str).tolist()
         self.mods = self.df["modality"].astype(str).str.lower().tolist()
         get = lambda c, fill="": meta[c] if c in meta else pd.Series(fill, index=meta.index)  # noqa: E731
         self.meta_ids = [meta_id(c, m, ds) for c, m, ds in zip(get("contrast", None), self.mods, get("dataset"))]
+        # study partners' own META ids (their contrast, not the anchor's), from the whole index: a partner need not
+        # be a labelled item itself
+        vget = lambda c: volumes[c] if c in volumes else pd.Series(None, index=volumes.index)  # noqa: E731
+        self._meta_by_vid = {str(v): meta_id(c, str(m).lower(), ds) for v, c, m, ds in zip(
+            volumes["volume_id"], vget("contrast"), vget("modality").fillna(""), vget("dataset"))} \
+            if study else {}
         from brain.models.vit3d import seq_type
         self.seqs = [seq_type(c, m) for c, m in zip(get("contrast_std"), self.mods)]
         # study-level input (R14-F, ``tasks.study``): each scan's co-registered partners (``study_partners``), asked
@@ -415,7 +428,8 @@ class MultitaskDataset(Dataset):
             brain = np.asarray(arrays["brain"]) > 0
             img = np.where(brain, img, img.min())
             dense_raw = [np.where(brain, o, o.min()) for o in dense_raw]     # a synthesis target keeps the input's FOV
-        study_imgs, study_mod, study_seq = [], [], []
+        study_imgs, study_mod, study_seq, study_meta = [], [], [], []
+        meta_ = 0 if self.train and self.meta_drop > 0 and rng.random() < self.meta_drop else self.meta_ids[idx]
         if pick:
             brain = np.asarray(arrays["brain"]) > 0 if strip else None
             for _pvid, ppath, pmod, pseq in pick:
@@ -429,7 +443,7 @@ class MultitaskDataset(Dataset):
                 study_imgs.append(torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float16)))
                 study_mod.append(0 if pmod.startswith("ct") else 1)
                 study_seq.append(int(pseq))
-        meta_ = 0 if self.train and self.meta_drop > 0 and rng.random() < self.meta_drop else self.meta_ids[idx]
+                study_meta.append(self._meta_by_vid.get(str(_pvid), 0) if meta_ else 0)   # dropped with the anchor's
         if synth_map is not None:                  # a synthetic contrast is no real sequence: metadata unknown
             meta_ = 0
         out = {
@@ -449,7 +463,7 @@ class MultitaskDataset(Dataset):
             "meta": meta_,
             "seq": self.seqs[idx],
             "study_img": torch.stack(study_imgs) if study_imgs else None,
-            "study_mod": study_mod, "study_seq": study_seq,
+            "study_mod": study_mod, "study_seq": study_seq, "study_meta": study_meta,
             "slab": self.slices.get(vid) if self.slices else None,
             "boxes": self.boxes.get(vid) if self.boxes else None,
         }
@@ -480,19 +494,24 @@ class MultitaskDataset(Dataset):
     def _ngeo_ok(self, vid: str, drawn, masked: bool) -> bool:
         """Mixed mode: whether this sample can be read at native geometry. Not when it is a masked (reconstruction)
         sample, asks a dense (synthesis / reconstruction) slot, may get study partners, asks a mask the prep did
-        not copy to the ngeo grid, or asks a thin-CT-only task (registry ``ct_max_thick_mm``) of a copy with thicker
-        slices (SynthRAD's 1 mm CT is re-sliced to 5 mm there: full_ngeo_bank learned those six SynthSeg structures on
-        CT from 5 mm slabs only, and predicted none); those samples come from the 1 mm store, so every label keeps
-        training."""
+        not copy to the ngeo grid, asks a mask mirrored from another scan (SynthRAD CT's MR-derived anatomy), or asks a
+        thin-CT-only task (registry ``ct_max_thick_mm``) of a copy with thicker slices (SynthRAD's 1 mm CT is re-sliced
+        to 5 mm there). In training those SynthRAD samples already came at 1 mm (they have study partners), so the
+        ngeo decoder never saw small structures and predicted none on CT in full_ngeo_bank's evaluation; these rules
+        make validation and evaluation read them as training does. Such samples come from the 1 mm store, so every
+        label keeps training."""
         if masked or (self.study and self.partners.get(vid)):
             return False
         have = self._ngeo_masks.get(vid) or {}
         if needs_thin_ct(drawn, self._thin_only, self._ngeo_thick.get(vid, 0.0)):
             return False                  # a thin-CT-only target (small SynthSeg structures) on a re-sliced copy
+        folder = self._img_folder.get(vid)
         for _, _, ref in drawn:
             if ref == "@recon" or ref.startswith("@synth:"):
                 return False
             if ref and not ref.startswith("@"):
+                if folder is not None and Path(ref.split("|")[0]).parent.as_posix() != folder:
+                    return False          # a mask mirrored from another scan (SynthRAD MR -> CT): read at 1 mm
                 name = Path(ref.split("|")[0]).name
                 if (name.split(".")[-2].lower() if name.count(".") >= 2 else "") not in have:
                     return False
@@ -708,6 +727,10 @@ def needs_thin_ct(drawn, thin_only: dict[int, float], thick_mm: float) -> bool:
     return any(t in thin_only and thick_mm > thin_only[t] for t, _, _ in drawn)
 
 
+def _rank() -> int:
+    return torch.distributed.get_rank() if torch.distributed.is_available() and torch.distributed.is_initialized() else 0
+
+
 def mixed_parts(raw: dict) -> list[dict]:
     """The sub-batches of a raw batch: [iso, ngeo] (non-empty ones) for a mixed batch, else [raw]."""
     if not raw.get("mixed"):
@@ -718,18 +741,19 @@ def mixed_parts(raw: dict) -> list[dict]:
 def collate_study(batch: list[dict]) -> dict:
     """Partner scans of the batch's studies (R14-F): ``study_img`` (P, Z, Y, X) float16, ``study_row`` (P,) the anchor
     row, ``study_mod`` / ``study_seq`` (P,), and ``seq`` (B,) the anchors' sequence types. No partners: P = 0."""
-    imgs, rows, mods, seqs = [], [], [], []
+    imgs, rows, mods, seqs, metas = [], [], [], [], []
     for i, b in enumerate(batch):
         if b.get("study_img") is not None:
             imgs.append(b["study_img"])
             rows += [i] * len(b["study_img"])
             mods += list(b["study_mod"])
             seqs += list(b["study_seq"])
+            metas += list(b.get("study_meta") or [0] * len(b["study_img"]))
     shape = batch[0]["image"].shape
     return {"seq": torch.tensor([int(b.get("seq", 0)) for b in batch], dtype=torch.long),
             "study_img": torch.cat(imgs) if imgs else torch.zeros(0, *shape, dtype=torch.float16),
             "study_row": torch.tensor(rows, dtype=torch.long), "study_mod": torch.tensor(mods, dtype=torch.long),
-            "study_seq": torch.tensor(seqs, dtype=torch.long)}
+            "study_seq": torch.tensor(seqs, dtype=torch.long), "study_meta": torch.tensor(metas, dtype=torch.long)}
 
 
 def study_partners(labels_dir, volumes: pd.DataFrame, pool: set[str]) -> dict:
@@ -975,7 +999,10 @@ def make_loader(ds: MultitaskDataset, *, batch_size: int, shuffle: bool, seed: i
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle and sampler is None, sampler=sampler,
                       num_workers=workers, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0,
                       prefetch_factor=2 if workers else None, collate_fn=collate_fn or collate, drop_last=drop_last,
-                      worker_init_fn=_worker_threads, generator=torch.Generator().manual_seed(seed))
+                      worker_init_fn=_worker_threads,
+                      # per rank: workers of the same index on every GPU would otherwise draw identical sample-level
+                      # choices (tasks asked, masked samples, partners, skull strip, synthetic contrast, metadata drop)
+                      generator=torch.Generator().manual_seed(seed + 7919 * _rank()))
 
 
 # ------------------------------------------------------------------------------------------------ GPU side
@@ -990,11 +1017,13 @@ def _rotation(deg: torch.Tensor) -> torch.Tensor:
     return rz @ ry @ rx
 
 
-def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | None = None) -> torch.Tensor | None:
+def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | None = None,
+                  ct: torch.Tensor | None = None) -> torch.Tensor | None:
     """Per-row affine (B, 3, 4) for ``F.affine_grid`` (normalised x, y, z): a rotation in millimetres about the grid
     centre and a shift, applied with probability ``aug.p`` (never on ``skip`` rows). None when nothing is drawn.
     ``shear_deg``: a y-z shear of up to that angle, the geometry of an uncorrected CT gantry tilt (slices offset along
-    y in proportion to z; RSNA scans whose registration fell back to rigid keep theirs)."""
+    y in proportion to z; RSNA scans whose registration fell back to rigid keep theirs): CT rows only when ``ct`` (B,)
+    is given (MRI has no gantry)."""
     p = float(aug.get("p", 0.0))
     if p <= 0:
         return None
@@ -1010,6 +1039,8 @@ def augment_theta(b: int, shape_zyx, aug: dict, device, skip: torch.Tensor | Non
     shear = float(aug.get("shear_deg", 0.0))
     if shear > 0:                                                   # y += tan(angle) z, in mm, then normalised
         t = torch.tan(torch.deg2rad((torch.rand(b, device=device) * 2 - 1) * shear)) * on.squeeze(-1)
+        if ct is not None:
+            t = t * ct.to(device).float()
         sh = torch.eye(3, device=device).repeat(b, 1, 1)
         sh[:, 1, 2] = t * half[2] / half[1]
         a = sh @ a
@@ -1121,7 +1152,12 @@ def protected_tasks(reg) -> tuple[torch.Tensor, torch.Tensor]:
 
     live = [any(s.get("source") == "live" for s in t.sources) for t in reg.tasks]
     synth = [any(s.get("source") == "synth" for s in t.sources) for t in reg.tasks]
-    fov = [registration_sensitive(t.id) or lv or sy for t, lv, sy in zip(reg.tasks, live, synth)]
+    # scan-level labels about a finding anywhere in the head (tumour type / grade / outcome, diagnoses, radiology
+    # findings): an inferior cut can remove the lesion (posterior-fossa tumours) while the label stays positive; masks
+    # are cut with the image, so segmentation tasks stay cuttable
+    scan_level = [t.group in ("tumor", "diagnosis", "radiology") and t.type in ("binary", "multiclass", "regression")
+                  for t in reg.tasks]
+    fov = [registration_sensitive(t.id) or lv or sy or sl for t, lv, sy, sl in zip(reg.tasks, live, synth, scan_level)]
     return torch.tensor(fov), torch.tensor(live)
 
 
@@ -1193,7 +1229,8 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
             seg = _flip(seg, flip[rows])
         if has_dense:
             raw_dense = _flip(raw_dense, flip[drows])
-    theta = augment_theta(b, raw.shape[2:], aug.get("affine") or {}, device, skip=live_rows) if train else None
+    theta = augment_theta(b, raw.shape[2:], aug.get("affine") or {}, device, skip=live_rows,
+                          ct=mod.reshape(-1) == 0) if train else None
     if theta is not None:
         grid = F.affine_grid(theta, list(raw.shape), align_corners=False)
         raw = _warp(raw, grid)
@@ -1235,6 +1272,8 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
             px = praw if bank else encoder_window(praw, pmod, in_chans)
         study = {"x": px, "row": prow, "seq": batch["seq"].to(device), "pseq": batch["study_seq"].to(device),
                  "mod": pmod}
+        if "study_meta" in batch:                 # the partners' own META ids (their contrast)
+            study["pmeta"] = batch["study_meta"].to(device)
     hide = dense_tgt = dense_w = None
     tk = cfg.get("tasks") or {}
     if train and "masked" in batch and bool(batch["masked"].any()):

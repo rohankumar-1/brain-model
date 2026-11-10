@@ -26,11 +26,10 @@ OWN = {m: dict(zip(te[te.model == m].task, te[te.model == m].score)) for m in ("
 
 
 def own(task):
-    """(best value, from R14-F?) over the two models' own heads on the same test scans."""
-    a, b = OWN["full_iso_bank/last"].get(task), OWN["r14f/last"].get(task)
-    if a is None and b is None:
-        return None
-    return (a, False) if b is None or (a is not None and a >= b) else (b, True)
+    """The new run's own head on the test scans. One model, fixed in advance: picking per row between two models by
+    their test score (as the 2026-11-09 tables did) is a selection on test."""
+    a = OWN["full_iso_bank/last"].get(task)
+    return None if a is None else (a, False)
 
 
 def rand(key):
@@ -44,41 +43,41 @@ def spec(task):
 
 
 def zero_shot(target):
-    vals = {}
-    for m in ("BQ-FISO", "BQ-R14F"):
-        p = ROOT / f"runs/diagnostics/head_init_cq500/{m}_cv.csv"
-        if p.exists():
-            c = pd.read_csv(p)
-            r = c[(c.arm == "zero_shot") & (c.target == target)]
-            if len(r):
-                vals[m] = float(r.auc.iloc[0])
-    if not vals:
+    """The new run's RSNA head read on CQ500 unchanged (no labels, no choice: zero-shot has no validation to pick a
+    model on, so the model is fixed in advance)."""
+    p = ROOT / "runs/diagnostics/head_init_cq500/BQ-FISO_cv.csv"
+    if not p.exists():
         return None
-    m = max(vals, key=vals.get)
-    return vals[m], m == "BQ-R14F"
+    c = pd.read_csv(p)
+    r = c[(c.arm == "zero_shot") & (c.target == target)]
+    return (float(r.auc.iloc[0]), False) if len(r) else None
 
 
-def best_readout(task, label=None):
-    """The new run's readout picked on validation (all readouts incl. the attentive probe)."""
-    for p in sorted((ROOT / f"runs/downstream/{task}/full_iso_bank_last").glob("*/metrics.json"), reverse=True):
+def best_readout(task, label=None, run="full_iso_bank_last"):
+    """(test, val) of ``run``'s readout picked on validation, over every readout of its latest full run (the attentive
+    probe included); None without such a run."""
+    for p in sorted((ROOT / f"runs/downstream/{task}/{run}").glob("*/metrics.json"), reverse=True):
         m = json.load(open(p))
         if "attn_probe" not in m:
             continue
         key = next(k for k in ("auc_ovr_macro", "auc", "r2") if k in m["attn_probe"])
-        v = lambda h: (m[h]["val"].get(key) if isinstance(m[h].get("val"), dict) else m[h].get("val"))  # noqa
-        h = max((h for h in m if v(h) is not None), key=v)
-        return m[h]["per_label"][label]["auc"] if label else m[h][key]
+        v = lambda h: (m[h]["val"].get(key) if isinstance(m[h].get("val"), dict) else None)  # noqa
+        h = max((h for h in m if isinstance(m[h], dict) and v(h) is not None), key=v)
+        test = m[h]["per_label"][label]["auc"] if label else m[h][key]
+        return test, v(h)
     return None
 
 
 def frozen(key, task=None, label=None):
-    """Best of R14-F's pinned frozen readout and the new run's validation-picked readout."""
-    r14 = (S.get(key, {}) or {}).get("BQ-R14F")
-    r14 = r14["v"] if r14 else None
-    new = best_readout(task, label) if task else None
-    if r14 is None and new is None:
+    """The validation-picked readout of whichever model (new run, R14-F) scores higher on validation: models and
+    readouts are both chosen on validation, never on test. (Per-label CQ500 rows use the multilabel task's
+    validation.)"""
+    cand = {r: best_readout(task, label, r) for r in ("full_iso_bank_last", "r14f_last")} if task else {}
+    cand = {r: x for r, x in cand.items() if x is not None and x[1] is not None}
+    if not cand:
         return None
-    return (new, False) if r14 is None or (new is not None and new >= r14) else (r14, True)
+    r = max(cand, key=lambda k: cand[k][1])
+    return cand[r][0], r == "r14f_last"
 
 
 T1 = ("In-training evaluation: trained task, held-out test split of a training cohort",
@@ -182,7 +181,8 @@ for tag, sp in (("T1", T1), ("T2", T2), ("T3", T3)):
 
 # ---- the same tables as Markdown ---------------------------------------------------------------------------------
 md = ["# BrainQuery evaluation, 9 November 2026", "",
-      "**Ours** = best of our two models (the new full-suite run and R14-F); ᵃ marks R14-F, otherwise the new run. "
+      "**Ours**: the new full-suite run's own heads (tables 1, 2); in table 3 the model (new run or R14-F, ᵃ) and its "
+      "readout are both picked on validation, never on test. "
       "**Literature**: \\* = supervised or fine-tuned published model, usually on its own split; unstarred = frozen or "
       "linear-probe foundation model. – = no comparable value.", ""]
 for i, (tag, (title, sub, rows)) in enumerate((("T1", T1), ("T2", T2), ("T3", T3)), 1):

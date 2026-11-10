@@ -166,6 +166,10 @@ def main() -> None:
     store = resolve(d["store_root"])
     labels_dir = resolve(a.labels_dir or d["labels_dir"])
     labels, stats = load_labels(labels_dir)
+    # the benchmark's decontamination (pixel-verified copies / twins of training scans) applies here too: a few-shot or test
+    # scan whose twin sits in the training / draw pool would score memorisation
+    from brain.downstream.tasks import bench_exclusions
+    labels = labels[~labels["volume_id"].astype(str).isin(bench_exclusions())]
     stats = checkpoint_stats(model.label_stats, labels_dir, stats)
     volumes = pd.read_csv(store / d.get("index_name", "volumes.csv"), low_memory=False)
     out: dict = {"ckpt": str(a.ckpt), "fewshot": [], "transfer": [], "preds": []}
