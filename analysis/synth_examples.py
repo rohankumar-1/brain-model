@@ -48,7 +48,7 @@ def collect(ck, ids_by_task, workers):
         t = reg.index[task]
         ngeo_kw, cf = ngeo_setup(cfg, store)
         ds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", tasks=[t], train=False, use="train",
-                              volume_ids=ids, max_seg=0, **ngeo_kw)
+                              volume_ids=ids, max_seg=0, max_dense=1, **ngeo_kw)
         loader = make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False, collate_fn=cf)
         rows = []
         for raw in (p for full in loader for p in mixed_parts(full)):
