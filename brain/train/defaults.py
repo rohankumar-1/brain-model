@@ -41,6 +41,9 @@ LEJEPA3D: dict[str, Any] = {
         # Prefix tokens: n_cls=1 adds a CLS that becomes the pooled (global) embedding; registers are extra
         # position-free tokens attention can use as scratch space. 0/0 = mean-pooled patch tokens.
         "n_cls": 0, "n_registers": 0,
+        # inductive biases (R18): a depthwise 3x3x3 convolution in the MLP of the first dw_conv_blocks blocks; a
+        # bilateral mirror mixing after each block in mirror_blocks, about the template plane x = mirror_mid_mm
+        "dw_conv_blocks": 0, "mirror_blocks": [], "mirror_mid_mm": 128.0,
     },
     # Crops live on the volume's token grid, so two crops share a token exactly where they overlap.
     "views": {
@@ -144,6 +147,8 @@ def _multitask_defaults() -> dict[str, Any]:
                   # from-scratch ViT only (an init_from encoder keeps its own): stochastic depth (max rate, linear over
                   # depth), LayerScale init (None: off), RoPE shortest period in mm (None: the original 6.3 mm)
                   "drop_path": 0.0, "layer_scale": None, "rope_min_period_mm": None,
+                  # from-scratch ViT inductive biases (LEJEPA3D model: depthwise MLP convolution, mirror mixing)
+                  "dw_conv_blocks": 0, "mirror_blocks": [], "mirror_mid_mm": 128.0, "n_registers": 0,
                   # shared learned window bank (brain.models.window_bank; CONTRACT 4): the encoder takes native units and
                   # windows them through k learnable asinh windows (k input channels); off = the fixed windows
                   "window_bank": {"enabled": False, "k": 6, "init": "contract6", "per_modality": False, "lr_mult": 0.1,
@@ -283,6 +288,11 @@ def smoke_config(cfg: dict[str, Any]) -> dict[str, Any]:
     out = deepcopy(cfg)
     out["data"]["volume_size_xyz"] = [32, 32, 16]
     out["model"].update(size="test", checkpoint=False, proj_hidden=32, proj_dim=16, dense_dim=16, dense_hidden=32)
+    m = out["model"]                                # the test ViT has 2 blocks: keep the inductive biases, scaled
+    if m.get("dw_conv_blocks"):
+        m["dw_conv_blocks"] = min(int(m["dw_conv_blocks"]), 2)
+    if m.get("mirror_blocks"):
+        m["mirror_blocks"], m["mirror_mid_mm"] = [1], 16.0          # 32 mm phantoms: their centre plane
     v = out["views"]
     v["patch_xyz"] = [8, 8, 4]
     v["global"] = {"n": 2, "size_xyz": [16, 16, 8]}

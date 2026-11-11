@@ -84,7 +84,7 @@ class Block(nn.Module):
     ``layer_scale`` (initial per-channel residual scale, e.g. 1e-4) and ``drop_path`` give the Primus-style block."""
 
     def __init__(self, dim: int, heads: int, rope: RoPE3D, mlp_ratio: float = 4.0, qk_norm: bool = False,
-                 mlp: str = "gelu", layer_scale: float | None = None, drop_path: float = 0.0):
+                 mlp: str = "gelu", layer_scale: float | None = None, drop_path: float = 0.0, dw_conv: bool = False):
         super().__init__()
         self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
         self.attn = Attention(dim, heads, rope, qk_norm)
@@ -93,16 +93,100 @@ class Block(nn.Module):
             self.mlp = SwiGLU(dim, int(round(hidden * 2 / 3 / 8)) * 8)
         else:
             self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        # ``dw_conv`` (LocalViT, Li et al. 2021): a depthwise 3x3x3 convolution over the token grid on the MLP's
+        # hidden layer, residual and zero-initialised (the block starts as the plain one); patch tokens only
+        width = self.mlp.w3.in_features if mlp == "swiglu" else hidden
+        self.dw = nn.Conv3d(width, width, 3, padding=1, groups=width, bias=False) if dw_conv else None
         self.ls1 = nn.Parameter(torch.full((dim,), float(layer_scale))) if layer_scale else None
         self.ls2 = nn.Parameter(torch.full((dim,), float(layer_scale))) if layer_scale else None
         self.drop_path = float(drop_path)
 
+    def _mlp(self, x: torch.Tensor, n_prefix: int, layout: dict | None) -> torch.Tensor:
+        if self.dw is None or layout is None:
+            return self.mlp(x)
+        if isinstance(self.mlp, SwiGLU):
+            a, b = self.mlp.w12(x).chunk(2, dim=-1)
+            h, out = F.silu(a) * b, self.mlp.w3
+        else:
+            h, out = self.mlp[1](self.mlp[0](x)), self.mlp[2]
+        hp = h[:, n_prefix:]
+        h = torch.cat([h[:, :n_prefix], hp + grid_conv(self.dw, hp, layout)], 1)
+        return out(h)
+
     def forward(self, x: torch.Tensor, coords_mm: torch.Tensor, attn_mask: torch.Tensor | None = None,
-                n_prefix: int = 0) -> torch.Tensor:
+                n_prefix: int = 0, layout: dict | None = None) -> torch.Tensor:
         a = self.attn(self.norm1(x), coords_mm, attn_mask, n_prefix)
         x = x + drop_path(a * self.ls1 if self.ls1 is not None else a, self.drop_path, self.training)
-        m = self.mlp(self.norm2(x))
+        m = self._mlp(self.norm2(x), n_prefix, layout)
         return x + drop_path(m * self.ls2 if self.ls2 is not None else m, self.drop_path, self.training)
+
+
+def grid_conv(conv: nn.Conv3d, h: torch.Tensor, layout: dict) -> torch.Tensor:
+    """``conv`` over the token grid for packed patch features ``h`` (B, M, C): scattered to the full grid (dropped and
+    padded tokens 0), convolved, gathered back; padded slots come back 0. ``layout``: ``grid_layout``."""
+    b, m, c = h.shape
+    order, pad = layout["order"][:b], layout["pad"][:b]
+    nz, ny, nx = layout["grid"]
+    full = h.new_zeros(b, nz * ny * nx, c)
+    idx = order.unsqueeze(-1).expand(b, m, c)
+    full.scatter_(1, idx, h * pad.unsqueeze(-1).to(h.dtype))
+    g = conv(full.transpose(1, 2).reshape(b, c, nz, ny, nx))
+    back = g.reshape(b, c, -1).transpose(1, 2).gather(1, idx).to(h.dtype)
+    return back * pad.unsqueeze(-1).to(h.dtype)
+
+
+class MirrorMix(nn.Module):
+    """Bilateral-symmetry prior: each patch token reads its mirror partner across the template's mid-sagittal plane,
+    x <- x + W [LN(x_m), |LN(x) - LN(x_m)|] (|.| so the difference is not a linear function of the two; W zero-init,
+    so the encoder starts unchanged). Tokens without a kept partner get zeros."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.proj = nn.Linear(2 * dim, dim)
+
+    def forward(self, x: torch.Tensor, partner: torch.Tensor) -> torch.Tensor:
+        b, m, d = x.shape
+        h = self.norm(x)
+        ok = (partner >= 0).unsqueeze(-1).to(h.dtype)
+        hm = h.gather(1, partner.clamp_min(0).unsqueeze(-1).expand(b, m, d)) * ok
+        return x + self.proj(torch.cat([hm, (h - hm).abs() * ok], -1)).to(x.dtype)
+
+
+def grid_layout(grid, coords: torch.Tensor, order: torch.Tensor, pad: torch.Tensor,
+                mirror_mid_mm: float | None = None) -> dict:
+    """Where the packed tokens sit on their grid, for ``grid_conv`` and ``MirrorMix``. ``grid`` (nz, ny, nx), token
+    order z, y, x; ``coords`` (B, N, 3) template mm (x, y, z) of every grid token; ``order`` / ``pad`` (B, M) from
+    ``pack_kept``. With ``mirror_mid_mm`` also ``partner`` (B, M): the packed index of the kept token nearest to each
+    token's mirror image (x -> 2 mid - x), or -1. Token centres are affine in the grid index (1 mm grid and native CT
+    alike), so the mirror image maps back to an index exactly."""
+    nz, ny, nx = (int(v) for v in grid)
+    out = {"grid": (nz, ny, nx), "order": order, "pad": pad}
+    if mirror_mid_mm is None:
+        return out
+    b, m = order.shape
+    c = coords.double()
+    c0 = c[:, 0]
+    cols = []
+    for size, step, axis in ((nz, ny * nx, 2), (ny, nx, 1), (nx, 1, 0)):
+        if size > 1:
+            cols.append(c[:, step] - c0)
+        else:                                    # a one-token axis: any direction (no neighbour to land on)
+            e = torch.zeros_like(c0)
+            e[:, axis] = 1.0
+            cols.append(e)
+    a = torch.stack(cols, -1)                                                  # (B, 3, 3): index (z, y, x) -> mm
+    cm = c.gather(1, order.unsqueeze(-1).expand(b, m, 3))
+    mir = cm.clone()
+    mir[..., 0] = 2.0 * float(mirror_mid_mm) - cm[..., 0]
+    ijk = torch.linalg.solve(a, (mir - c0.unsqueeze(1)).transpose(1, 2)).transpose(1, 2).round().long()
+    iz, iy, ix = ijk.unbind(-1)
+    ok = (iz >= 0) & (iz < nz) & (iy >= 0) & (iy < ny) & (ix >= 0) & (ix < nx) & pad
+    flat = ((iz.clamp(0, nz - 1) * ny + iy.clamp(0, ny - 1)) * nx + ix.clamp(0, nx - 1))
+    pos = torch.full((b, nz * ny * nx), -1, dtype=torch.long, device=order.device)
+    pos.scatter_(1, order, torch.where(pad, torch.arange(m, device=order.device).expand(b, m), -1))
+    out["partner"] = torch.where(ok, pos.gather(1, flat), torch.full_like(flat, -1))
+    return out
 
 
 def _key_mask(keep: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -289,6 +373,14 @@ class SequenceFusion(nn.Module):
         return mean + self.o(out)
 
 
+def bias_kwargs(m: dict) -> dict:
+    """The encoder's optional inductive biases from a ``model`` config (``dw_conv_blocks``, ``mirror_blocks``,
+    ``mirror_mid_mm``); absent keys = off, so older checkpoints rebuild unchanged."""
+    return {"dw_conv_blocks": int(m.get("dw_conv_blocks") or 0),
+            "mirror_blocks": tuple(int(i) for i in (m.get("mirror_blocks") or ())),
+            "mirror_mid_mm": float(m.get("mirror_mid_mm", 128.0))}
+
+
 def ngeo_kwargs(m: dict) -> dict:
     """BrainEncoder keyword arguments for the native-geometry embedding (``model.ngeo``: enabled, stem widths,
     patch_xyz in input voxels); {} when off, so encoders without it build exactly as before."""
@@ -330,6 +422,9 @@ class BrainEncoder(nn.Module):
         conv_stem: Sequence[int] | None = None,
         ngeo_stem: Sequence[int] | None = None,
         ngeo_patch_xyz: Sequence[int] = (32, 32, 1),
+        dw_conv_blocks: int = 0,
+        mirror_blocks: Sequence[int] = (),
+        mirror_mid_mm: float = 128.0,
     ):
         super().__init__()
         if size not in VIT_SIZES:
@@ -358,10 +453,19 @@ class BrainEncoder(nn.Module):
             self.ngeo_embed = NgeoStemEmbed(in_chans, dim, self.ngeo_patch_xyz, tuple(int(w) for w in ngeo_stem),
                                             checkpoint_blocks)
         # stochastic depth rises linearly with depth, as in DeiT / Primus
+        # inductive biases (R18): ``dw_conv_blocks`` first blocks get a depthwise 3x3x3 convolution in the MLP;
+        # ``mirror_blocks`` (block indices) are followed by a MirrorMix about the plane x = ``mirror_mid_mm`` (template
+        # mm; the 256 mm grid's centre)
+        self.dw_conv_blocks = int(dw_conv_blocks)
+        self.mirror_blocks = tuple(int(i) for i in mirror_blocks)
+        self.mirror_mid_mm = float(mirror_mid_mm)
+        if any(not 0 <= i < depth for i in self.mirror_blocks) or not 0 <= self.dw_conv_blocks <= depth:
+            raise ValueError(f"mirror_blocks {self.mirror_blocks} / dw_conv_blocks {dw_conv_blocks}: depth is {depth}")
         self.blocks = nn.ModuleList(
             Block(dim, heads, self.rope, qk_norm=qk_norm, mlp=mlp, layer_scale=layer_scale,
-                  drop_path=float(drop_path) * i / max(depth - 1, 1))
+                  drop_path=float(drop_path) * i / max(depth - 1, 1), dw_conv=i < self.dw_conv_blocks)
             for i in range(depth))
+        self.mirror = nn.ModuleDict({str(i): MirrorMix(dim) for i in self.mirror_blocks})
         self.norm = nn.LayerNorm(dim)
         self.projector = Projector(dim, proj_hidden or min(2048, dim * 4), self.proj_dim, norm=proj_norm)
         # Per-token head for the dense loss. No batch statistics: tokens of one volume are correlated.
@@ -381,6 +485,7 @@ class BrainEncoder(nn.Module):
         self.prefix = nn.Parameter(torch.zeros(1, self.n_prefix, dim)) if self.n_prefix else None
         self.apply(self._init_weights)
         self._init_stems()
+        self._init_biases()
         if self.prefix is not None:
             nn.init.trunc_normal_(self.prefix, std=0.02)
         self.meta_emb: nn.Embedding | None = None
@@ -434,6 +539,24 @@ class BrainEncoder(nn.Module):
             if emb is not None and hasattr(emb, "stem"):
                 init_stem_convs(emb.stem)
 
+    def _init_biases(self) -> None:
+        """Depthwise convolutions and mirror projections start at zero: the encoder starts as the plain ViT."""
+        for blk in self.blocks:
+            if blk.dw is not None:
+                nn.init.zeros_(blk.dw.weight)
+        for mix in self.mirror.values():
+            nn.init.zeros_(mix.proj.weight)
+            nn.init.zeros_(mix.proj.bias)
+
+    @property
+    def needs_layout(self) -> bool:
+        return bool(self.dw_conv_blocks or self.mirror_blocks)
+
+    def _layout(self, grid, coords: torch.Tensor, order: torch.Tensor, pad: torch.Tensor) -> dict | None:
+        if not self.needs_layout:
+            return None
+        return grid_layout(grid, coords, order, pad, self.mirror_mid_mm if self.mirror_blocks else None)
+
     @staticmethod
     def _init_weights(m: nn.Module) -> None:
         if isinstance(m, (nn.Linear, nn.Conv3d)):
@@ -441,10 +564,11 @@ class BrainEncoder(nn.Module):
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
-    def _run_block(self, block: Block, x: torch.Tensor, coords: torch.Tensor, attn_mask, n_prefix: int = 0):
+    def _run_block(self, block: Block, x: torch.Tensor, coords: torch.Tensor, attn_mask, n_prefix: int = 0,
+                   layout: dict | None = None):
         if self.checkpoint_blocks and self.training:
-            return checkpoint(block, x, coords, attn_mask, n_prefix, use_reentrant=False)
-        return block(x, coords, attn_mask, n_prefix)
+            return checkpoint(block, x, coords, attn_mask, n_prefix, layout, use_reentrant=False)
+        return block(x, coords, attn_mask, n_prefix, layout)
 
     def _embed(self, view, coords_mm, patch_size_mm, patch_xyz, zyx, meta: torch.Tensor | None = None,
                stem: str = "iso"):
@@ -473,7 +597,7 @@ class BrainEncoder(nn.Module):
 
     def _run(self, x: torch.Tensor, coords: torch.Tensor, pad: torch.Tensor, taps: Sequence[int] = (),
              task_tokens: torch.Tensor | None = None, task_write: torch.Tensor | None = None,
-             fuse: dict | None = None,
+             fuse: dict | None = None, layout: dict | None = None,
              ) -> tuple[torch.Tensor | None, torch.Tensor, list[torch.Tensor], torch.Tensor | None]:
         """Blocks over packed patch tokens (with the prefix, then any task tokens, in front). Returns the normed prefix
         outputs (or None), the normed patch tokens, the pre-norm patch tokens after each block in ``taps``, and the
@@ -507,7 +631,9 @@ class BrainEncoder(nn.Module):
                 mask = None if mask is None else mask[:n_out]
                 if mask is None and n_out > 1 and not t:
                     mask = _key_mask(pad, x.dtype)
-            x = self._run_block(block, x, coords, mask, p + t)
+            x = self._run_block(block, x, coords, mask, p + t, layout)
+            if str(i) in self.mirror:
+                x = torch.cat([x[:, :p + t], self.mirror[str(i)](x[:, p + t:], layout["partner"][:x.shape[0]])], 1)
             if i in taps:
                 tapped.append(x[:, p + t:])
         if fuse is not None:
@@ -548,8 +674,9 @@ class BrainEncoder(nn.Module):
             keep = torch.ones(b, n, dtype=torch.bool, device=tokens.device)
         if keep.shape != (b, n):
             raise ValueError(f"keep {tuple(keep.shape)} does not match tokens {(b, n)}")
-        seq, seq_coords, pad, _ = pack_kept(tokens, coords_mm, keep)
-        prefix, x, tapped, task_out = self._run(seq, seq_coords, pad, taps, task_tokens, task_write, fuse)
+        seq, seq_coords, pad, order = pack_kept(tokens, coords_mm, keep)
+        layout = self._layout(grid, coords_mm, order, pad)
+        prefix, x, tapped, task_out = self._run(seq, seq_coords, pad, taps, task_tokens, task_write, fuse, layout)
         if fuse is not None:               # a study's outputs are its anchor row's (rows [0, n_out))
             n_out = int(fuse["n_out"])
             keep, tokens, coords_mm, view = keep[:n_out], tokens[:n_out], coords_mm[:n_out], view[:n_out]
@@ -583,12 +710,13 @@ class BrainEncoder(nn.Module):
         count and cut into buckets, so a row is padded to its bucket's longest row, not the batch's. Rows
         never interact, so this changes cost, not values. ``longest`` comes from the CPU: no GPU sync.
         """
-        emb, _ = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True, meta=meta)
+        emb, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=True, meta=meta)
         order, buckets = bucket_rows(plan, emb.device)
         pooled, dense = [], []
         for idx, m in buckets:
-            seq, seq_coords, pad, _ = pack_kept(emb[idx], coords_mm[idx], keep[idx], max_keep=m)
-            prefix, x, _, _ = self._run(seq, seq_coords, pad)
+            seq, seq_coords, pad, korder = pack_kept(emb[idx], coords_mm[idx], keep[idx], max_keep=m)
+            layout = self._layout(grid, coords_mm[idx], korder, pad)
+            prefix, x, _, _ = self._run(seq, seq_coords, pad, layout=layout)
             pooled.append(self._pool(prefix, x, pad))
             if tokens:
                 dense.append(scatter_kept(x, keep[idx]))

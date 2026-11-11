@@ -17,7 +17,7 @@ from brain.data.crops3d import raw_views
 from brain.data.volumes import collate_volumes, crop_microbatch, make_loader, make_synthetic_volume
 from brain.data.volumes import n_meta
 from brain.models.viewnet3d import ViewNet, batch_meta
-from brain.models.vit3d import BrainEncoder, ngeo_kwargs
+from brain.models.vit3d import BrainEncoder, bias_kwargs, ngeo_kwargs
 from brain.models.window_bank import attach_bank, bank_cfg, encoder_in_chans
 from brain.objectives.lejepa3d import lejepa_loss
 from brain.objectives.sigreg import SIGReg
@@ -57,6 +57,7 @@ def build_encoder(cfg: dict, device: torch.device) -> BrainEncoder:
         drop_path=float(m.get("drop_path", 0.0)),          # stochastic depth (max rate, linear over depth)
         layer_scale=m.get("layer_scale"),                 # LayerScale init (None: off); frozen evaluation reads it too
         mlp=str(m.get("mlp", "gelu")),
+        **bias_kwargs(m),                                 # depthwise conv in the MLP, mirror mixing (R18)
     ).to(device)
     return attach_bank(enc, m)
 

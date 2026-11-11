@@ -1,0 +1,142 @@
+# R18 DRAFT (2026-11-10; not launched): R17's recipe plus three simple encoder inductive biases (user, 2026-11-10:
+#   "keep all inductive biases as simple as possible"; gated attention and absolute position left out):
+#   * model.dw_conv_blocks 6: a depthwise 3x3x3 convolution over the token grid on the MLP hidden layer of the first
+#     6 blocks (LocalViT; residual, zero-init) -- locality for small findings (thin EDH rims, small bleeds / structures);
+#   * model.mirror_blocks [2, 5, 8, 11]: each patch token reads its mirror partner across the template mid-sagittal
+#     plane (x = 128 mm, measured: MRI / CT brain centroids at 127.5 voxels), x += W [LN x_m, |LN x - LN x_m|]
+#     (zero-init) -- the bilateral-symmetry prior (Sym-TransNet, SA-Swin, DeepSymNet); R17's encoder had almost no
+#     left-right information (ventricle asymmetry probe R2 .20 vs .67 for full_iso_bank);
+#   * model.n_registers 4: attention scratch tokens (Darcet et al. 2024): last-layer attention sat on a few tokens.
+#   Still to decide before launch: SSL warm start / early SSL phase, a learned-weight floor, EDH supervision.
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v12
+  registry: null
+  volume_size_xyz: [256, 256, 160]
+  default_spacing_mm: [1.0, 1.0, 1.0]
+  num_workers: 10
+  balance_alpha: 0.5
+  subject_beta: 1.0
+  balance_groups:
+    brats: [brats_gli, brats_men, brats_ped, brats_goat]
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets: [abide1, ixi, oasis1, oasis2, pixar, fomo_nki, fomo_hbn, rsna_ica]   # benchmark cohorts, BrainFMBench, RSNA-ICA
+  exclude_volumes: configs/multitask/train_exclude_r17.csv     # copies of benchmark scans, val/test twins, QC failures
+  ngeo:                         # native-geometry CT (docs/multitask.md "Native geometry")
+    enabled: true
+    mixed: true                 # every scan stays; CT with a trusted ngeo copy at native geometry, the rest 1 mm
+    root: null                  # ngeo zips + volumes_ngeo.csv in the store root
+    index_name: volumes_ngeo.csv
+    require: []
+    drop_flags: []
+    untrusted_flags: [frame_mismatch, frame_assumed, brain_off]   # these CT scans are read at 1 mm (AISD exempt)
+    pad_multiple: 4
+    max_slices: null
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+model:
+  init_from: null
+  size: base
+  conv_stem: [32, 64]
+  mil: {enabled: true}
+  drop_path: 0.1                 # stochastic depth (max, linear over depth): small cohorts were memorised
+  layer_scale: 0.1               # LayerScale init (CaiT, depth 12): steadier from-scratch ViT-B residual stream
+  rope_min_period_mm: 32         # RoPE without the sub-Nyquist (< 2 x 16 mm token) frequencies, same code for both grids
+  dw_conv_blocks: 6              # depthwise 3x3x3 convolution in the MLP of blocks 0-5 (zero-init residual)
+  mirror_blocks: [2, 5, 8, 11]   # bilateral mirror mixing after these blocks (zero-init)
+  mirror_mid_mm: 128.0           # template mid-sagittal plane (256 mm grid centre)
+  n_registers: 4                 # attention scratch tokens (Darcet et al. 2024)
+  checkpoint: true
+  taps: [3, 7]
+  slot: {dim: 256, layers: 3, heads: 8}
+  seg:
+    widths: [128, 64, 32, 16]
+  rope_fp32: true
+  fp32_residual: true
+  meta: {enabled: true, drop: 0.2}
+  task_tokens: {enabled: true, share: true, write_bias: 0.0, write_ramp_steps: 0}
+  regression: {kind: hlgauss, bins: 80, range: [-5.0, 5.0], sigma_ratio: 0.75}
+  token_map: {enabled: true, dim: 64}
+  fusion: {after_block: 8, heads: 6}     # study-level input: blocks 0-7 per scan, fused, 8-11 on the study
+  # shared learned window bank (brain.models.window_bank), initialised to the contract's six windows
+  window_bank: {enabled: true, k: 6, init: contract6, per_modality: false, lr_mult: 0.1, decoder_grad: false}
+  ngeo:                         # in-plane stem (random init) into the shared transformer; masks on the ngeo grid
+    enabled: true
+    stem: [32, 64]
+    patch_xyz: [32, 32, 1]
+    seg_stride: [1, 4, 4]
+    template_xyz: [256, 256, 160]
+views:
+  patch_xyz: [16, 16, 8]
+  gate:
+    ct_hu: [-500.0, 200.0]
+    mri_lo: -5.5
+    mode: frac            # a token counts when >= 25% of its voxels are foreground (centre mode lost 1.2% of brain)
+    min_frac: 0.25
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.25
+  max_seg: 2
+  lesion_ignore: true
+  study: {p_multi: 0.5, max_scans: 3}   # half the scans with partners come with 1-2 co-registered sequences
+  group_weights: {synthesis: 0.5, radiology: 1.0, derived: 0.5}   # derived: 38.5% of task slots at 1.0 (audit 2026-11-03)
+  groups: null
+  ids: null
+  exclude: [mmse, autism_severity, adhd, parkinsons, glioma_lower_grade, glioma_idh, ct_gray_white_ratio,
+    vol_hippocampus, vol_amygdala, vol_thalamus, vol_caudate, vol_putamen, vol_cortex, vol_white_matter, vol_cerebellum,
+    vol_brainstem, vol_log_ventricles, vol_log_csf, wmh_grade, vol_hippocampus_asym, vol_cortex_asym,
+    aneurysm_present, aneurysm_ica_infraclinoid, aneurysm_ica_supraclinoid, aneurysm_mca, aneurysm_acom, aneurysm_aca,
+    aneurysm_pcom, aneurysm_basilar_tip, aneurysm_posterior_other, aneurysm_location, seg_vessels]
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg: [8, 8, 12]
+    shift_mm: 8.0
+    shear_deg: 10.0           # residual CT gantry tilt (rigid-registered RSNA keep theirs)
+  appearance:
+    bias: {p: 0.3, amp: 0.2}
+    through_plane:
+      p: 0.3
+      fwhm_vox: [2.0, 6.0]
+    noise:
+      p: 0.5
+      kind: rician
+      snr: [15, 100]
+      sigma: [0.02, 0.1]
+      sigma_hu: [2.0, 15.0]
+    blur:
+      p: 0.2
+      sigma_vox: [0.5, 1.0]
+    drift: {p: 0.2, amp: 0.1}
+    ct_physical: {p: 0.5, offset_hu: 10.0, scale: 0.03}      # bank (native-unit) path: CT physical augs
+    kernel: {p: 0.3, sigma_vox: [0.3, 1.0], sharpen: 0.5, amount: [0.2, 1.0]}
+  fov_cut:
+    p: 0.2
+    mm: [10, 40]
+  skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
+  synth_contrast: {p: 0.1}
+  task_aware: true
+loss: {seg_stride: 2, uncertainty_clamp: [1.0, 2.0], token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
+optim:
+  lr: 0.0003                       # global batch 16 (4 GPUs x 4); smoke 28589306: stable, gnorm falling
+  enc_lr_mult: 1.0                 # from scratch: the encoder trains at the full LR
+  layer_decay: 1.0
+  weight_decay: 0.05
+  warmup_steps: 5000
+  clip_grad: 1.0
+  batch_size: 4                    # anchors per GPU; smoke 28589306: peak 26.9 GiB of 46 on an L40S, ~18 vol/s on 4 GPUs
+  schedule: wsd
+  decay_steps: 25000
+  betas: [0.9, 0.95]             # from scratch: a faster second moment recovers from loss spikes
+train: {max_steps: 150000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false}
+output: {out_dir: runs/multitask/r18, resume_from: null}

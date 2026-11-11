@@ -64,8 +64,10 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         for k, v in (scfg.get("model") or {}).items():
             if k not in ("checkpoint",) and k not in m:
                 m[k] = v
-        for k in ("drop_path", "layer_scale", "rope_min_period_mm"):    # the encoder's own (defaults are scratch-only)
-            m[k] = (scfg.get("model") or {}).get(k, {"drop_path": 0.0}.get(k))
+        for k in ("drop_path", "layer_scale", "rope_min_period_mm", "dw_conv_blocks", "mirror_blocks",
+                  "mirror_mid_mm"):                     # the encoder's own (defaults are scratch-only)
+            m[k] = (scfg.get("model") or {}).get(k, {"drop_path": 0.0, "dw_conv_blocks": 0, "mirror_blocks": [],
+                                                     "mirror_mid_mm": 128.0}.get(k))
         if bank_of(enc) is not None:            # the encoder's own windows: its bank's config, whatever this one says
             m["window_bank"] = {**(scfg.get("model") or {}).get("window_bank", {}), "enabled": True}
         elif bank_cfg(m) is not None:           # bank warm start: input conv widened, outputs unchanged at init
