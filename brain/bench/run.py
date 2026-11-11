@@ -16,10 +16,10 @@ from brain.common.paths import REPO_ROOT
 
 # the suite jobs: an L40S on either GPU partition (node3006 has a broken CUDA install); mit_normal_gpu caps jobs at 6 h
 # BRAIN_BENCH_PARTITION overrides the partitions (e.g. mit_normal_gpu while a training run holds the pi_dbertsim share);
-# BRAIN_BENCH_EXCLUDE the excluded nodes (e.g. node3006,node4207: 2026-11-11 two suite jobs there OOMed on a GPU another
+# BRAIN_BENCH_SKIP_NODES the excluded nodes (not BRAIN_BENCH_EXCLUDE: that is the decontamination list; e.g. node3006,node4207: 2026-11-11 two suite jobs there OOMed on a GPU another
 # process held)
 SBATCH_GPU = ["-p", os.environ.get("BRAIN_BENCH_PARTITION", "pi_dbertsim,mit_normal_gpu"), "--gres=gpu:l40s:1",
-              "--exclude=" + os.environ.get("BRAIN_BENCH_EXCLUDE", "node3006")]
+              "--exclude=" + os.environ.get("BRAIN_BENCH_SKIP_NODES", "node3006")]
 HEADS_DIR = REPO_ROOT / "runs" / "bench" / "heads"
 SUITE_JOBS = 4          # the suite entries split over this many parallel GPU jobs (each runs its share in turn)
 
