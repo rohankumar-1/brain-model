@@ -1,13 +1,19 @@
-# R18 DRAFT (2026-11-10; not launched): R17's recipe plus three simple encoder inductive biases (user, 2026-11-10:
-#   "keep all inductive biases as simple as possible"; gated attention and absolute position left out):
+# R18 (2026-11-11): R17 WARM-STARTED at its constant-LR step 76,500 (runs/multitask/r17/step_0076500.pt, a resume
+#   branch: weights, EMA, balancer; optimizer reset because parameters are added) plus two encoder inductive biases
+#   (user, 2026-11-10/11: "keep all inductive biases as simple as possible"; no gated attention, no absolute position):
 #   * model.dw_conv_blocks 6: a depthwise 3x3x3 convolution over the token grid on the MLP hidden layer of the first
 #     6 blocks (LocalViT; residual, zero-init) -- locality for small findings (thin EDH rims, small bleeds / structures);
 #   * model.mirror_blocks [2, 5, 8, 11]: each patch token reads its mirror partner across the template mid-sagittal
 #     plane (x = 128 mm, measured: MRI / CT brain centroids at 127.5 voxels), x += W [LN x_m, |LN x - LN x_m|]
 #     (zero-init) -- the bilateral-symmetry prior (Sym-TransNet, SA-Swin, DeepSymNet); R17's encoder had almost no
-#     left-right information (ventricle asymmetry probe R2 .20 vs .67 for full_iso_bank);
-#   * model.n_registers 4: attention scratch tokens (Darcet et al. 2024): last-layer attention sat on a few tokens.
-#   Still to decide before launch: SSL warm start / early SSL phase, a learned-weight floor, EDH supervision.
+#     left-right information (ventricle asymmetry probe R2 .20 vs .67 for full_iso_bank).
+#   Both start at zero, so step 76,500 of R18 answers exactly as R17 did. No registers: they would shift every
+#   attention map of the warm-started encoder at step 0.
+#   * learned task-weight floor: loss.uncertainty_clamp [1.0, 0.25] (weights e^-0.25 = 0.78 .. e^1; R17 let the
+#     slow-learning volume / asymmetry targets sink to 0.5-0.7 against 2.5-2.7 for findings);
+#   * schedule: re-warmed over 2,000 steps at the resume step (--reset-schedule), constant 3e-4, decay over the last
+#     12,000, ending at 136,500 (60k steps on top of R17).
+#   Launch: EXTRA_ARGS=--reset-schedule (a requeued segment keeps the started schedule: resume_schedule is idempotent).
 seed: 42
 data:
   store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
@@ -48,7 +54,6 @@ model:
   dw_conv_blocks: 6              # depthwise 3x3x3 convolution in the MLP of blocks 0-5 (zero-init residual)
   mirror_blocks: [2, 5, 8, 11]   # bilateral mirror mixing after these blocks (zero-init)
   mirror_mid_mm: 128.0           # template mid-sagittal plane (256 mm grid centre)
-  n_registers: 4                 # attention scratch tokens (Darcet et al. 2024)
   checkpoint: true
   taps: [3, 7]
   slot: {dim: 256, layers: 3, heads: 8}
@@ -124,19 +129,19 @@ aug:
   skull_strip: {p: 0.3, match: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity]}
   synth_contrast: {p: 0.1}
   task_aware: true
-loss: {seg_stride: 2, uncertainty_clamp: [1.0, 2.0], token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
+loss: {seg_stride: 2, uncertainty_clamp: [1.0, 0.25], token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
   negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
 optim:
   lr: 0.0003                       # global batch 16 (4 GPUs x 4); smoke 28589306: stable, gnorm falling
   enc_lr_mult: 1.0                 # from scratch: the encoder trains at the full LR
   layer_decay: 1.0
   weight_decay: 0.05
-  warmup_steps: 5000
+  warmup_steps: 2000
   clip_grad: 1.0
   batch_size: 4                    # anchors per GPU; smoke 28589306: peak 26.9 GiB of 46 on an L40S, ~18 vol/s on 4 GPUs
   schedule: wsd
-  decay_steps: 25000
+  decay_steps: 12000
   betas: [0.9, 0.95]             # from scratch: a faster second moment recovers from loss spikes
-train: {max_steps: 150000, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+train: {max_steps: 136500, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
   ema_decay: 0.999, keep_full: false}
-output: {out_dir: runs/multitask/r18, resume_from: null}
+output: {out_dir: runs/multitask/r18, resume_from: runs/multitask/r17/step_0076500.pt}

@@ -11,6 +11,8 @@ checkpoints also hold ``multitask`` (task embeddings, heads, decoder) and ``task
 
 from __future__ import annotations
 
+import re
+
 import torch
 import torch.distributed as dist
 
@@ -33,7 +35,15 @@ GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich",
                  "ssl_recon": "recon", "synthesis": "synth"}
 # heads a resumed run may add (absent from its checkpoint): HL-Gauss bins, the token map
 NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.", "backbone.ngeo_embed.", "seg_ngeo.",
-             "backbone.window_bank.")
+             "backbone.window_bank.", "backbone.mirror.")
+# encoder inductive biases a resumed run may add (zero-initialised, so the warm-started model answers as before):
+# the depthwise MLP convolutions (model.dw_conv_blocks); the mirror mixing is under NEW_HEADS (backbone.mirror.)
+NEW_KEY = re.compile(r"backbone\.blocks\.\d+\.dw\.")
+
+
+def is_new_key(k: str) -> bool:
+    """A parameter a resumed run may add on top of its checkpoint (``NEW_HEADS``, ``NEW_KEY``)."""
+    return k.startswith(NEW_HEADS) or bool(NEW_KEY.match(k))
 TYPE_COLUMNS = {"binary": "t_bin", "regression": "t_reg", "multiclass": "t_cls", "segmentation": "t_seg",
                 "dense": "t_dense"}
 
@@ -269,7 +279,7 @@ class Trainer(engine.Trainer):
                 rt.log(f"[resume] registry changed: {len(old_ids)} -> {len(new_ids)} tasks "
                        f"(new: {sorted(set(new_ids) - set(old_ids))[:12]}); per-task rows re-indexed by id")
             res = self.raw.load_state_dict(ckpt["multitask"], strict=False)
-            new = [k for k in res.missing_keys if k.startswith(NEW_HEADS)]
+            new = [k for k in res.missing_keys if is_new_key(k)]
             if res.unexpected_keys or len(new) != len(res.missing_keys):
                 raise SystemExit(f"[resume] state mismatch: missing={res.missing_keys[:4]} "
                                  f"unexpected={res.unexpected_keys[:4]}")

@@ -15,13 +15,15 @@ import sys
 from brain.common.paths import REPO_ROOT
 
 # the suite jobs: an L40S on either GPU partition (node3006 has a broken CUDA install); mit_normal_gpu caps jobs at 6 h
-SBATCH_GPU = ["-p", "pi_dbertsim,mit_normal_gpu", "--gres=gpu:l40s:1", "--exclude=node3006"]
+# BRAIN_BENCH_PARTITION overrides the partitions (e.g. mit_normal_gpu while a training run holds the pi_dbertsim share)
+SBATCH_GPU = ["-p", os.environ.get("BRAIN_BENCH_PARTITION", "pi_dbertsim,mit_normal_gpu"), "--gres=gpu:l40s:1",
+              "--exclude=node3006"]
 HEADS_DIR = REPO_ROOT / "runs" / "bench" / "heads"
 SUITE_JOBS = 4          # the suite entries split over this many parallel GPU jobs (each runs its share in turn)
 
 
 def sbatch_gpu(hours: int) -> list[str]:
-    return SBATCH_GPU if hours <= 6 else ["-p", "pi_dbertsim", *SBATCH_GPU[2:]]
+    return SBATCH_GPU if hours <= 6 or "BRAIN_BENCH_PARTITION" in os.environ else ["-p", "pi_dbertsim", *SBATCH_GPU[2:]]
 
 
 def no_token_tasks(b, todo: list[str]) -> list[str]:

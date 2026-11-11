@@ -116,3 +116,11 @@ def test_task_tokens_and_registers_pass_through():
     assert torch.isfinite(out["tokens"]).all()
     # dropped tokens stay zero
     assert out["tokens"][1, :3].abs().sum() == 0
+
+
+def test_resume_may_add_the_zero_init_biases_only():
+    from brain.train.multitask import is_new_key
+
+    assert is_new_key("backbone.blocks.0.dw.weight") and is_new_key("backbone.blocks.11.dw.weight")
+    assert is_new_key("backbone.mirror.5.proj.weight") and is_new_key("backbone.mirror.2.norm.bias")
+    assert not is_new_key("backbone.blocks.0.mlp.0.weight") and not is_new_key("backbone.prefix")
