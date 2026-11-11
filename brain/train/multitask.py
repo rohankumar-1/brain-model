@@ -23,7 +23,8 @@ from brain.models.window_bank import (add_bank, attach_bank, bank_cfg, bank_of, 
 from brain.data.volumes import n_meta
 from brain.multitask.data import SLAB_TASKS, TOKEN_MIL_TASKS, TYPE_ID, prepare, protected_tasks, sharp_tasks, task_loaders
 from brain.multitask.evaluate import format_eval, run_eval
-from brain.multitask.losses import Balancer, slab_mil_loss, slot_losses, token_occupancy, token_occupancy_loss
+from brain.multitask.losses import (Balancer, any_of_loss, slab_mil_loss, slot_losses, token_occupancy,
+                                    token_occupancy_loss)
 from brain.multitask.model import BrainQuery, MixedForward, TokenTraining
 from brain.multitask.registry import load_registry
 from brain.train import engine
@@ -244,7 +245,17 @@ class Trainer(engine.Trainer):
                 self.slab_sub[self.reg.index[t]] = k
         self.mil_w = torch.tensor([self.slice_w] * len(SLAB_TASKS) + [self.box_w] * (len(TOKEN_MIL_TASKS) - len(SLAB_TASKS)),
                                   device=dev)
-        self.aux_sum, self.aux_cnt = torch.zeros(2, device=dev), torch.zeros(2, device=dev)
+        # loss.any_of {parent: [children]}: a positive child implies the parent (losses.any_of_loss, any_of_weight)
+        self.any_of_w = float(cfg["loss"].get("any_of_weight", 0.0))
+        self.any_of = []
+        for parent, kids in ((cfg["loss"].get("any_of") or {}).items() if self.any_of_w else ()):
+            missing = [t for t in [parent, *kids] if t not in self.reg.index]
+            if missing:
+                raise SystemExit(f"loss.any_of names unknown tasks: {missing}")
+            child = torch.zeros(len(self.reg), dtype=torch.bool, device=dev)
+            child[[self.reg.index[t] for t in kids]] = True
+            self.any_of.append((self.reg.index[parent], child))
+        self.aux_sum, self.aux_cnt = torch.zeros(3, device=dev), torch.zeros(3, device=dev)
         self.ng_acc, self.ng_n = torch.zeros(3, device=dev), 0
         seed = int(cfg["seed"]) + rt.rank
         self.loader, self.val_loader, self.stats, n_train = task_loaders(
@@ -376,6 +387,11 @@ class Trainer(engine.Trainer):
         if out.get("tok") is not None:
             loss = self._token_losses(b, out["tok"], loss, len(seg_tok), slab_pair,
                                       geom["patch"] if geom else self.patch)
+        for parent, child in self.any_of:
+            al = any_of_loss(out["binary"], b["task"], has, parent, child)
+            loss = loss + self.any_of_w * al
+            self.aux_sum[2] += al.detach().sum() / (al.detach() > 0).sum().clamp_min(1)
+            self.aux_cnt[2] += 1
         return loss, has
 
     def mixed_step(self, step: int) -> dict[str, torch.Tensor]:
@@ -515,11 +531,15 @@ class Trainer(engine.Trainer):
             acc.zero_()
             cnt.zero_()
             out.update({name: (f"{mean[i]:.4f}" if n[i] else "-") for i, name in cols})
-        if self.tok_w or self.slice_w or self.box_w:   # raw token-map losses: occupancy, slice / box bags
+        # raw token-map losses (occupancy, slice / box bags) and the any-of hinge (mean over rows that violate it)
+        cols = (("tokmap", "slabmil") if self.tok_w or self.slice_w or self.box_w else ()) + \
+            (("anyof",) if self.any_of else ())
+        if cols:
             mean, n = (self.aux_sum / self.aux_cnt.clamp_min(1)).tolist(), self.aux_cnt.tolist()
             self.aux_sum.zero_()
             self.aux_cnt.zero_()
-            out.update({c: (f"{mean[i]:.4f}" if n[i] else "-") for i, c in enumerate(("tokmap", "slabmil"))})
+            idx = {"tokmap": 0, "slabmil": 1, "anyof": 2}
+            out.update({c: (f"{mean[idx[c]]:.4f}" if n[idx[c]] else "-") for c in cols})
         if self.mixed:                            # native-geometry share of the window: rows, labelled slots, loss
             m = (self.ng_acc / max(self.ng_n, 1)).tolist()
             out.update(ng_rows=f"{m[0]:.2f}", ng_slots=f"{m[1]:.2f}", ng_loss=f"{m[2]:.4f}")

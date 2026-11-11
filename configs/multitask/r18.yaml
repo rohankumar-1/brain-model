@@ -130,7 +130,11 @@ aug:
   synth_contrast: {p: 0.1}
   task_aware: true
 loss: {seg_stride: 2, uncertainty_clamp: [1.0, 0.25], token_weight: 0.5, slice_weight: 0.5, box_weight: 0.5,
-  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation]}
+  negative_tasks: [whole_tumor, tumor_core, enhancing_tumor, resection_cavity, hemorrhage_segmentation],
+  # a subtype implies "any": hinge relu(z_subtype - z_any) on rows asked both (losses.any_of_loss)
+  any_of: {hemorrhage_any: [hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular,
+    hemorrhage_subarachnoid, hemorrhage_subdural]},
+  any_of_weight: 0.1}
 optim:
   lr: 0.0003                       # global batch 16 (4 GPUs x 4); smoke 28589306: stable, gnorm falling
   enc_lr_mult: 1.0                 # from scratch: the encoder trains at the full LR

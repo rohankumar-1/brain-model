@@ -501,3 +501,26 @@ def test_skull_strip_never_touches_scans_asked_a_skull_task(tmp_path, monkeypatc
     b = ds[1 - i_age]["image"].numpy()
     assert (b[~brain & (img == 5.0)] == 5.0).all()                        # brain_mask asked: skull kept
     assert ds[i_age]["meta"] == META.index("t1")
+
+
+def test_any_of_hinge_penalises_a_subtype_above_any():
+    from brain.multitask.losses import any_of_loss
+
+    # row 0: any (task 0) at 0.0, subtypes 1 / 2 at 2.0 / -1.0 -> hinge mean (2 + 0) / 2 = 1 on the "any" slot
+    # row 1: no "any" slot -> 0; row 2: subtype slot unlabelled -> 0
+    task = torch.tensor([[0, 1, 2], [1, 2, -1], [3, 0, 1]])
+    z = torch.tensor([[0.0, 2.0, -1.0], [5.0, 5.0, 0.0], [0.0, 0.0, 9.0]], requires_grad=True)
+    has = torch.tensor([[True, True, True], [True, True, False], [True, True, False]])
+    child = torch.tensor([False, True, True, False])
+    loss = any_of_loss(z, task, has, 0, child)
+    assert torch.allclose(loss, torch.tensor([[1.0, 0, 0], [0, 0, 0], [0, 0, 0]]))
+    loss.sum().backward()
+    assert z.grad[0, 0] < 0 and z.grad[0, 1] > 0 and z.grad[0, 2] == 0 and z.grad[1:].abs().sum() == 0
+
+
+def test_trainer_runs_with_any_of(tmp_path):
+    from brain.train import engine
+
+    engine.run(["multitask", "--synthetic", "--max-steps", "2", "--log-every", "1", "--out-dir", str(tmp_path),
+                "--set", "model.task_tokens.enabled=false", "--set", "loss.any_of_weight=0.1", "--set",
+                "loss.any_of={hemorrhage_any: [hemorrhage_subdural, hemorrhage_epidural]}"])

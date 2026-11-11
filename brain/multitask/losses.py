@@ -159,6 +159,20 @@ def slab_mil_loss(logits: torch.Tensor, lab: torch.Tensor, keep: torch.Tensor) -
     return (pos_sum / n_runs.clamp_min(1) * w_pos + ln * w_neg) / (w_pos + w_neg).clamp_min(1)
 
 
+def any_of_loss(logits: torch.Tensor, task: torch.Tensor, has: torch.Tensor, parent: int,
+                child: torch.Tensor) -> torch.Tensor:
+    """Implication ``child => parent`` between binary slots of one row (a subtype implies "any"): the mean hinge
+    ``relu(z_child - z_parent)`` over the row's child slots, on the parent's slot (B, K); 0 where the row was not
+    asked the parent and a child together. Label-free: it only asks that p(any) >= p(subtype)."""
+    par = (task == parent) & has
+    kid = (task >= 0) & child.to(task.device)[task.clamp_min(0)] & has
+    z = logits.float()
+    zp = (z * par).sum(1, keepdim=True)
+    v = F.relu(z - zp) * kid * par.any(1, keepdim=True)
+    per_row = v.sum(1) / kid.sum(1).clamp_min(1)
+    return per_row.unsqueeze(1) * par
+
+
 def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch.Tensor, seg: torch.Tensor,
                 seg_pair: torch.Tensor, stride=2, dense: dict | None = None, sparse: torch.Tensor | None = None,
                 cell_zyx: tuple[int, int, int] | None = None, pos_weight: float = 20.0,
