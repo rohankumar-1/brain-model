@@ -44,8 +44,7 @@ def collect(ck, ids_by_task, workers):
             ids_by_task[task] = ids
         if not ids:
             continue
-        t = reg.index[task]
-        ds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", tasks=[t], train=False, use="train",
+        ds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", tasks=[task], train=False, use="train",
                               volume_ids=ids, max_seg=1)
         loader = make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False)
         rows = []
