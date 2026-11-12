@@ -18,6 +18,7 @@ import torch.distributed as dist
 
 from brain.common.optim import NO_DECAY_SUFFIXES, NO_DECAY_TABLES, POST_BLOCKS
 from brain.common.paths import resolve
+from brain.models.vit3d import drop_legacy_ngeo
 from brain.models.window_bank import (add_bank, attach_bank, bank_cfg, bank_of, describe, encoder_in_chans, is_bank_param,
                                      tissue_channel, warm_start_state)
 from brain.data.volumes import n_meta
@@ -25,9 +26,10 @@ from brain.multitask.data import SLAB_TASKS, TOKEN_MIL_TASKS, TYPE_ID, prepare, 
 from brain.multitask.evaluate import format_eval, run_eval
 from brain.multitask.losses import (Balancer, any_of_loss, slab_mil_loss, slot_losses, token_occupancy,
                                     token_occupancy_loss)
-from brain.multitask.model import BrainQuery, MixedForward, TokenTraining
+from brain.multitask.model import BrainQuery, TokenTraining
 from brain.multitask.registry import load_registry
 from brain.train import engine
+from brain.train.defaults import refuse_ngeo
 
 # log column per task group: the raw (unbalanced) mean loss of the group's tasks, averaged over the steps of the
 # logging window in which the group was asked (the balanced ``loss`` is weighted by the learned uncertainties)
@@ -35,8 +37,8 @@ GROUP_COLUMNS = {"demographics": "demo", "diagnosis": "dx", "hemorrhage": "ich",
                  "derived": "derived", "anatomy_seg": "aseg", "anatomy_volume": "avol", "lesion": "lesion",
                  "ssl_recon": "recon", "synthesis": "synth"}
 # heads a resumed run may add (absent from its checkpoint): HL-Gauss bins, the token map
-NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.", "backbone.ngeo_embed.", "seg_ngeo.",
-             "backbone.window_bank.", "backbone.mirror.")
+NEW_HEADS = ("regress_bins.", "tok_q.", "tok_k.", "tok_bias", "backbone.fusion.", "backbone.window_bank.",
+             "backbone.mirror.")
 # encoder inductive biases a resumed run may add (zero-initialised, so the warm-started model answers as before):
 # the depthwise MLP convolutions (model.dw_conv_blocks); the mirror mixing is under NEW_HEADS (backbone.mirror.)
 NEW_KEY = re.compile(r"backbone\.blocks\.\d+\.dw\.")
@@ -96,12 +98,8 @@ def build_encoder(cfg: dict, device: torch.device, synthetic: bool):
         if n_meta(m) and enc.meta_emb is None:                # metadata on an encoder trained without it
             enc.enable_meta(n_meta(m))
     enc.checkpoint_blocks = bool(m.get("checkpoint", True)) and not synthetic
-    ng = m.get("ngeo") or {}
-    if ng.get("enabled") and enc.ngeo_embed is None:          # warm start from a 1 mm encoder: a fresh ngeo stem
-        enc.enable_ngeo(ng.get("stem", (32, 64)), ng.get("patch_xyz", (32, 32, 1)))
-    for emb in (enc.patch_embed, getattr(enc, "ngeo_embed", None)):   # conv stems follow the encoder's setting
-        if hasattr(emb, "checkpoint"):
-            emb.checkpoint = enc.checkpoint_blocks
+    if hasattr(enc.patch_embed, "checkpoint"):                # a conv stem follows the encoder's setting
+        enc.patch_embed.checkpoint = enc.checkpoint_blocks
     fu = m.get("fusion") or {}
     if fu.get("after_block"):                 # study-level input (R14-F): sequence fusion inside the encoder
         enc.enable_fusion(int(fu["after_block"]), fu.get("heads"))
@@ -132,10 +130,6 @@ def param_groups(model: BrainQuery, extra: list, wd: float, enc_mult: float, lay
             elif name.startswith("backbone.fusion."):               # sits after block fuse_after: that block's LR
                 after = int(getattr(model.backbone, "fuse_after", depth - 1))
                 scale = enc_mult * layer_decay ** (depth - 1 - after)
-            elif name.startswith("backbone.ngeo_embed."):
-                # the native-geometry stem is added to (warm-started) encoders fresh: at the embedding's decayed LR it
-                # trained at layer_decay ** depth (0.75 ** 12 = 3%) of the LR in full_ngeo_bank
-                scale = enc_mult
             else:
                 scale = enc_mult * layer_decay ** depth
         skip = p.ndim < 2 or name.endswith(NO_DECAY_SUFFIXES) or any(k in name for k in NO_DECAY_TABLES)
@@ -180,14 +174,9 @@ class Trainer(engine.Trainer):
         self.train_ids = self.reg.train_ids(tk)
         if not self.train_ids:
             raise SystemExit(f"tasks {tk} selects no trained task (groups: {self.reg.groups})")
+        refuse_ngeo(cfg)
         enc = self.build_encoder(cfg, dev, args.synthetic)
-        # native-geometry CT (data.ngeo): tokens and masks on the ngeo grid (model.ngeo: stem, patch, decoder stride)
-        self.ngeo = bool((d.get("ngeo") or {}).get("enabled"))
-        # mixed (data.ngeo.mixed): CT with an ngeo copy at native geometry, everything else at 1 mm, in one batch
-        self.mixed = self.ngeo and bool((d.get("ngeo") or {}).get("mixed"))
-        if self.ngeo and not (cfg["model"].get("ngeo") or {}).get("enabled"):
-            raise SystemExit("data.ngeo.enabled needs model.ngeo.enabled (the in-plane stem and the ngeo decoder)")
-        self.patch = tuple(enc.ngeo_patch_xyz) if self.ngeo and not self.mixed else tuple(enc.patch_xyz)
+        self.patch = tuple(enc.patch_xyz)
         self.raw = BrainQuery(enc, self.reg, cfg["model"]).to(dev)
         self.tokens = TokenTraining(self.raw, cfg["model"], [self.reg.index[t] for t in self.train_ids])
         groups = self.reg.groups
@@ -212,22 +201,8 @@ class Trainer(engine.Trainer):
         # tiny targets (registry ``sparse``): losses.sparse_seg_loss, with the token grid in output voxels
         self.sparse = torch.tensor([t.sparse for t in self.reg.tasks], device=dev) \
             if any(t.sparse for t in self.reg.tasks) else None
-        ngeo_stride = tuple(int(v) for v in ((cfg["model"].get("ngeo") or {}).get("seg_stride") or (1, 4, 4)))
-        if self.ngeo and not self.mixed:         # the ngeo decoder's (z, y, x) output stride
-            self.stride = ngeo_stride
-
-        def cells(patch, stride):
-            px, py, pz = (int(v) for v in patch)
-            st = stride if isinstance(stride, tuple) else (stride,) * 3
-            return tuple(max(1, v // s) for v, s in zip((pz, py, px), st))
-
-        self.cell_zyx = cells(self.patch, self.stride)
-        # per sub-batch geometry of a mixed batch: token patch (input voxels), decoder stride, token cell
-        self.geom = {"iso": {"patch": tuple(enc.patch_xyz), "stride": int(cfg["loss"].get("seg_stride", 2))}}
-        if self.ngeo:
-            self.geom["ngeo"] = {"patch": tuple(enc.ngeo_patch_xyz), "stride": ngeo_stride}
-        for g in self.geom.values():
-            g["cell"] = cells(g["patch"], g["stride"])
+        px, py, pz = (int(v) for v in self.patch)
+        self.cell_zyx = tuple(max(1, v // self.stride) for v in (pz, py, px))
         self.pos_weight = float(cfg["loss"].get("sparse_pos_weight", 20.0))
         # lesion tasks with true negatives (labels v11 empty masks): losses.negative_seg_loss
         neg = set(cfg["loss"].get("negative_tasks") or [])
@@ -256,7 +231,6 @@ class Trainer(engine.Trainer):
             child[[self.reg.index[t] for t in kids]] = True
             self.any_of.append((self.reg.index[parent], child))
         self.aux_sum, self.aux_cnt = torch.zeros(3, device=dev), torch.zeros(3, device=dev)
-        self.ng_acc, self.ng_n = torch.zeros(3, device=dev), 0
         seed = int(cfg["seed"]) + rt.rank
         self.loader, self.val_loader, self.stats, n_train = task_loaders(
             cfg, self.reg, self.train_ids, batch=self.batch, workers=int(d.get("num_workers", 10)), seed=seed + int(step),
@@ -271,6 +245,16 @@ class Trainer(engine.Trainer):
                          float((bank_cfg(cfg["model"]) or {}).get("lr_mult", 1.0))),
             lr=float(o["lr"]), betas=tuple(o.get("betas", (0.9, 0.999))), fused=dev.type == "cuda")
         if ckpt is not None:
+            # a native-geometry run's checkpoint (R17, full_ngeo_bank): its in-plane stem and decoder were removed, so
+            # their weights leave the state and the weight average, and (below) the optimizer state no longer fits
+            n_saved = len(ckpt["multitask"])
+            ckpt["multitask"] = drop_legacy_ngeo(ckpt["multitask"])
+            n_legacy = n_saved - len(ckpt["multitask"])
+            if ckpt.get("ema"):
+                ckpt["ema"]["avg"] = drop_legacy_ngeo(ckpt["ema"]["avg"])
+            if n_legacy:
+                rt.log(f"[resume] dropped {n_legacy} legacy native-geometry weights (native-geometry input removed "
+                       "2026-11-11; CT is read at 1 mm)")
             bank = bank_of(self.raw.backbone)
             if bank is not None and not any(is_bank_param(k) for k in ckpt["multitask"]):
                 # a checkpoint without the bank (1-channel canonical window): its input convolutions move to the bank's
@@ -297,7 +281,7 @@ class Trainer(engine.Trainer):
             self.balancer.load_state_dict(ckpt["balancer"])
             if self.raw.tokens:      # the saved write mask (a persistent buffer) is the parent run's task set
                 self.raw.set_token_tasks([self.reg.index[t] for t in self.train_ids])
-            if new or retasked:     # heads or tasks added on resume: the saved optimizer no longer fits
+            if new or retasked or n_legacy:     # parameters added or dropped, tasks re-indexed: the old optimizer misfits
                 if any(k.startswith("regress_bins.") for k in new):
                     self.raw.bins_from_scalar()          # HL-Gauss bins start from the scalar head's predictions
                 rt.log(f"[resume] new heads {sorted({k.split('.')[0] for k in new})}; optimizer state reset")
@@ -321,11 +305,9 @@ class Trainer(engine.Trainer):
         return build_encoder(cfg, device, synthetic)
 
     def wrap(self, rt):
-        """The module one training forward runs through (DDP over ``self.raw`` on several GPUs; a mixed batch's two
-        sub-batches go through one ``MixedForward`` call, so DDP sees one forward per backward)."""
-        mod = MixedForward(self.raw) if getattr(self, "mixed", False) else self.raw
-        return torch.nn.parallel.DistributedDataParallel(mod, device_ids=[rt.local], find_unused_parameters=True) \
-            if rt.world > 1 else mod
+        """The module one training forward runs through (DDP over ``self.raw`` on several GPUs)."""
+        return torch.nn.parallel.DistributedDataParallel(self.raw, device_ids=[rt.local], find_unused_parameters=True) \
+            if rt.world > 1 else self.raw
 
     def banner(self) -> str:
         return self._banner
@@ -343,8 +325,6 @@ class Trainer(engine.Trainer):
 
     def step(self, step: int, lr: float) -> dict[str, torch.Tensor]:
         self.tokens.at_step(step)
-        if self.mixed:
-            return self.mixed_step(step)
         b = self.task_batch()
         self.opt.zero_grad(set_to_none=True)
         args, kw, pairs = self.task_inputs(b, step)
@@ -366,8 +346,6 @@ class Trainer(engine.Trainer):
         tok_pair = torch.cat([seg_tok, slab_pair]) if len(seg_tok) or len(slab_pair) else None
         kw = dict(meta=b["meta"], dense_pair=b["dense_pair"], tok_pair=tok_pair,
                   study=b.get("study"), modality=b["modality"], hide=b.get("hide"))
-        if b.get("geo") is not None:                   # native geometry: per-row template-mm token centres
-            kw["geo"] = b["geo"]
         return (b["x"], b["keep"], b["task"], b["seg_pair"]), kw, (seg_tok, slab_pair)
 
     def task_loss(self, out: dict, b: dict, pairs: tuple) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -376,60 +354,20 @@ class Trainer(engine.Trainer):
         total, per_task = self.balancer(loss, has, b["task"])
         return total, per_task, has
 
-    def slot_loss(self, out: dict, b: dict, pairs: tuple, geom: dict | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-slot losses (B, K) and their mask, token-map losses included; ``geom``: a sub-batch's geometry."""
+    def slot_loss(self, out: dict, b: dict, pairs: tuple) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-slot losses (B, K) and their mask, token-map losses included."""
         seg_tok, slab_pair = pairs
-        cell = geom["cell"] if geom else self.cell_zyx
-        loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"],
-                                b.get("seg_stride", geom["stride"] if geom else self.stride),
-                                dense=b, sparse=self.sparse, cell_zyx=cell, pos_weight=self.pos_weight,
+        loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride,
+                                dense=b, sparse=self.sparse, cell_zyx=self.cell_zyx, pos_weight=self.pos_weight,
                                 negatives=self.negatives)
         if out.get("tok") is not None:
-            loss = self._token_losses(b, out["tok"], loss, len(seg_tok), slab_pair,
-                                      geom["patch"] if geom else self.patch)
+            loss = self._token_losses(b, out["tok"], loss, len(seg_tok), slab_pair)
         for parent, child in self.any_of:
             al = any_of_loss(out["binary"], b["task"], has, parent, child)
             loss = loss + self.any_of_w * al
             self.aux_sum[2] += al.detach().sum() / (al.detach() > 0).sum().clamp_min(1)
             self.aux_cnt[2] += 1
         return loss, has
-
-    def mixed_step(self, step: int) -> dict[str, torch.Tensor]:
-        """A mixed batch: each sub-batch (1 mm, native geometry) prepared with its own geometry, both answered in one
-        forward of the shared model, their per-slot losses joined row-wise and balanced together."""
-        raw = self._next()
-        parts = []
-        for key in ("iso", "ngeo"):
-            if raw.get(key) is None:
-                continue
-            g = self.geom[key]
-            b = prepare(raw[key], self.cfg, self.rt.device, g["patch"], train=True, fov_unsafe=self.fov_unsafe,
-                        aug_unsafe=self.aug_unsafe, sharp=self.sharp)
-            args, kw, pairs = self.task_inputs(b, step)
-            parts.append((b, args, kw, pairs, g))
-        self.opt.zero_grad(set_to_none=True)
-        with torch.autocast(**self.amp):
-            outs = self.net([(a, k) for _, a, k, _, _ in parts])
-        losses, hass, tasks = [], [], []
-        for (b, _, _, pairs, g), out in zip(parts, outs):
-            loss, has = self.slot_loss(out, b, pairs, g)
-            losses.append(loss)
-            hass.append(has)
-            tasks.append(b["task"])
-        k = max(t.shape[1] for t in tasks)
-        pad = lambda t, v: torch.nn.functional.pad(t, (0, k - t.shape[1]), value=v)  # noqa: E731
-        loss = torch.cat([pad(x, 0.0) for x in losses])
-        has = torch.cat([pad(x, False) for x in hass])
-        task = torch.cat([pad(x, -1) for x in tasks])
-        total, per_task = self.balancer(loss, has, task)
-        ok = self.apply(total, step)
-        self.log_tasks(per_task, has, {"task": task})
-        if raw.get("ngeo") is not None:          # logged: ngeo rows / labelled slots per batch, their mean slot loss
-            h = hass[-1].detach()
-            self.ng_acc += torch.stack([torch.tensor(float(len(raw["ngeo"]["task"])), device=h.device),
-                                        h.float().sum(), (losses[-1].detach() * h).sum() / h.sum().clamp_min(1)])
-        self.ng_n += 1
-        return {**self.step_metrics(total, ok), "k": (task >= 0).float().sum(1).mean()}
 
     MAX_CONSECUTIVE_SKIPS = 50
 
@@ -494,15 +432,11 @@ class Trainer(engine.Trainer):
         ok = (sub >= 0) & labelled.gather(1, sub.clamp_min(0)) & (self.mil_w[sub.clamp_min(0)] > 0)
         return seg, ok.nonzero()
 
-    def _token_losses(self, b: dict, tok: torch.Tensor, loss: torch.Tensor, n_seg: int, slab_pair: torch.Tensor,
-                      patch=None) -> torch.Tensor:
-        return self._token_losses_impl(b, tok, loss, n_seg, slab_pair, tuple(patch or self.patch))
-
-    def _token_losses_impl(self, b: dict, tok: torch.Tensor, loss: torch.Tensor, n_seg: int,
-                           slab_pair: torch.Tensor, patch: tuple) -> torch.Tensor:
+    def _token_losses(self, b: dict, tok: torch.Tensor, loss: torch.Tensor, n_seg: int,
+                      slab_pair: torch.Tensor) -> torch.Tensor:
         """Adds each token-map loss to its slot's loss (so the balancer weighs it with its task)."""
         if n_seg:
-            pz, py, px = reversed(patch)
+            pz, py, px = reversed(self.patch)
             occ, valid = token_occupancy(b["seg"], (pz, py, px))
             rows, slots = b["seg_pair"][:, 0], b["seg_pair"][:, 1]
             lt = token_occupancy_loss(tok[:n_seg], occ, valid & b["keep"][rows])
@@ -540,11 +474,6 @@ class Trainer(engine.Trainer):
             self.aux_cnt.zero_()
             idx = {"tokmap": 0, "slabmil": 1, "anyof": 2}
             out.update({c: (f"{mean[idx[c]]:.4f}" if n[idx[c]] else "-") for c in cols})
-        if self.mixed:                            # native-geometry share of the window: rows, labelled slots, loss
-            m = (self.ng_acc / max(self.ng_n, 1)).tolist()
-            out.update(ng_rows=f"{m[0]:.2f}", ng_slots=f"{m[1]:.2f}", ng_loss=f"{m[2]:.4f}")
-            self.ng_acc.zero_()
-            self.ng_n = 0
         return out
 
     @torch.no_grad()

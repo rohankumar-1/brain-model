@@ -67,14 +67,6 @@ class Task:
     def trained(self) -> bool:
         return self.role == "train"
 
-    @property
-    def ct_max_thick_mm(self) -> float | None:
-        """The thinnest ``ct_max_thick_mm`` of the task's sources (its target is only trusted on CT slices at most this
-        thick), or None. Native-geometry copies are re-sliced, so a sample asking it is read at 1 mm when its copy's
-        slices are thicker (data.MultitaskDataset._ngeo_ok)."""
-        v = [float(s["ct_max_thick_mm"]) for s in self.sources if s.get("ct_max_thick_mm") is not None]
-        return min(v) if v else None
-
 
 TRAINABLE_TYPES = ("binary", "regression", "multiclass", "segmentation", "dense")  # types slot_losses has a loss for
 

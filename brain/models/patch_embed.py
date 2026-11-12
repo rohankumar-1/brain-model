@@ -95,61 +95,6 @@ class ConvStemEmbed3D(PatchEmbed3D):
         return y.flatten(2).transpose(1, 2), (nz, ny, nx)
 
 
-class NgeoStemEmbed(nn.Module):
-    """Token embedding for native-geometry CT (``<case>.ngeo.zip``, 2026-11-07): slices along the acquisition's slice
-    normal at their native spacing, 0.5 mm in-plane. Everything is in-plane: two stride-(1, 2, 2) stages of (1, 3, 3)
-    convolutions (0.5 -> 1 -> 2 mm), each with a residual block, then ``proj`` patchifies 1 x 8 x 8 (slice x row x
-    col) at 2 mm, so a token is 16 x 16 mm in-plane and one native slice deep; nothing mixes slices before the
-    transformer (no through-plane interpolation of a 5 mm acquisition). ``patch_xyz`` is in input voxels (x = col,
-    y = row, z = slice), like ``views.patch_xyz``: (32, 32, 1) by default; x and y must be divisible by 4. Public
-    tensors are (B, C, X, Y, Z) like the other embeddings, or (B, C, Z, Y, X) = (B, C, S, R, C) with ``zyx``."""
-
-    def __init__(self, in_chans: int, dim: int, patch_xyz: Sequence[int] = (32, 32, 1),
-                 widths: Sequence[int] = (32, 64), checkpoint: bool = True):
-        super().__init__()
-        from brain.models.conv3d import Res, conv3
-
-        px, py, pz = (int(v) for v in patch_xyz)
-        if px % 4 or py % 4 or pz < 1:
-            raise ValueError(f"ngeo patch {tuple(patch_xyz)}: in-plane sides must be divisible by 4 (two stride-2 stages)")
-        self.patch_xyz = (px, py, pz)
-        w1, w2 = (int(w) for w in widths)
-        k, s = (1, 3, 3), (1, 2, 2)
-        self.stem = nn.Sequential(conv3(in_chans, w1, stride=s, kernel=k), Res(w1, w1, kernel=k),
-                                  conv3(w1, w2, stride=s, kernel=k), Res(w2, w2, kernel=k))
-        self.proj = nn.Conv3d(w2, dim, kernel_size=(pz, py // 4, px // 4), stride=(pz, py // 4, px // 4))
-        self.checkpoint = bool(checkpoint)
-        self.chunk_rows = 64          # slabs per stem pass (memory bound; results identical for any value)
-
-    def forward(self, x: torch.Tensor, patch_xyz: Sequence[int] | None = None, zyx: bool = False):
-        if x.ndim != 5:
-            raise ValueError(f"expected 5 dims, got {tuple(x.shape)}")
-        if patch_xyz is not None and tuple(int(v) for v in patch_xyz) != self.patch_xyz:
-            raise ValueError(f"the ngeo stem has a fixed patch {self.patch_xyz}, got {tuple(patch_xyz)}")
-        vol = x if zyx else x.permute(0, 1, 4, 3, 2)
-        b, c, s = vol.shape[:3]
-        pz = self.patch_xyz[2]
-        if s % pz:
-            raise ValueError(f"{s} slices are not divisible by the ngeo patch depth {pz}")
-        # slabs of pz slices (one slice by default) as separate rows: GroupNorm statistics stay within a slab, so a
-        # token never depends on other slices, nor on how many padded slices its batch carries
-        rows = vol.reshape(b, c, s // pz, pz, *vol.shape[3:]).transpose(1, 2).reshape(b * (s // pz), c, pz,
-                                                                                      *vol.shape[3:])
-        # chunks of ``chunk_rows`` slabs, each checkpointed in training (full in-plane resolution activations are
-        # recomputed in backward): the stem's peak memory stays bounded however many slices a batch carries
-        parts = []
-        for part in rows.split(self.chunk_rows):
-            if self.checkpoint and self.training:
-                parts.append(checkpoint(self.stem, part, use_reentrant=False))
-            else:
-                parts.append(self.stem(part))
-        feats = parts[0] if len(parts) == 1 else torch.cat(parts)
-        y = self.proj(feats)                                              # (B * S / pz, D, 1, ny, nx)
-        y = y.reshape(b, s // pz, *y.shape[1:]).squeeze(3).transpose(1, 2)   # (B, D, nz, ny, nx)
-        nz, ny, nx = y.shape[2:]
-        return y.flatten(2).transpose(1, 2), (nz, ny, nx)
-
-
 class ScaleEmbed(nn.Module):
     """Adds a function of log(patch_size_mm) so the net need not infer scale from content."""
 

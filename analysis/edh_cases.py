@@ -29,7 +29,7 @@ def collect(a) -> None:
 
     from brain.common.paths import resolve
     from brain.multitask.data import (SLAB_TASKS, MultitaskDataset, checkpoint_stats, load_labels, load_slices,
-                                      make_loader, mixed_parts, ngeo_setup, prepare)
+                                      make_loader, prepare)
     from brain.multitask.fewshot import load_model
 
     dev = torch.device("cuda")
@@ -59,17 +59,14 @@ def collect(a) -> None:
     seg_t = reg.index["hemorrhage_segmentation"]
     k_edh = SLAB_TASKS.index("hemorrhage_epidural")
     k_any = SLAB_TASKS.index("hemorrhage_any")
-    ngeo_kw, cf = ngeo_setup(cfg, store)
+    patch = model.backbone.patch_xyz
     rows, cases = [], {}
     for split in ("val", "test"):
         ids = pick.loc[pick.split == split, "volume_id"].tolist()
         ds = MultitaskDataset(store, labels, volumes, reg, stats, split=split, tasks=["hemorrhage_epidural"],
-                              train=False, use="train", volume_ids=ids, max_seg=1, slices=slices, **ngeo_kw)
-        loader = make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=a.workers, drop_last=False,
-                             collate_fn=cf)
-        for raw in (p for full in loader for p in mixed_parts(full)):
-            ngeo = "affine" in raw
-            patch = model.backbone.ngeo_patch_xyz if ngeo else model.backbone.patch_xyz
+                              train=False, use="train", volume_ids=ids, max_seg=1, slices=slices)
+        loader = make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=a.workers, drop_last=False)
+        for raw in loader:
             b = prepare(raw, cfg, dev, patch, train=False)
             B = b["x"].shape[0]
             task = torch.tensor([tids + [seg_t]] * B, device=dev)
@@ -77,7 +74,7 @@ def collect(a) -> None:
             tok_pair = torch.tensor([[i, j] for i in range(B) for j in (0, 2)], device=dev)    # EDH, SDH maps
             with torch.no_grad(), torch.autocast(**amp):
                 o = model(b["x"], b["keep"], task, seg_pair, alone=True, meta=b.get("meta"), modality=b["modality"],
-                          tok_pair=tok_pair, **({"geo": b["geo"]} if b.get("geo") is not None else {}))
+                          tok_pair=tok_pair)
             pz, py, px = reversed(patch)
             g = (b["x"].shape[2] // pz, b["x"].shape[3] // py, b["x"].shape[4] // px)
             prob = torch.sigmoid(o["binary"][:, :len(tids)].float()).cpu().numpy()
@@ -87,7 +84,7 @@ def collect(a) -> None:
             for i in range(B):
                 vid = str(raw["volume_id"][i])
                 y = wide.set_index("volume_id").loc[vid]
-                rec = {"volume_id": vid, "split": split, "ngeo": ngeo,
+                rec = {"volume_id": vid, "split": split,
                        **{f"y_{SHORT[t]}": float(y[t]) if pd.notna(y[t]) else np.nan for t in HEM},
                        **{f"p_{SHORT[t]}": float(prob[i, j]) for j, t in enumerate(HEM)}}
                 kp = keep[i]

@@ -1,9 +1,14 @@
-"""Native-geometry CT copy (brain.prep.ngeo): slice plan, dedupe, de-shear, store-frame recovery, affine round trips."""
+"""Native-geometry CT copy (brain.prep.ngeo): slice plan, dedupe, de-shear, store-frame recovery, affine round trips;
+and its reader (brain.data.ngeo): zip paths, the template-index affine, per-slice origins."""
+
+import math
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
+import torch
 
+from brain.data import ngeo as ngeo_data
 from brain.prep import ngeo
 
 
@@ -330,3 +335,66 @@ def test_nifti_store_frame_flip_recovered():
     assert info["store_frame"] == "native_flip_xy" and info["store_frame_corr"] > 0.9
     res = ngeo.build(st, attrs, None, image_1mm_zyx=one)
     assert res.attrs["qc_corr_1mm"] > 0.9
+
+
+# ------------------------------------------------------------------------------------------------ reader
+GRID = {"grid_origin": [-100.0, 120.0, -60.0], "grid_spacing": [1.0, 1.0, 1.0],
+        "grid_direction": [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]}
+
+
+def _tilted_index_affine(s_n: int, n: int, slice_mm: float, tilt_deg: float, rot_deg: float, centre) -> np.ndarray:
+    """voxel (s, r, c) -> template index (x, y, z): 0.5 mm in-plane, a gantry tilt and an in-plane rotation."""
+    m = np.zeros((3, 3))
+    m[0, 2], m[1, 1], m[2, 0] = 0.5, 0.5, slice_mm
+    m[1, 0] = slice_mm * math.tan(math.radians(tilt_deg))
+    c, s = math.cos(math.radians(rot_deg)), math.sin(math.radians(rot_deg))
+    m = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]]) @ m
+    a = np.eye(4)
+    a[:3, :3] = m
+    a[:3, 3] = np.asarray(centre, float) - m @ np.array([(s_n - 1) / 2, (n - 1) / 2, (n - 1) / 2])
+    return a
+
+
+def test_reader_paths_and_template_affine(tmp_path):
+    from brain.prep import store
+
+    s_n, n = 7, 64
+    one = np.full((16, 1, 32, 32), -1024, np.int16)
+    store.write_arrays(tmp_path / "bhsd" / "c1.zip", {"image": (one, {"kind": "ct_hu", **GRID})})
+    img = np.full((s_n, 1, n, n), -1024, np.int16)
+    img[:, 0, n // 4:3 * n // 4, n // 4:3 * n // 4] = 30
+    img[:, 0, 4:6, 4:6] = -700                                         # below -500: clamped to air on read
+    aff = _tilted_index_affine(s_n, n, 5.0, 10.0, 5.0, (16.0, 16.0, 8.0))
+    g = np.eye(4)                                                      # template index -> physical mm
+    g[:3, :3] = np.asarray(GRID["grid_direction"]).reshape(3, 3) @ np.diag(GRID["grid_spacing"])
+    g[:3, 3] = GRID["grid_origin"]
+    attrs = {"kind": "ct_hu_ngeo", "spacing_mm": [5.0, 0.5, 0.5], "thick_mm": 5.0, "slice_mm": 5.0,
+             "affine_template": (g @ aff).ravel().tolist(), "affine_scanner": np.eye(4).ravel().tolist(),
+             "synth_thick": False, **GRID}
+    store.write_arrays(tmp_path / "bhsd" / "c1.ngeo.zip",
+                       {"image": (img, attrs), "brain": ((img[:, 0] > 0).astype(np.uint8), None)})
+    assert ngeo_data.ngeo_path("bhsd/c1.zip").as_posix() == "bhsd/c1.ngeo.zip"
+    assert ngeo_data.ngeo_path("bhsd/c1.ICH.zip").as_posix() == "bhsd/c1.ICH.ngeo.zip"
+    d = ngeo_data.read_ngeo(tmp_path / "bhsd" / "c1.ngeo.zip")
+    assert d["image"].shape == (s_n, n, n) and d["image"].dtype == np.int16
+    assert d["image"][0, 4, 4] == -1024 and d["image"].min() == -1024               # air clamp below -500 HU
+    assert d["brain"].shape == (s_n, n, n) and np.allclose(d["spacing"], [5.0, 0.5, 0.5])
+    assert d["grid"] is not None
+    assert np.allclose(ngeo_data.template_index_affine(d["affine_template"], d["grid"]), aff)
+    assert np.allclose(ngeo_data.template_index_affine(d["affine_template"],
+                                                       ngeo_data.grid_attrs(tmp_path / "bhsd" / "c1.zip")), aff)
+    assert ngeo_data.read_ngeo_mask(tmp_path / "bhsd" / "c9.ICH.ngeo.zip") is None
+
+
+def test_per_slice_origins_override_the_fitted_affine():
+    """Unevenly spaced series (prep tpl_resid_mm > 3): points follow the exact per-slice template origins
+    (tpl_slice_origin), not the least-squares affine."""
+    aff = torch.zeros(1, 4, 4, dtype=torch.float64)
+    aff[0, 0, 2], aff[0, 1, 1], aff[0, 2, 0], aff[0, 3, 3] = 0.5, 0.5, 5.0, 1.0
+    z = torch.tensor([0.0, 2.5, 5.0, 10.0, 15.0, 20.0], dtype=torch.float64)          # 2.5 mm then 5 mm slices
+    so = torch.zeros(1, 6, 3, dtype=torch.float64)
+    so[0, :, 2] = z
+    pts = torch.tensor([[[1.0, 0.0, 0.0], [1.4, 0.0, 0.0]]], dtype=torch.float64)
+    p = ngeo_data.to_template_index(aff, pts, so)
+    assert torch.allclose(p[0, :, 2], torch.tensor([2.5, 2.5 + 0.4 * 5.0], dtype=torch.float64))
+    assert not torch.allclose(ngeo_data.to_template_index(aff, pts), p)                 # the affine alone: 5 mm steps

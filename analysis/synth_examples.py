@@ -23,8 +23,7 @@ def collect(ck, ids_by_task, workers):
     import pandas as pd
 
     from brain.common.paths import resolve
-    from brain.multitask.data import (MultitaskDataset, checkpoint_stats, load_labels, make_loader, mixed_parts,
-                                      ngeo_setup, prepare)
+    from brain.multitask.data import MultitaskDataset, checkpoint_stats, load_labels, make_loader, prepare
     from brain.multitask.fewshot import load_model
 
     dev = torch.device("cuda")
@@ -46,14 +45,11 @@ def collect(ck, ids_by_task, workers):
         if not ids:
             continue
         t = reg.index[task]
-        ngeo_kw, cf = ngeo_setup(cfg, store)
         ds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", tasks=[t], train=False, use="train",
-                              volume_ids=ids, max_seg=1, **ngeo_kw)
-        loader = make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False, collate_fn=cf)
+                              volume_ids=ids, max_seg=1)
+        loader = make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False)
         rows = []
-        for raw in (p for full in loader for p in mixed_parts(full)):
-            if "affine" in raw:
-                continue
+        for raw in loader:
             b = prepare(raw, cfg, dev, model.backbone.patch_xyz, train=False)
             if not len(b["dense_pair"]):
                 continue

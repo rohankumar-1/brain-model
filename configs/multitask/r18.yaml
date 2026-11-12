@@ -1,5 +1,9 @@
 # R18 (2026-11-11): R17 WARM-STARTED at its constant-LR step 76,500 (runs/multitask/r17/step_0076500.pt, a resume
-#   branch: weights, EMA, balancer; optimizer reset because parameters are added) plus two encoder inductive biases
+#   branch: weights, EMA, balancer; optimizer reset because parameters are added and dropped).
+#   * CT at 1 mm: every scan, CT included, is read from the 1 mm template store through the one shared stem. R18
+#     drops R17's native-geometry CT stem and decoder (their weights are left out on resume): R17 read CT with a
+#     trusted ngeo copy through them, which broke CT / MRI transfer (identical recipes: CT worse on nearly every task).
+#   Two encoder inductive biases
 #   (user, 2026-11-10/11: "keep all inductive biases as simple as possible"; no gated attention, no absolute position):
 #   * model.dw_conv_blocks 6: a depthwise 3x3x3 convolution over the token grid on the MLP hidden layer of the first
 #     6 blocks (LocalViT; residual, zero-init) -- locality for small findings (thin EDH rims, small bleeds / structures);
@@ -7,8 +11,8 @@
 #     plane (x = 128 mm, measured: MRI / CT brain centroids at 127.5 voxels), x += W [LN x_m, |LN x - LN x_m|]
 #     (zero-init) -- the bilateral-symmetry prior (Sym-TransNet, SA-Swin, DeepSymNet); R17's encoder had almost no
 #     left-right information (ventricle asymmetry probe R2 .20 vs .67 for full_iso_bank).
-#   Both start at zero, so step 76,500 of R18 answers exactly as R17 did. No registers: they would shift every
-#   attention map of the warm-started encoder at step 0.
+#   Both start at zero, so step 76,500 of R18 answers a 1 mm scan exactly as R17 did. No registers: they would shift
+#   every attention map of the warm-started encoder at step 0.
 #   * learned task-weight floor: loss.uncertainty_clamp [1.0, 0.25] (weights e^-0.25 = 0.78 .. e^1; R17 let the
 #     slow-learning volume / asymmetry targets sink to 0.5-0.7 against 2.5-2.7 for findings);
 #   * schedule: re-warmed over 2,000 steps at the resume step (--reset-schedule), constant 3e-4, decay over the last
@@ -32,16 +36,6 @@ data:
   rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
   exclude_datasets: [abide1, ixi, oasis1, oasis2, pixar, fomo_nki, fomo_hbn, rsna_ica]   # benchmark cohorts, BrainFMBench, RSNA-ICA
   exclude_volumes: configs/multitask/train_exclude_r17.csv     # copies of benchmark scans, val/test twins, QC failures
-  ngeo:                         # native-geometry CT (docs/multitask.md "Native geometry")
-    enabled: true
-    mixed: true                 # every scan stays; CT with a trusted ngeo copy at native geometry, the rest 1 mm
-    root: null                  # ngeo zips + volumes_ngeo.csv in the store root
-    index_name: volumes_ngeo.csv
-    require: []
-    drop_flags: []
-    untrusted_flags: [frame_mismatch, frame_assumed, brain_off]   # these CT scans are read at 1 mm (AISD exempt)
-    pad_multiple: 4
-    max_slices: null
   fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
 model:
   init_from: null
@@ -50,7 +44,7 @@ model:
   mil: {enabled: true}
   drop_path: 0.1                 # stochastic depth (max, linear over depth): small cohorts were memorised
   layer_scale: 0.1               # LayerScale init (CaiT, depth 12): steadier from-scratch ViT-B residual stream
-  rope_min_period_mm: 32         # RoPE without the sub-Nyquist (< 2 x 16 mm token) frequencies, same code for both grids
+  rope_min_period_mm: 32         # RoPE without the sub-Nyquist (< 2 x 16 mm token) frequencies
   dw_conv_blocks: 6              # depthwise 3x3x3 convolution in the MLP of blocks 0-5 (zero-init residual)
   mirror_blocks: [2, 5, 8, 11]   # bilateral mirror mixing after these blocks (zero-init)
   mirror_mid_mm: 128.0           # template mid-sagittal plane (256 mm grid centre)
@@ -68,12 +62,6 @@ model:
   fusion: {after_block: 8, heads: 6}     # study-level input: blocks 0-7 per scan, fused, 8-11 on the study
   # shared learned window bank (brain.models.window_bank), initialised to the contract's six windows
   window_bank: {enabled: true, k: 6, init: contract6, per_modality: false, lr_mult: 0.1, decoder_grad: false}
-  ngeo:                         # in-plane stem (random init) into the shared transformer; masks on the ngeo grid
-    enabled: true
-    stem: [32, 64]
-    patch_xyz: [32, 32, 1]
-    seg_stride: [1, 4, 4]
-    template_xyz: [256, 256, 160]
 views:
   patch_xyz: [16, 16, 8]
   gate:

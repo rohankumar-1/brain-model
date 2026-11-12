@@ -20,7 +20,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 
 from brain.downstream.metrics import balanced_accuracy
 from brain.eval.skill import skill, summarize
-from brain.multitask.data import mixed_parts, prepare
+from brain.multitask.data import prepare
 from brain.multitask.losses import seg_target, slot_losses
 
 
@@ -43,14 +43,12 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     neg_ids = set((cfg.get("loss") or {}).get("negative_tasks") or [])   # their training loss, so val loss matches
     negatives = torch.tensor([t.id in neg_ids for t in reg.tasks], device=device) if neg_ids else None
     task_type = model.task_type
-    for raw in (part for full in loader for part in mixed_parts(full)):      # a mixed batch: each sub-batch
-        b = prepare(raw, cfg, device, model.backbone.ngeo_patch_xyz if "affine" in raw else patch_xyz, train=False)
+    for raw in loader:
+        b = prepare(raw, cfg, device, patch_xyz, train=False)
         with torch.autocast(**amp):
             out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
-                        dense_pair=b.get("dense_pair"), study=b.get("study"), modality=b["modality"],
-                        **({"geo": b["geo"]} if b.get("geo") is not None else {}))
-        stride = b.get("seg_stride", 2)                     # native geometry: (z, y, x) of its decoder
-        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], stride, dense=b,
+                        dense_pair=b.get("dense_pair"), study=b.get("study"), modality=b["modality"])
+        loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b,
                                 negatives=negatives)
         task, y = b["task"], b["y"]
         for i, j in has.nonzero().tolist():
@@ -66,7 +64,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             elif kind == "multiclass":
                 preds[t].append((float(y[i, j]), int(out["multiclass"][i, j].float().argmax()), vid))
         if out.get("seg") is not None:
-            t = seg_target(b["seg"], stride)
+            t = seg_target(b["seg"])
             d = dice(out["seg"].float().masked_fill(t[:, -1:] < 0.5, -1.0) if t.shape[1] == 2 else out["seg"].float(),
                      t[:, :1])                                    # ignored voxels count as predicted background
             # y 1: a target Dice can see (> half an output voxel, dice's threshold); 0: empty (a true negative,

@@ -10,7 +10,7 @@ import torch
 from brain.data.gate import token_keep
 from brain.data.coords import crop_bbox_mm, patch_size_mm, token_centers_mm
 from brain.data.volumes import meta_id, n_meta
-from brain.models.vit3d import VIT_SIZES, BrainEncoder, bias_kwargs, ngeo_kwargs
+from brain.models.vit3d import VIT_SIZES, BrainEncoder, bias_kwargs, drop_legacy_ngeo
 from brain.common.windowing import asinh_window, encoder_input, windows_for
 from brain.models.window_bank import attach_bank, bank_of, encoder_in_chans
 from brain.common.grid import GRID_XYZ
@@ -177,6 +177,8 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
     """``pretrained=False`` keeps the architecture and drops the weights (a random-init control)."""
     state = {str(k).removeprefix("_orig_mod.").removeprefix("module."): v for k, v in ckpt["model"].items()
              if not str(k).removeprefix("module.").startswith(("anchor.", "predictor."))}
+    # a native-geometry run's encoder (R17, full_ngeo_bank) loads without its removed in-plane stem
+    state = drop_legacy_ngeo(state, "encoder" if pretrained else None)
     cfg = ckpt.get("config") or {}
     m, v = cfg.get("model") or {}, cfg.get("views") or {}
     native = tuple(int(x) for x in (cfg.get("data") or {}).get("volume_size_xyz", GRID_XYZ))
@@ -214,8 +216,6 @@ def load_brain3d(ckpt: dict, device: torch.device, pretrained: bool = True) -> F
         rope_min_period_mm=m.get("rope_min_period_mm"),
         rope_fp32=bool(m.get("rope_fp32", False)), fp32_residual=bool(m.get("fp32_residual", False)),
         n_meta=n_meta(m), conv_stem=m.get("conv_stem") or None, **bias_kwargs(m),
-        **ngeo_kwargs({**m, "ngeo": {**(m.get("ngeo") or {}),
-                                     "enabled": any(str(k).startswith("ngeo_embed.") for k in state)}}),
     ).to(device)
     if any(str(k).startswith("fusion.") for k in state):     # study-level input (R14-F): rebuild before loading
         fu = m.get("fusion") or {}

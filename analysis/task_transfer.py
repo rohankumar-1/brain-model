@@ -35,8 +35,7 @@ def collect(a) -> None:
     import pandas as pd
 
     from brain.common.paths import resolve
-    from brain.multitask.data import (MultitaskDataset, checkpoint_stats, load_labels, make_loader, mixed_parts,
-                                      ngeo_setup, prepare)
+    from brain.multitask.data import MultitaskDataset, checkpoint_stats, load_labels, make_loader, prepare
     from brain.multitask.fewshot import load_model
 
     dev = torch.device("cuda")
@@ -73,28 +72,23 @@ def collect(a) -> None:
         picked[split] = sorted(ids)
         print(f"[transfer] {split}: {len(ids)} scans for {len(targets)} targets", flush=True)
 
-    ngeo_kw, cf = ngeo_setup(cfg, store)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     write0 = model.tt_write.clone()
     for split, ids in picked.items():
         ds = MultitaskDataset(store, labels, volumes, reg, stats, split=split, tasks=targets, train=False,
-                              use="train", volume_ids=ids, max_seg=0, k_max=128, **ngeo_kw)
-        loader = make_loader(ds, batch_size=a.batch, shuffle=False, seed=0, workers=a.workers, drop_last=False,
-                             collate_fn=cf)
+                              use="train", volume_ids=ids, max_seg=0, k_max=128)
+        loader = make_loader(ds, batch_size=a.batch, shuffle=False, seed=0, workers=a.workers, drop_last=False)
         feats = {"write": [], "readonly": []}
         pooled, vids = [], []
-        for raw in (p for full in loader for p in mixed_parts(full)):
-            ngeo = "affine" in raw
-            patch = model.backbone.ngeo_patch_xyz if ngeo else model.backbone.patch_xyz
-            b = prepare(raw, cfg, dev, patch, train=False)
+        for raw in loader:
+            b = prepare(raw, cfg, dev, model.backbone.patch_xyz, train=False)
             B = b["x"].shape[0]
             task = torch.tensor([rep] * B, device=dev)
-            geo = {"geo": b["geo"]} if b.get("geo") is not None else {}
             for mode in ("write", "readonly"):
                 model.tt_write.copy_(write0 if mode == "write" else torch.zeros_like(write0))
                 with torch.no_grad(), torch.autocast(**amp):
-                    enc = model.encode(b["x"], b["keep"], b.get("meta"), task, modality=b["modality"], **geo)
+                    enc = model.encode(b["x"], b["keep"], b.get("meta"), task, modality=b["modality"])
                     z = model.token_slots(enc, task)                                   # (B, T, width)
                 feats[mode].append(z.float().cpu().half())
                 if mode == "readonly":                       # patch tokens do not depend on read-only task tokens

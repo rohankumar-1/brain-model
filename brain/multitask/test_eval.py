@@ -132,7 +132,6 @@ def main() -> None:
     for i, ck in enumerate([] if a.probe_only else a.ckpts):
         model, reg, cfg = (ref_model, ref_reg, ref_cfg) if i == 0 else load_model(Path(ck), dev)
         name = Path(ck).parent.name + "/" + Path(ck).stem
-        # the 1 mm patch: run_eval switches to the ngeo stem's patch for a mixed batch's native-geometry part itself
         patch = tuple(model.backbone.patch_xyz)
         m_stats = checkpoint_stats(model.label_stats, labels_dir, stats)
         for t in tasks:
@@ -141,7 +140,7 @@ def main() -> None:
             loader, _ = _loader(store, labels, volumes, reg, m_stats, t, a.split, ids=test_ids[t], use="train",
                                 workers=a.workers, strip_all=a.strip_mri,
                                 strip_match=list(((cfg.get("aug") or {}).get("skull_strip") or {}).get("match") or []),
-                                study=study, partners=partners, cfg=cfg)
+                                study=study, partners=partners)
             _, pr = run_eval(model, loader, cfg, reg, m_stats, dev, patch, amp, return_preds=True)
             r = pr.get(reg.index[t], [])
             if not r:
@@ -188,10 +187,6 @@ def main() -> None:
     for ck in a.probe_ckpts:
         name = Path(ck).parent.name + "/" + Path(ck).stem
         enc, _ = load_backbone(Path(ck), dev)
-        if getattr(enc, "ngeo_embed", None) is not None:
-            print(f"[probe] {name}: native-geometry encoder, linear probes not supported (heads only): skipped",
-                  flush=True)
-            continue
         # prepare windows for this encoder, not the reference run's: native units for a window-bank encoder (the bank
         # windows in encode_backbone), else its own input channels
         pcfg = {**ref_cfg, "model": {**(ref_cfg.get("model") or {}), "in_chans": int(enc.in_chans),

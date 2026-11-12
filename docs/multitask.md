@@ -131,42 +131,26 @@ sequences, SynthRAD MR + CT; `data.study_partners`).
 A scan without partners never enters the fusion, so its path is the single-scan model's exactly. Labels and the
 decoder's image pyramid are the anchor scan's. `test_eval --study N` scores the heads with partners.
 
-### Native geometry (`data.ngeo`, `model.ngeo`; 2026-11-07)
+### Input windows
 
-CT can train on its own slices instead of the 1 mm template grid (runs/diagnostics/ngeo/CONTRACT.md). The prep
-writes `<case>.ngeo.zip` next to each CT image zip: slices along the acquisition's normal at their native spacing
-(never interpolated through-plane), 0.5 mm in-plane on a 512 x 512 field, plus `<case>.<mask>.ngeo.zip` masks, all
-listed in `volumes_ngeo.csv` under the 1 mm rows' `volume_id`, so the label tables work unchanged.
-- Reader: `brain/data/ngeo.py` (`read_ngeo`, `read_ngeo_mask`: the only code that knows the zip layout).
-  `MultitaskDataset(ngeo_index=...)` keeps the scans the index lists, reads image / brain / masks from the ngeo
-  copies, skips live targets and masks without an ngeo copy; each sample carries `affine` (voxel (s, r, c) ->
-  template index) and `spacing`. The CQ500 / seg_cq500 duplicate id resolves to the ngeo copy's folder.
-- As built by the prep (`brain/prep/ngeo.py`, docs/prep.md "Native-geometry CT copy"): `data.ngeo.root` holds the
-  ngeo zips and `volumes_ngeo.csv` (default: the store root). Token positions use the exact per-slice template
-  origins (`tpl_slice_origin`) when present, so unevenly spaced RSNA series (`tpl_resid_mm` > 3, flag
-  `tpl_nonlinear`, where the fitted `affine_template` is off by 10-20 mm) are placed and slice-labelled correctly.
-  Masks are found through the index's `mask_<name>_ngeo` columns (Seg-CQ500 masks live on the cq500 grid);
-  `bleedpl` label 2 is ignored as on the 1 mm grid (labels v12 refs `path|1|2`). Scans flagged `frame_mismatch`,
-  `frame_assumed` or `brain_off` (`data.ngeo.untrusted_flags`; AISD `frame_mismatch` exempt) keep the image and
-  scan-level labels but lose brain-mask, template-mapped-mask and slice labels; `drop_flags` removes scans outright.
-- Batches: `collate_ngeo` pads to the batch's longest scan (rounded to `pad_multiple`) with air, and marks the real
-  slices (`slice_keep`). The stem and decoder run per slice / per scan, so a scan's outputs do not depend on the
-  padding; the transformer packs kept tokens, so padded tokens cost nothing there. `max_slices` caps very long scans.
-- Stem: `NgeoStemEmbed`: (1, 3, 3) convolutions, two stride-(1, 2, 2) stages (0.5 -> 1 -> 2 mm), then 1 x 8 x 8
-  patches: 16 x 16 mm tokens one slice deep (32 x 16 x 16 = 8192 tokens for 32 slices), into the same blocks.
-- Positions: each token centre's template mm (`affine_template` composed with the 1 mm grid's index -> physical
-  map), the frame the 1 mm tokens always had, so RoPE and the slot readout's position code agree across grids.
-- Dense outputs: `seg_ngeo` (a second `SegDecoder`) at stride `model.ngeo.seg_stride` (1, 4, 4): native slices x 2 mm
-  in-plane; targets from the ngeo masks; token maps and RSNA slice labels (through the affine) as on the 1 mm grid.
-- Gate: the same `views.gate` on raw HU (CT above -500 HU; air stored at -1024); padded slices never kept.
-- Augmentation (`data.prepare_ngeo`): column flip, rotation about the slice normal (`aug.affine.rot_deg[2]`, or
-  `rot_deg_inplane`), in-plane shift and optional `scale`; no out-of-plane rotation; `appearance.through_plane`
-  ignored; the isotropic blur runs in-plane with the same mm sigma; the field-of-view cut in whole slices.
-- Not supported on this grid: study-level input, dense (self-supervised) slots, MRI, few-shot (`fewshot.py`) and the
-  frozen benchmark's encoders (they read the 1 mm grid).
-- Input windows: `model.in_chans` 3 = the role windows (CT brain / subdural / bone); `model.window_bank` = the shared learned bank (`brain.models.window_bank`).
-  = native HU in, the encoder's bank maps them to K channels (`window_bank.k`, the encoder's in_chans).
-- Comparison configs (2x2, identical apart from grid and windowing): `configs/single/hemorrhage_{iso,ngeo}_{fixed3,bank}.yaml`. With `model.window_bank` the ngeo batch stays raw HU and the bank runs before the ngeo stem (in_chans = K); CT physical augmentations stay in-plane.
+`model.in_chans` 3 = the role windows (CT brain / subdural / bone); `model.window_bank` = the shared learned bank
+(`brain.models.window_bank`): native HU in, the encoder's bank maps them to K channels (`window_bank.k`, the
+encoder's in_chans).
+
+### Native geometry (removed 2026-11-11)
+
+From 2026-11-07 to 2026-11-11 CT could be read on its own slices (`<case>.ngeo.zip`: native slice spacing, 0.5 mm
+in-plane) through a second, in-plane stem (`NgeoStemEmbed`) and decoder (`seg_ngeo`), alone or mixed with 1 mm MRI
+in one batch (`data.ngeo`, `model.ngeo`; full_ngeo_bank, R17). Audits showed it broke CT / MRI transfer: with
+identical recipes CT was worse on nearly every task. Every scan, CT included, is now read from the 1 mm template
+store through the one shared stem. What remains:
+- the data product: `brain/prep/ngeo.py` / `ngeo_run.py` / `ngeo_qc.py` build and check the copies, `brain/data/ngeo.py`
+  reads them (docs/prep.md "Native-geometry CT copy");
+- old checkpoints: their native-geometry weights (`backbone.ngeo_embed.*`, `seg_ngeo.*`) are dropped on load
+  (`vit3d.drop_legacy_ngeo`: frozen encoders, `fewshot.load_model`, and resume / warm start, which then resets the
+  optimizer state), so R17 and full_ngeo_bank evaluate on 1 mm input;
+- old configs: `data.ngeo` / `model.ngeo` are still accepted keys, but a new run with either enabled stops
+  (`defaults.refuse_ngeo`).
 
 ## Evaluation
 
@@ -224,7 +208,7 @@ third ventricle or lateral ventricles found). Not yet a training target.
 - `model.task_tokens.enabled` (false: the slot readout, used by the ResNet specialists).
 - `model.seg.shared` / `head_hidden` (shared segmentation decoder with per-task MLP heads).
 - `model.fusion`, `tasks.study` (study-level input).
-- `data.ngeo`, `model.ngeo` (native-geometry CT), `model.window_bank` (the shared learned window bank).
+- `model.window_bank` (the shared learned window bank).
 - `tasks.group_weights`, `tasks.groups` / `tasks.ids` (train only some groups or tasks), `tasks.exclude`.
 - `loss.negative_tasks` (lesion tasks with true negatives).
 - `data.exclude_datasets` / `exclude_volumes` (benchmark cohorts and duplicates out of training).

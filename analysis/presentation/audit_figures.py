@@ -85,7 +85,7 @@ def collect(a) -> None:
     import pandas as pd
 
     from brain.common.paths import resolve
-    from brain.multitask.data import checkpoint_stats, input_patch, load_labels, mixed_parts, prepare
+    from brain.multitask.data import checkpoint_stats, load_labels, prepare
     from brain.multitask.fewshot import _loader, load_model
 
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -96,8 +96,8 @@ def collect(a) -> None:
     labels, stats = load_labels(labels_dir)
     stats = checkpoint_stats(model.label_stats, labels_dir, stats)
     volumes = pd.read_csv(store / cfg["data"].get("index_name", "volumes.csv"), low_memory=False)
-    patch = input_patch(model, cfg)
-    pz, py, px = reversed(model.backbone.patch_xyz)
+    patch = tuple(model.backbone.patch_xyz)
+    pz, py, px = reversed(patch)
     tok_ids = model.tt_write.nonzero()[:, 0].tolist()
     tok_of = model.tok_of.tolist() if hasattr(model, "tok_of") else list(range(len(reg)))
     tok_names = [[reg[i].id for i in range(len(reg)) if tok_of[i] == t] for t in tok_ids]
@@ -113,11 +113,9 @@ def collect(a) -> None:
         return [u[i] for i in rng.permutation(len(u))[:n]]
 
     def batches(task, ids):
-        loader, _ = _loader(store, labels, volumes, reg, stats, task, "test", ids=ids, use="train", workers=a.workers,
-                            cfg=cfg)
+        loader, _ = _loader(store, labels, volumes, reg, stats, task, "test", ids=ids, use="train", workers=a.workers)
         for raw in loader:
-            for part in mixed_parts(raw):
-                yield part, prepare(part, cfg, dev, patch, train=False)
+            yield raw, prepare(raw, cfg, dev, patch, train=False)
 
     def grid_of(x):
         return x.shape[2] // pz, x.shape[3] // py, x.shape[4] // px

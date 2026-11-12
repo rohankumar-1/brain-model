@@ -127,8 +127,8 @@ def _multitask_defaults() -> dict[str, Any]:
                  # the BraTS re-releases count as one family for sampling
                  "balance_groups": {"brats": ["brats_gli", "brats_men", "brats_ped", "brats_goat"]},
                  "val_per_task": 64, "val_max_seg": 4,
-                 # native-geometry CT rows (needs model.ngeo): {enabled, index_name volumes_ngeo.csv, require [QC columns],
-                 # pad_multiple 4, max_slices null}; None = the 1 mm grid
+                 # legacy (native-geometry CT input, removed 2026-11-11): accepted so historical configs still load;
+                 # a new run refuses it enabled (refuse_ngeo)
                  "ngeo": None},
         "model": {"init_from": None, "checkpoint": True, "taps": [3, 7],
                   # task tokens in the encoder (OMNI); the patches' attention to them opens over write_ramp_steps
@@ -170,8 +170,7 @@ def _multitask_defaults() -> dict[str, Any]:
                   # every mask), instead of once per segmentation slot
                   # head_hidden (shared only): a per-task C -> head_hidden -> 1 MLP per voxel instead of a 1x1 readout
                   "seg": {"widths": [128, 64, 32, 16], "shared": False, "head_hidden": 0},
-                  # native-geometry CT (docs/multitask.md): {enabled, stem [w1, w2], patch_xyz [32, 32, 1] (input voxels),
-                  # seg_stride [1, 4, 4] (z, y, x), template_xyz [256, 256, 160]}; None = 1 mm grid only
+                  # legacy (the native-geometry stem and decoder, removed 2026-11-11): as data.ngeo
                   "ngeo": None},
         # gate mode: "center" (a token's centre voxel) or "frac" (>= min_frac of its voxels; data.gate.token_keep)
         "views": {"patch_xyz": [16, 16, 8], "gate": {"ct_hu": [-500.0, 200.0], "mri_lo": -5.5, "mode": "center",
@@ -284,6 +283,16 @@ for _name, _c in _DEFAULTS.items():
 
 def default_config(method: str) -> dict[str, Any]:
     return deepcopy(_DEFAULTS[method])
+
+
+def refuse_ngeo(cfg: dict[str, Any]) -> None:
+    """A new run with ``data.ngeo`` / ``model.ngeo`` enabled stops here: native-geometry CT input broke CT / MRI
+    transfer and was removed (every scan, CT included, is read at 1 mm through the shared stem). The keys stay in the
+    defaults only so historical configs (R17, full_ngeo_bank) still validate and their checkpoints still evaluate."""
+    for section in ("data", "model"):
+        if ((cfg.get(section) or {}).get("ngeo") or {}).get("enabled"):
+            raise SystemExit(f"{section}.ngeo.enabled: native-geometry input was removed 2026-11-11; all CT is read "
+                             "at 1 mm (drop the data.ngeo / model.ngeo blocks from the config)")
 
 
 def smoke_config(cfg: dict[str, Any]) -> dict[str, Any]:

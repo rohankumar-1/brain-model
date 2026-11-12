@@ -250,8 +250,7 @@ def degrade(x: torch.Tensor, aug: dict, skip_noise: torch.Tensor | None = None,
         if skip_blur is not None:
             on &= ~skip_blur.to(device)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
-        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)),
-                           dims=tuple(bl.get("dims", (2, 3, 4))))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, device), torch.zeros(r, device=device)))
     if dr and float(dr.get("p", 0)) > 0:
         on = torch.rand(r, device=device) < float(dr["p"])
         if skip_drift is not None:
@@ -300,8 +299,7 @@ def appearance(x: torch.Tensor, modality: torch.Tensor, aug: dict,
                sharp: torch.Tensor | None = None, tie_seed: int | None = None) -> torch.Tensor:
     """Full appearance pipeline, one independent draw per row. ``x`` is never modified in place.
     ``window.mode`` is ``fixed`` (one canonical window; bias, through-plane, noise, blur and drift only), ``roles``
-    (``_appearance_roles``) or ``native`` (``_appearance_native``, the window bank). ``blur.dims``: the axes the isotropic blur runs along (default
-    (2, 3, 4); (3, 4) in-plane only, native-geometry CT). ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching (roles) against
+    (``_appearance_roles``) or ``native`` (``_appearance_native``, the window bank). ``vol`` / ``contrast`` / ``quant`` (per row) enable histogram matching (roles) against
     another volume of the same contrast group, using whole-volume tissue quantiles. ``protect`` rows get no bias field or drift (their targets are
     measured on the unaugmented intensities); ``sharp`` rows no through-plane or isotropic blur (small targets).
     ``tie_seed`` (roles mode): the contrast draws come from that seed (``_Seeded``), so calls with the same seed and
@@ -366,8 +364,7 @@ def _appearance_roles(x, modality, fg, aug, thick, vol, contrast, quant, protect
         if sharp is not None:
             on &= ~sharp.to(dev)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
-        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)),
-                           dims=tuple(bl.get("dims", (2, 3, 4))))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
     win = aug.get("window") or {}
     with _Seeded(tie_seed, 3, dev):
         y = role_windows(x, modality, float(win.get("jitter", 0.0)))
@@ -452,8 +449,7 @@ def _appearance_native(x, modality, aug, thick, protect, sharp) -> torch.Tensor:
         if sharp is not None:
             on &= ~sharp.to(dev)
         lo, hi = bl.get("sigma_vox", (0.5, 1.5))
-        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)),
-                           dims=tuple(bl.get("dims", (2, 3, 4))))
+        x = _gaussian_blur(x, torch.where(on, _uniform(r, lo, hi, dev), torch.zeros(r, device=dev)))
     if _enabled(dr):
         on = (torch.rand(r, device=dev) < float(dr["p"])) & ~ct
         if protect is not None:

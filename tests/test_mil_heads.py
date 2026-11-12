@@ -1,4 +1,4 @@
-"""Multiple-instance binary readout (registry ``pool: mil``, ``model.mil``) and thin-CT routing of ngeo samples."""
+"""Multiple-instance binary readout (registry ``pool: mil``, ``model.mil``)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import math
 
 import torch
 
-from brain.multitask.data import needs_thin_ct
 from brain.multitask.model import BrainQuery
 from brain.multitask.registry import load_registry
 from brain.train.defaults import default_config, smoke_config
@@ -30,10 +29,9 @@ def _model(mil: bool):
     return model
 
 
-def test_registry_marks_the_finding_tasks_and_thin_ct_limits():
+def test_registry_marks_the_finding_tasks():
     assert sorted(t.id for t in REG.tasks if t.pool == "mil") == sorted(MIL)
     assert all(REG[t].type == "binary" for t in MIL)
-    assert REG["seg_thalamus"].ct_max_thick_mm == 2.0 and REG["seg_ventricles"].ct_max_thick_mm is None
 
 
 def test_mil_off_keeps_older_models_unchanged():
@@ -74,10 +72,3 @@ def test_mil_adds_to_the_binary_logit_and_gets_gradients():
     assert z.grad.abs().sum() > 0 and m.mil_logr.grad.abs().sum() > 0 and m.mil_bias.grad.abs().sum() > 0
     assert m.tok_bias.grad is None or float(m.tok_bias.grad.abs()) < 1e-6        # the pooled logit leaves the prior alone
 
-
-def test_thin_ct_tasks_are_read_at_1mm_from_a_resliced_copy():
-    thin = {REG.index[t]: REG[t].ct_max_thick_mm for t in ("seg_thalamus", "seg_hippocampus")}
-    drawn = [(REG.index["seg_thalamus"], 0.0, "x.synthseg.zip|7,25"), (REG.index["age"], 1.0, "")]
-    assert needs_thin_ct(drawn, thin, 5.0)                    # SynthRAD's 1 mm CT re-sliced to 5 mm
-    assert not needs_thin_ct(drawn, thin, 1.0)                # a thin copy stays native
-    assert not needs_thin_ct([(REG.index["seg_ventricles"], 0.0, "")], thin, 5.0)

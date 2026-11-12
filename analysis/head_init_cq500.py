@@ -54,7 +54,7 @@ LAMS = [0.001, 0.01, 0.1, 1.0, 10.0]
 def extract(model_name: str, workers: int) -> None:
     from brain.downstream.models import resolve_model
     from brain.downstream.tasks import DEFAULT_VOLUMES, load_task, load_volumes
-    from brain.multitask.data import checkpoint_stats, load_labels, mixed_parts, prepare
+    from brain.multitask.data import checkpoint_stats, load_labels, prepare
     from brain.multitask.fewshot import _loader, load_model
 
     dev = torch.device("cuda")
@@ -74,21 +74,17 @@ def extract(model_name: str, workers: int) -> None:
     fake =pd.DataFrame({"volume_id": ids, "task": "hemorrhage_epidural", "value": 0.0, "ref": "", "split": "test",
                          "use": "train"})
     loader, _ = _loader(store, fake, volumes, reg, stats, "hemorrhage_epidural", "test", ids, use="train",
-                        workers=workers, cfg=cfg)                # cfg: native-geometry checkpoints read ngeo zips
+                        workers=workers)
     hidx = torch.tensor([reg.index[h] for h in HEADS], device=dev)
     e = HEADS.index("hemorrhage_epidural")
     vids, logits, hid, pooled = [], [], {h: [] for h in HEADS}, []
     lin1, act, lin2 = model.binary
     with torch.no_grad():
-        for raw in (part for full in loader for part in mixed_parts(full)):    # a mixed batch: 1 mm + ngeo parts
-            patch = model.backbone.ngeo_patch_xyz if "affine" in raw else model.backbone.patch_xyz
-            b = prepare(raw, cfg, dev, tuple(patch), train=False)
+        for raw in loader:
+            b = prepare(raw, cfg, dev, tuple(model.backbone.patch_xyz), train=False)
             task = hidx.unsqueeze(0).expand(b["x"].shape[0], -1)
             with torch.autocast(**amp):
-                kw = {**({"geo": b["geo"]} if b.get("geo") is not None else {}),       # native geometry
-                      **({"modality": b["modality"]} if getattr(model.backbone, "window_bank", None) is not None
-                         else {})}                                                    # window bank: native input
-                enc = model.encode(b["x"], b["keep"], b.get("meta"), task, **kw)
+                enc = model.encode(b["x"], b["keep"], b.get("meta"), task, modality=b["modality"])
                 z = model.member(model.slots(enc, task, b["keep"]), task)          # (B, 6, D)
                 h = act(lin1(z))
                 lg = lin2(h)[..., 0]

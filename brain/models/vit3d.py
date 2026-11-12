@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-from brain.models.patch_embed import ConvStemEmbed3D, NgeoStemEmbed, PatchEmbed3D, ScaleEmbed
+from brain.models.patch_embed import ConvStemEmbed3D, PatchEmbed3D, ScaleEmbed
 from brain.models.projector import Projector
 from brain.models.rope3d import RoPE3D
 
@@ -158,8 +158,8 @@ def grid_layout(grid, coords: torch.Tensor, order: torch.Tensor, pad: torch.Tens
     """Where the packed tokens sit on their grid, for ``grid_conv`` and ``MirrorMix``. ``grid`` (nz, ny, nx), token
     order z, y, x; ``coords`` (B, N, 3) template mm (x, y, z) of every grid token; ``order`` / ``pad`` (B, M) from
     ``pack_kept``. With ``mirror_mid_mm`` also ``partner`` (B, M): the packed index of the kept token nearest to each
-    token's mirror image (x -> 2 mid - x), or -1. Token centres are affine in the grid index (1 mm grid and native CT
-    alike), so the mirror image maps back to an index exactly."""
+    token's mirror image (x -> 2 mid - x), or -1. Token centres are affine in the grid index, so the mirror image maps
+    back to an index exactly."""
     nz, ny, nx = (int(v) for v in grid)
     out = {"grid": (nz, ny, nx), "order": order, "pad": pad}
     if mirror_mid_mm is None:
@@ -381,14 +381,20 @@ def bias_kwargs(m: dict) -> dict:
             "mirror_mid_mm": float(m.get("mirror_mid_mm", 128.0))}
 
 
-def ngeo_kwargs(m: dict) -> dict:
-    """BrainEncoder keyword arguments for the native-geometry embedding (``model.ngeo``: enabled, stem widths,
-    patch_xyz in input voxels); {} when off, so encoders without it build exactly as before."""
-    ng = m.get("ngeo") or {}
-    if not ng.get("enabled"):
-        return {}
-    return {"ngeo_stem": tuple(int(w) for w in ng.get("stem", (32, 64))),
-            "ngeo_patch_xyz": tuple(int(v) for v in ng.get("patch_xyz", (32, 32, 1)))}
+# Native-geometry CT input (an in-plane stem ``ngeo_embed`` and its decoder ``seg_ngeo``, 2026-11-07) was removed on
+# 2026-11-11: it broke CT / MRI transfer, so every scan is read at 1 mm through the one stem. Checkpoints of those runs
+# (R17, full_ngeo_bank) still carry its weights; loaders drop them (encoder state, BrainQuery state, weight average).
+LEGACY_NGEO = ("ngeo_embed.", "backbone.ngeo_embed.", "seg_ngeo.")
+
+
+def drop_legacy_ngeo(state: dict, what: str | None = None) -> dict:
+    """``state`` without the removed native-geometry weights (``LEGACY_NGEO``); one log line with the count when
+    ``what`` (the state's name) is given and any were dropped."""
+    out = {k: v for k, v in state.items() if not str(k).startswith(LEGACY_NGEO)}
+    if what and len(out) < len(state):
+        print(f"[load] {what}: dropped {len(state) - len(out)} legacy native-geometry weights "
+              "(native-geometry input removed 2026-11-11)", flush=True)
+    return out
 
 
 
@@ -420,8 +426,6 @@ class BrainEncoder(nn.Module):
         fp32_residual: bool = False,
         n_meta: int = 0,
         conv_stem: Sequence[int] | None = None,
-        ngeo_stem: Sequence[int] | None = None,
-        ngeo_patch_xyz: Sequence[int] = (32, 32, 1),
         dw_conv_blocks: int = 0,
         mirror_blocks: Sequence[int] = (),
         mirror_mid_mm: float = 128.0,
@@ -445,13 +449,6 @@ class BrainEncoder(nn.Module):
         self.patch_embed = (ConvStemEmbed3D(in_chans, dim, self.patch_xyz, self.conv_stem, checkpoint_blocks)
                             if self.conv_stem else PatchEmbed3D(in_chans, dim, self.patch_xyz))
         self.scale_embed = ScaleEmbed(dim)
-        # ``ngeo_stem`` (widths, e.g. (32, 64)): a second, in-plane-only embedding for native-geometry CT
-        # (NgeoStemEmbed; ``forward(..., stem="ngeo")``), feeding the same blocks; None = 1 mm input only
-        self.ngeo_embed: NgeoStemEmbed | None = None
-        self.ngeo_patch_xyz = tuple(int(v) for v in ngeo_patch_xyz)
-        if ngeo_stem:
-            self.ngeo_embed = NgeoStemEmbed(in_chans, dim, self.ngeo_patch_xyz, tuple(int(w) for w in ngeo_stem),
-                                            checkpoint_blocks)
         # stochastic depth rises linearly with depth, as in DeiT / Primus
         # inductive biases (R18): ``dw_conv_blocks`` first blocks get a depthwise 3x3x3 convolution in the MLP;
         # ``mirror_blocks`` (block indices) are followed by a MirrorMix about the plane x = ``mirror_mid_mm`` (template
@@ -504,18 +501,6 @@ class BrainEncoder(nn.Module):
         p = next(self.parameters())
         self.meta_emb.to(device=p.device)
 
-    def enable_ngeo(self, widths: Sequence[int] = (32, 64), patch_xyz: Sequence[int] = (32, 32, 1)) -> None:
-        """Adds the native-geometry embedding (``NgeoStemEmbed``) to an encoder built without it (e.g. warm-started
-        from a 1 mm checkpoint); freshly initialised, the blocks are shared."""
-        if self.ngeo_embed is not None:
-            return
-        self.ngeo_patch_xyz = tuple(int(v) for v in patch_xyz)
-        p = next(self.parameters())
-        self.ngeo_embed = NgeoStemEmbed(self.in_chans, self.embed_dim, self.ngeo_patch_xyz, tuple(int(w) for w in widths),
-                                        self.checkpoint_blocks).to(p.device)
-        self.ngeo_embed.apply(self._init_weights)
-        self._init_stems()
-
     def enable_fusion(self, after_block: int, heads: int | None = None) -> None:
         """Study-level input (``SequenceFusion``): a study's scans run blocks [0, after_block) as separate rows, are
         fused, and blocks [after_block, depth) run on the fused sequence. New weights; a single scan is unaffected."""
@@ -531,13 +516,12 @@ class BrainEncoder(nn.Module):
         return self.n_cls + self.n_registers
 
     def _init_stems(self) -> None:
-        """He init for the convolution stems (1 mm ``ConvStemEmbed3D``, native-geometry ``NgeoStemEmbed``); their
-        token projection ``proj`` keeps the ViT init."""
+        """He init for the convolution stem (``ConvStemEmbed3D``); its token projection ``proj`` keeps the ViT
+        init."""
         from brain.models.patch_embed import init_stem_convs
 
-        for emb in (self.patch_embed, getattr(self, "ngeo_embed", None)):
-            if emb is not None and hasattr(emb, "stem"):
-                init_stem_convs(emb.stem)
+        if hasattr(self.patch_embed, "stem"):
+            init_stem_convs(self.patch_embed.stem)
 
     def _init_biases(self) -> None:
         """Depthwise convolutions and mirror projections start at zero: the encoder starts as the plain ViT."""
@@ -570,17 +554,8 @@ class BrainEncoder(nn.Module):
             return checkpoint(block, x, coords, attn_mask, n_prefix, layout, use_reentrant=False)
         return block(x, coords, attn_mask, n_prefix, layout)
 
-    def _embed(self, view, coords_mm, patch_size_mm, patch_xyz, zyx, meta: torch.Tensor | None = None,
-               stem: str = "iso"):
-        if stem == "ngeo":
-            if self.ngeo_embed is None:
-                raise ValueError("stem='ngeo' needs an encoder built with ngeo_stem (model.ngeo.enabled)")
-            embed = self.ngeo_embed
-        elif stem == "iso":
-            embed = self.patch_embed
-        else:
-            raise ValueError(f"stem {stem!r}: iso | ngeo")
-        tokens, grid = embed(view, patch_xyz, zyx=zyx)
+    def _embed(self, view, coords_mm, patch_size_mm, patch_xyz, zyx, meta: torch.Tensor | None = None):
+        tokens, grid = self.patch_embed(view, patch_xyz, zyx=zyx)
         b, n, _ = tokens.shape
         if coords_mm.shape[:2] != (b, n) or coords_mm.size(-1) != 3:
             raise ValueError(f"coords_mm {tuple(coords_mm.shape)} does not match tokens {(b, n, 3)}")
@@ -657,18 +632,15 @@ class BrainEncoder(nn.Module):
         task_tokens: torch.Tensor | None = None,
         task_write: torch.Tensor | None = None,
         fuse: dict | None = None,
-        stem: str = "iso",
     ) -> dict[str, torch.Tensor]:
         """Dense token features for evaluation. ``view`` is (B, C, X, Y, Z). Dropped tokens are zero.
-        ``stem="ngeo"``: ``view`` is a native-geometry CT (x = col, y = row, z = slice) through ``ngeo_embed``;
-        ``coords_mm`` (B, N, 3) are then each token centre's template mm (``brain.data.ngeo.token_centres_mm``).
 
         ``taps`` are block indices whose (pre-norm) outputs are also returned, as ``out["taps"]``. ``meta`` (B,) are
         ``META`` ids (ignored by an encoder without ``n_meta``). ``task_tokens`` (T, D) join the sequence after the
         prefix (OMNI-style, ``_task_mask``; ``task_write`` (T,) False = read-only) and come back as
         ``out["task_tokens"]`` (B, T, D).
         """
-        tokens, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=False, meta=meta, stem=stem)
+        tokens, grid = self._embed(view, coords_mm, patch_size_mm, patch_xyz, zyx=False, meta=meta)
         b, n, _ = tokens.shape
         if keep is None:
             keep = torch.ones(b, n, dtype=torch.bool, device=tokens.device)

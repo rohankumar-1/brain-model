@@ -27,6 +27,7 @@ import pandas as pd
 import torch
 
 from brain.common.paths import resolve
+from brain.models.vit3d import drop_legacy_ngeo
 from brain.multitask.data import MultitaskDataset, checkpoint_stats, load_labels, make_loader, prepare
 from brain.multitask.evaluate import run_eval
 from brain.multitask.losses import slot_losses
@@ -45,23 +46,21 @@ def load_model(ckpt_path: Path, device: torch.device):
     reg = load_registry(cfg["data"].get("registry")).subset(list(ck["tasks"]))      # the checkpoint's task order
     enc = load_brain3d(ck, torch.device("cpu"), pretrained=False).model
     model = BrainQuery(enc, reg, cfg["model"]).to(device)
-    # joint checkpoints also hold the SSL predictor, which BrainQuery has no use for
-    model.load_state_dict({k: v for k, v in ck["multitask"].items() if not k.startswith("backbone.predictor.")})
+    # joint checkpoints also hold the SSL predictor, which BrainQuery has no use for; native-geometry runs (R17,
+    # full_ngeo_bank) their removed in-plane stem and decoder, which every scan now does without (read at 1 mm)
+    state = drop_legacy_ngeo(ck["multitask"], "BrainQuery")
+    model.load_state_dict({k: v for k, v in state.items() if not k.startswith("backbone.predictor.")})
     model.label_stats = ck.get("label_stats")            # the training normalisation (data.checkpoint_stats)
     return model.eval().requires_grad_(False), reg, cfg
 
 
 def _loader(store, labels, volumes, reg, stats, task, split, ids=None, use=None, workers=4, strip_all=False,
-            strip_match=None, study=None, partners=None, cfg: dict | None = None):
-    """Evaluation loader for one task. ``cfg``: the checkpoint's config; with ``data.ngeo.enabled`` the scans come
-    from their native-geometry copies (``data.ngeo_setup``; scans without one are left out)."""
-    from brain.multitask.data import ngeo_setup
-
-    ngeo_kw, cf = ngeo_setup(cfg, store)
+            strip_match=None, study=None, partners=None):
+    """Evaluation loader for one task."""
     ds = MultitaskDataset(store, labels, volumes, reg, stats, split=split, tasks=[task], train=False, use=use,
                           volume_ids=ids, max_seg=1, strip_all=strip_all, strip_match=strip_match, study=study,
-                          partners=partners, **ngeo_kw)
-    return make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False, collate_fn=cf), ds
+                          partners=partners)
+    return make_loader(ds, batch_size=2, shuffle=False, seed=0, workers=workers, drop_last=False), ds
 
 
 def fit_embedding(model, reg, cfg, loader, t: int, device, amp, steps: int = 200, lr: float = 3e-3) -> dict:
