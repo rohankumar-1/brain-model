@@ -35,7 +35,7 @@ models:
   BQ-FISO:        {ckpt: runs/multitask/full_iso_bank/last.pt, note: "R14-F + 30k steps, R16 recipe + shared learned window bank (6 asinh windows, warm start = R14-F input), re-encoded int16 store, every scan 1 mm, global batch 12 (configs/multitask/full_iso_bank.yaml)"}
   BQ-FNGEO:       {ckpt: runs/multitask/full_ngeo_bank/last.pt, note: "as BQ-FISO but CT read at native geometry (0.5 mm in-plane, native slices, in-plane stem) mixed with 1 mm MRI (configs/multitask/full_ngeo_bank.yaml); frozen benchmark CT goes through the 1 mm stem"}
   BQ-R17:         {ckpt: runs/multitask/r17_cool/last.pt, note: "ViT-B from scratch, conv stems on both geometries, MIL finding heads, mixed 1 mm + native CT (configs/multitask/r17.yaml), 76.5k constant-LR steps + a 10k-step decay branch (r17_cool); frozen benchmark CT goes through the 1 mm stem"}
-  BQ-R18:         {ckpt: runs/multitask/r18/last.pt, note: "R17 step 76.5k warm start + depthwise MLP convolutions (blocks 0-5) + bilateral mirror mixing (after blocks 2, 5, 8, 11), task-weight floor 0.78, 60k steps (configs/multitask/r18.yaml)"}
+  BQ-R18:         {ckpt: runs/multitask/r18/last.pt, note: "R17 step 76.5k warm start + depthwise MLP convolutions (blocks 0-5) + bilateral mirror mixing (after blocks 2, 5, 8, 11), task-weight floor 0.78, hemorrhage any-of loss, all CT at 1 mm (native-geometry stem dropped), 60k steps (configs/multitask/r18.yaml)"}
 
   BQ-random:      {ckpt: runs/baselines/random_v3/last.pt, note: "the BQ-v3 architecture, untrained (seed 0): the floor for our encoder"}
   regional_stats:
