@@ -703,9 +703,15 @@ def load_atlas_lesion_volume_task(volumes: pd.DataFrame) -> TaskBundle:
 
 # INSTANCE 2022 ICH (99 NCCT): the imaging items of the ICH score (Hemphill 2001) from the hematoma masks
 # (``mask_labels``): volume >= 30 ml, ventricular extension, infratentorial origin; plus the side of unilateral bleeds.
+# UNRELIABLE (2026-11-12): instance_ivh. The template ventricle prior does not find ventricular blood: on BHSD subtype
+# masks it separates IVH from IPH with AUC 0.71 (IVH median 9% of its voxels inside the prior), and an own-CSF rule
+# (AUC 0.89) still misses 23% of IVH at a 15% IPH false-positive rate (analysis/lesion_location_validate.py). Do not
+# read instance_ivh scores as intraventricular extension. instance_infratentorial was checked: the posterior-fossa
+# prior matches each scan's own SynthSeg cerebellum + brainstem (Dice 0.88 healthy) and agrees on 60/60 BraTS tumours.
+INSTANCE_UNRELIABLE = ("instance_ivh",)
 INSTANCE_TASKS = {
     "instance_large_ich": "hematoma volume >= 30 ml",
-    "instance_ivh": ">= 1 ml of the hematoma inside the ventricle prior (intraventricular extension)",
+    "instance_ivh": "UNRELIABLE (ventricle prior misses IVH): >= 1 ml of the hematoma inside the ventricle prior",
     "instance_infratentorial": "> 50% of the hematoma inside the posterior-fossa prior",
     "instance_side": "side of a unilateral hematoma (>= 90% on one side): 1 = left",
 }
