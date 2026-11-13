@@ -1,0 +1,399 @@
+# R19 (DRAFT, 2026-11-13, not launched): ViT-B from scratch, JOINT self-supervised + multitask (brain.train.joint),
+#   user: "start off with a high SSL trained start, then anneal into the final balance ... finish off with SFT".
+#   Curriculum (joint.*, normalised loss shares): steps 0-12k LeJEPA only (weight 4); tasks ramp in over 12k-27k;
+#   the LeJEPA weight tapers 4 -> 0.25 by 120k; the last 30k are task-dominated (LeJEPA kept at 0.25 as a
+#   regulariser), with the LR decay over the final 15k. SSL pool: the store minus the benchmark cohorts (incl. MR-RATE).
+#   Everything else = configs/multitask/r19.yaml (R18 architecture, 85 tasks, MR-RATE, labels v13) + R15's LeJEPA
+#   views / projector / predictor / SSL augmentation. Open: profile (ssl_batch_size 4 is a guess for 46 GB L40S),
+#   step budget vs 4 GPUs (pi_dbertsim), labels v13.
+seed: 42
+data:
+  store_root: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr
+  index_name: volumes.csv
+  labels_dir: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/multitask_v13
+  registry: null
+  volume_size_xyz:
+  - 256
+  - 256
+  - 160
+  default_spacing_mm:
+  - 1.0
+  - 1.0
+  - 1.0
+  num_workers: 10
+  balance_alpha: 0.5
+  subject_beta: 1.0
+  balance_groups:
+    brats:
+    - brats_gli
+    - brats_men
+    - brats_ped
+    - brats_goat
+  val_per_task: 64
+  val_max_seg: 4
+  rsna_slices: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/rsna_slices/rsna_slices.parquet
+  exclude_datasets:
+  - abide1
+  - ixi
+  - oasis1
+  - oasis2
+  - pixar
+  - fomo_nki
+  - fomo_hbn
+  - rsna_ica
+  exclude_volumes: configs/multitask/train_exclude_r17.csv
+  fastmri_boxes: /home/roku/orcd/scratch/brain-model/data/processed/slices_zarr/labels/fastmri_boxes.parquet
+  default_origin_mm:
+  - 0.0
+  - 0.0
+  - 0.0
+model:
+  init_from: null
+  size: base
+  conv_stem:
+  - 32
+  - 64
+  mil:
+    enabled: true
+  drop_path: 0.1
+  layer_scale: 0.1
+  rope_min_period_mm: 32
+  dw_conv_blocks: 6
+  mirror_blocks:
+  - 2
+  - 5
+  - 8
+  - 11
+  mirror_mid_mm: 128.0
+  checkpoint: true
+  taps:
+  - 3
+  - 7
+  slot:
+    dim: 256
+    layers: 3
+    heads: 8
+  seg:
+    widths:
+    - 128
+    - 64
+    - 32
+    - 16
+  rope_fp32: true
+  fp32_residual: true
+  meta:
+    enabled: true
+    drop: 0.2
+  task_tokens:
+    enabled: true
+    share: true
+    write_bias: 0.0
+    write_ramp_steps: 0
+  regression:
+    kind: hlgauss
+    bins: 80
+    range:
+    - -5.0
+    - 5.0
+    sigma_ratio: 0.75
+  token_map:
+    enabled: true
+    dim: 64
+  fusion:
+    after_block: 8
+    heads: 6
+  window_bank:
+    enabled: true
+    k: 6
+    init: contract6
+    per_modality: false
+    lr_mult: 0.1
+    decoder_grad: false
+  proj_dim: 128
+  proj_hidden: 2048
+  proj_norm: batch
+views:
+  patch_xyz:
+  - 16
+  - 16
+  - 8
+  gate:
+    ct_hu:
+    - -500.0
+    - 200.0
+    mri_lo: -5.5
+    mode: frac
+    min_frac: 0.25
+  global:
+    n: 2
+    size_xyz:
+    - 128
+    - 128
+    - 64
+  local:
+    n: 2
+    size_xyz:
+    - 64
+    - 64
+    - 32
+  fine:
+    n: 2
+    size_xyz:
+    - 32
+    - 32
+    - 16
+    patch_xyz:
+    - 8
+    - 8
+    - 4
+  nested: true
+  fg_min: 0.15
+  retries: 8
+tasks:
+  ssl: true
+  mask_p: 0.1
+  max_dense: 1
+  k_max: 8
+  p_all: 0.2
+  rare_beta: 0.25
+  max_seg: 2
+  lesion_ignore: true
+  study:
+    p_multi: 0.5
+    max_scans: 3
+  group_weights:
+    synthesis: 0.5
+    radiology: 1.0
+    derived: 0.5
+    mri_findings: 0.5
+  groups: null
+  ids: null
+  exclude:
+  - mmse
+  - autism_severity
+  - adhd
+  - parkinsons
+  - glioma_idh
+  - ct_gray_white_ratio
+  - vol_hippocampus
+  - vol_amygdala
+  - vol_thalamus
+  - vol_caudate
+  - vol_putamen
+  - vol_cortex
+  - vol_white_matter
+  - vol_cerebellum
+  - vol_brainstem
+  - vol_log_ventricles
+  - vol_log_csf
+  - wmh_grade
+  - vol_hippocampus_asym
+  - vol_cortex_asym
+  - aneurysm_present
+  - aneurysm_ica_infraclinoid
+  - aneurysm_ica_supraclinoid
+  - aneurysm_mca
+  - aneurysm_acom
+  - aneurysm_aca
+  - aneurysm_pcom
+  - aneurysm_basilar_tip
+  - aneurysm_posterior_other
+  - aneurysm_location
+  - seg_vessels
+aug:
+  flip_lr: 0.5
+  affine:
+    p: 0.8
+    rot_deg:
+    - 8
+    - 8
+    - 12
+    shift_mm: 8.0
+    shear_deg: 10.0
+  appearance:
+    bias:
+      p: 0.3
+      amp: 0.2
+    through_plane:
+      p: 0.3
+      fwhm_vox:
+      - 2.0
+      - 6.0
+    noise:
+      p: 0.5
+      kind: rician
+      snr:
+      - 15
+      - 100
+      sigma:
+      - 0.02
+      - 0.1
+      sigma_hu:
+      - 2.0
+      - 15.0
+    blur:
+      p: 0.2
+      sigma_vox:
+      - 0.5
+      - 1.0
+    drift:
+      p: 0.2
+      amp: 0.1
+    ct_physical:
+      p: 0.5
+      offset_hu: 10.0
+      scale: 0.03
+    kernel:
+      p: 0.3
+      sigma_vox:
+      - 0.3
+      - 1.0
+      sharpen: 0.5
+      amount:
+      - 0.2
+      - 1.0
+  fov_cut:
+    p: 0.2
+    mm:
+    - 10
+    - 40
+  skull_strip:
+    p: 0.3
+    match:
+    - whole_tumor
+    - tumor_core
+    - enhancing_tumor
+    - resection_cavity
+  synth_contrast:
+    p: 0.1
+  task_aware: true
+  window:
+    mode: roles
+    jitter: 0.05
+  tie_views: true
+  curve:
+    p: 0.8
+    knots: 5
+    strength: 0.6
+    flip: 0.1
+  bias:
+    p: 0.5
+    amp: 0.3
+  noise:
+    p: 0.5
+    sigma:
+    - 0.02
+    - 0.15
+    kind: rician
+    snr:
+    - 15
+    - 100
+  blur:
+    p: 0.3
+    sigma_vox:
+    - 0.5
+    - 1.5
+  through_plane:
+    p: 0.5
+    fwhm_vox:
+    - 2.0
+    - 6.0
+  drift:
+    p: 0.3
+    amp: 0.25
+  skull:
+    p: 0.3
+    per_view: true
+  geometric:
+    p: 0.8
+    rot_deg:
+    - 10
+    - 10
+    - 15
+    scale:
+    - 0.85
+    - 1.15
+    flip_lr: 0.5
+  histmatch:
+    p: 0.15
+    alpha:
+    - 0.5
+    - 1.0
+loss:
+  seg_stride: 2
+  uncertainty_clamp:
+  - 1.0
+  - 0.25
+  token_weight: 0.5
+  slice_weight: 0.5
+  box_weight: 0.5
+  negative_tasks:
+  - whole_tumor
+  - tumor_core
+  - enhancing_tumor
+  - resection_cavity
+  - hemorrhage_segmentation
+  any_of:
+    hemorrhage_any:
+    - hemorrhage_epidural
+    - hemorrhage_intraparenchymal
+    - hemorrhage_intraventricular
+    - hemorrhage_subarachnoid
+    - hemorrhage_subdural
+    mass_effect:
+    - midline_shift
+  any_of_weight: 0.1
+  lamb: 0.03
+  n_proj: 256
+  predict:
+    weight: 1.0
+    pixel_weight: 0.5
+    pixel_cells:
+    - 2
+    - 2
+    - 2
+    blocks: 3
+    block_tokens:
+    - 3
+    - 6
+    depth: 4
+    ramp_steps: 2000
+  dense:
+    weight: 1.0
+    tokens_per_view: 32
+  gather_ddp: true
+  win_weight: 0.0
+optim:
+  lr: 0.0003
+  enc_lr_mult: 1.0
+  layer_decay: 1.0
+  weight_decay: 0.05
+  warmup_steps: 3000
+  clip_grad: 1.0
+  batch_size: 4
+  schedule: wsd
+  decay_steps: 15000
+  betas:
+  - 0.9
+  - 0.95
+train:
+  max_steps: 150000
+  log_every: 50
+  eval_every: 1000
+  ckpt_every: 500
+  keep_every: 10000
+  stop_poll: 20
+  best_metric: score
+  ema_decay: 0.999
+  keep_full: false
+output:
+  out_dir: runs/joint/r19
+  resume_from: null
+joint:
+  ssl_start: 4.0
+  ssl_floor: 0.25
+  warmup_frac: 0.08
+  task_ramp_frac: 0.1
+  taper_end_frac: 0.8
+  ssl_batch_size: 4
+  normalize: true
