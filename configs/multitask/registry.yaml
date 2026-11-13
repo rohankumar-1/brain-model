@@ -829,6 +829,16 @@ tasks:
     sources: [{<<: *midline, threshold: 5.0, exclude_datasets: ["mr_rate*"]},
               {source: mr_rate, positive: ["nv:brain_midline_shift"]}]
 
+  # Mass effect (2026-11-12): no mask or measure defines it, so MR-RATE reports only (NeuroVFM brain_mass_effect;
+  # a reported midline shift or herniation implies it). cq500_mass_effect stays held out (now an analog).
+  - id: mass_effect
+    type: binary
+    group: lesion
+    descriptions:
+      - "Is there mass effect compressing or displacing brain structures?"
+      - "Do sulcal effacement, ventricular compression or herniation indicate mass effect?"
+    sources: [{source: mr_rate, positive: ["nv:brain_mass_effect", "nv:brain_midline_shift", "nv:brain_herniation"]}]
+
   # ================================================================ held out (never trained; few-shot evaluation)
   - id: cq500_hemorrhage
     role: held_out
@@ -856,12 +866,13 @@ tasks:
     sources: [{source: cq500, finding: CalvarialFracture}]
   - id: cq500_midline_shift
     role: held_out
-    analog: brain_asymmetry
+    analog: midline_shift
     type: binary
     descriptions: ["Is there a shift of the midline structures?"]
     sources: [{source: cq500, finding: MidlineShift}]
   - id: cq500_mass_effect
     role: held_out
+    analog: mass_effect
     type: binary
     descriptions: ["Is there mass effect compressing brain structures?"]
     sources: [{source: cq500, finding: MassEffect}]
