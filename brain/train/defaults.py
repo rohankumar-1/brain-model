@@ -219,13 +219,19 @@ def _multitask_defaults() -> dict[str, Any]:
         # the logits of rows asked both (losses.any_of_loss)
         "loss": {"seg_stride": 2, "sparse_pos_weight": 20.0,
                  "negative_tasks": [], "token_weight": 0.0, "slice_weight": 0.0, "box_weight": 0.0,
-                 "any_of": {}, "any_of_weight": 0.0},
+                 "any_of": {}, "any_of_weight": 0.0,
+                 # dense_emphasis {task: {quantile, weight}}: a synthesis task's target voxels above that brightness
+                 # quantile weigh 1 + weight (losses.emphasis_table; synth_t1c enhancement, 2026-11-13)
+                 "dense_emphasis": {}},
         "optim": {"lr": 3.0e-4, "enc_lr_mult": 0.25, "layer_decay": 0.8, "weight_decay": 0.05,
                   "warmup_steps": 1000, "clip_grad": 1.0, "batch_size": 8},
         # ema_decay: weight average (brain.train.engine.WeightEMA), evaluated beside the live weights; None = off
         "train": {"max_steps": 20000, "log_every": 50, "eval_every": 1000, "ckpt_every": 500,
                   "keep_every": 5000, "stop_poll": 20, "best_metric": "score",   # validation skill (brain.eval.skill)
-                  "ema_decay": None},
+                  "ema_decay": None,
+                  # ref_score {tasks | config, exclude_families}: an earlier run's tasks scored on the scans its
+                  # validation rule picks without the new cohorts (data.reference_val; R19 vs R18)
+                  "ref_score": None},
         "output": {"out_dir": "runs/multitask", "resume_from": None},
     }
 

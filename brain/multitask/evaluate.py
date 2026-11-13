@@ -21,7 +21,7 @@ from sklearn.metrics import r2_score, roc_auc_score
 from brain.downstream.metrics import balanced_accuracy
 from brain.eval.skill import skill, summarize
 from brain.multitask.data import prepare
-from brain.multitask.losses import seg_target, slot_losses
+from brain.multitask.losses import emphasis_table, seg_target, slot_losses
 
 
 def dice(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -42,6 +42,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
     losses: dict[int, list] = defaultdict(list)
     neg_ids = set((cfg.get("loss") or {}).get("negative_tasks") or [])   # their training loss, so val loss matches
     negatives = torch.tensor([t.id in neg_ids for t in reg.tasks], device=device) if neg_ids else None
+    emphasis = emphasis_table(cfg.get("loss"), reg, device)          # val loss = training loss for synthesis too
     task_type = model.task_type
     for raw in loader:
         b = prepare(raw, cfg, device, patch_xyz, train=False)
@@ -49,7 +50,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             out = model(b["x"], b["keep"], b["task"], b["seg_pair"], alone=True, meta=b.get("meta"),
                         dense_pair=b.get("dense_pair"), study=b.get("study"), modality=b["modality"])
         loss, has = slot_losses(out, b["task"], b["y"], task_type, b["seg"], b["seg_pair"], dense=b,
-                                negatives=negatives)
+                                negatives=negatives, emphasis=emphasis)
         task, y = b["task"], b["y"]
         for i, j in has.nonzero().tolist():
             losses[int(task[i, j])].append(float(loss[i, j]))
@@ -81,6 +82,24 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
             for (i, j), v in zip(b["dense_pair"].tolist(), mae.tolist()):
                 preds[int(task[i, j])].append((1.0, v, str(raw["volume_id"][i])))
     model.train(was)
+    res, skills = _metrics(preds, reg, stats)
+    per_task = [np.mean(v) for v in losses.values() if v]
+    res["loss"] = float(np.mean(per_task)) if per_task else float("nan")
+    res.update(summarize(skills))
+    ref = getattr(getattr(loader, "dataset", None), "ref", None)
+    if ref:                       # the reference run's tasks on its scans only (``train.ref_score``): comparable score
+        res.update(ref_scores(preds, reg, stats, ref))
+    return (res, dict(preds)) if return_preds else res
+
+
+def ref_scores(preds: dict, reg, stats: dict, ref: dict) -> dict[str, float]:
+    """``ref_score`` / ``ref_group_<g>``: the skill summary over ``ref["tasks"]`` (ids) on ``ref["volumes"]`` only."""
+    sub = {t: [r for r in rows if r[2] in ref["volumes"]] for t, rows in preds.items() if reg[t].id in ref["tasks"]}
+    return {f"ref_{k}": v for k, v in summarize(_metrics(sub, reg, stats)[1]).items()}
+
+
+def _metrics(preds: dict, reg, stats: dict) -> tuple[dict[str, float], list]:
+    """Per-task metrics and (group, skill) pairs from ``run_eval``'s prediction rows."""
     res: dict[str, float] = {}
     skills = []
     for t, rows in sorted(preds.items()):
@@ -114,10 +133,7 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
                 skills.append((task.group, 1.0 - res[f"{task.id}_fp"]))
         elif task.type == "dense":
             res[f"{task.id}_mae"] = float(p.mean())
-    per_task = [np.mean(v) for v in losses.values() if v]
-    res["loss"] = float(np.mean(per_task)) if per_task else float("nan")
-    res.update(summarize(skills))
-    return (res, dict(preds)) if return_preds else res
+    return res, skills
 
 
 METRICS = ("auc", "r2", "mae", "bacc", "dice", "fp")
@@ -130,9 +146,9 @@ def format_eval(vals: dict[str, float], reg, width: int = 150) -> list[str]:
     the bar when the whole group shares it. The group's shared prefix is dropped from task names
     (``hemorrhage_subdural`` -> ``subdural``); long groups wrap under their first task."""
     v = {k.removeprefix("val_"): x for k, x in vals.items()}
-    head = "  ".join(f"{k} {v[k]:.4f}" for k in ("score", "loss") if k in v)
+    head = "  ".join(f"{k} {v[k]:.4f}" for k in ("score", "ref_score", "loss") if k in v)
     per_task: dict[str, list[str]] = {}
-    used = {"score", "loss"}
+    used = {"score", "ref_score", "loss"} | {k for k in v if k.startswith("ref_group_")}
     for t in reg.tasks:
         cells = [f"{m} {v[f'{t.id}_{m}']:.{2 if m == 'mae' else 3}f}" for m in METRICS if f"{t.id}_{m}" in v]
         if cells:
