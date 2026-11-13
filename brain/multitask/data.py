@@ -1140,13 +1140,43 @@ def task_loaders(cfg: dict, reg: Registry, train_ids: list[str], *, batch: int, 
     if main:
         # reconstruction needs masking, which validation never applies
         val_ids = [t for t in train_ids if not any(s.get("source") == "ssl_recon" for s in reg[t].sources)]
-        pick = pick_val_volumes(labels, volumes, reg, val_ids, int(d.get("val_per_task", 64)))
+        n_val = int(d.get("val_per_task", 64))
+        pick = pick_val_volumes(labels, volumes, reg, val_ids, n_val)
+        ref = reference_val(cfg, labels, volumes, reg, val_ids, n_val)
+        if ref is not None:                    # the reference run's scans first, then this run's own picks
+            pick = list(dict.fromkeys([*ref["ordered"], *pick]))
         vds = MultitaskDataset(store, labels, volumes, reg, stats, split="val", train=False, tasks=val_ids, k_max=64,
                                max_seg=int(d.get("val_max_seg", 4)), volume_ids=pick,
                                lesion_ignore=bool(tk.get("lesion_ignore", False)),
                                strip_match=list(((cfg.get("aug") or {}).get("skull_strip") or {}).get("match") or []))
+        vds.ref = ref                          # run_eval's reference score (``train.ref_score``); None without one
         val = make_loader(vds, batch_size=2, shuffle=False, seed=0, workers=min(4, workers), drop_last=False)
     return loader, val, stats, len(ds)
+
+
+def reference_val(cfg: dict, labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry, val_ids: list[str],
+                  n: int) -> dict | None:
+    """``train.ref_score`` ({config: <an earlier run's config>, exclude_families: [...]}): the validation scans and
+    tasks that earlier run was scored on, so a run with new data and tasks still reports a score comparable with it
+    (R19 vs R18). The earlier run's trained tasks (its ``tasks`` section through this registry) are picked with the
+    same rule (``pick_val_volumes``) from the labels without ``exclude_families`` (the new cohorts); ``run_eval``
+    scores only those tasks on only those scans as ``ref_score`` / ``ref_group_<g>``."""
+    rs = (cfg.get("train") or {}).get("ref_score")
+    if not rs:
+        return None
+    if rs.get("tasks"):                   # the earlier run's task list as trained (preferred: a registry that grew
+        ref_list = list(rs["tasks"])      # since would add its new tasks to the config's selection)
+    else:
+        from brain.common.config import load_config
+
+        ref_list = reg.train_ids(load_config(rs["config"])["tasks"])
+    ref_tasks = [t for t in ref_list if t in set(val_ids)]
+    fam = set(rs.get("exclude_families") or [])
+    keep = ~labels["volume_id"].map(dict(zip(volumes["volume_id"], volumes["dataset_family"]))).isin(fam)
+    vols = pick_val_volumes(labels[keep], volumes, reg, ref_tasks, n)
+    print(f"[val] reference score: {len(ref_tasks)} tasks of {rs.get('config', 'the given list')} on {len(vols)} scans "
+          f"(without {sorted(fam)})", flush=True)
+    return {"tasks": set(ref_tasks), "volumes": set(vols), "ordered": vols}
 
 
 def load_labels(labels_dir: str | Path) -> tuple[pd.DataFrame, dict]:

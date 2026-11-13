@@ -324,6 +324,7 @@ aug:
     - 0.5
     - 1.0
 loss:
+  dense_emphasis: {synth_t1c: {quantile: 0.97, weight: 4.0}}   # brightest 3% of post-contrast targets weigh 5x
   seg_stride: 2
   uncertainty_clamp:
   - 1.0
@@ -381,9 +382,12 @@ optim:
   - 0.9
   - 0.95
 train:
+  # ref_score: R18's 63 validated tasks (runs/multitask/r18/metrics.json) on the scans R18's rule picks without MR-RATE
+  ref_score: {config: configs/multitask/r18.yaml, exclude_families: [mr_rate],
+    tasks: [age, sex, neuro_diagnosis, infant_abnormal, tumor_type, hemorrhage_any, hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular, hemorrhage_subarachnoid, hemorrhage_subdural, hemorrhage_segmentation, brain_volume, brain_mask, brain_asymmetry, intensity_asymmetry, ct_csf_fraction, ct_brain_density, ct_calcification, ct_skull_density, seg_ct_skull, seg_ct_csf, evans_index, vol_wmh, ventriculomegaly, whole_tumor, tumor_core, enhancing_tumor, resection_cavity, tumor_volume, glioma_survival_12m, glioma_mgmt, synth_t1, synth_t1c, synth_t2, synth_flair, synth_ct, mri_normal_for_age, mri_small_vessel_disease, mri_wm_lesion, mri_postop, mri_mass, mri_edema, mri_enlarged_ventricles, mri_infarct, mri_artifact, seg_ventricles, seg_hippocampus, seg_amygdala, seg_thalamus, seg_caudate, seg_putamen, seg_pallidum, seg_cortex, seg_white_matter, seg_cerebellum, seg_brainstem, seg_csf, vol_deep_gm, vol_parenchymal_fraction, vol_log_ventricle_brain_ratio, vol_gm_wm_ratio, vol_ventricle_asym]}
   max_steps: 150000
   log_every: 50
-  eval_every: 1000
+  eval_every: 5000
   ckpt_every: 500
   keep_every: 10000
   stop_poll: 20

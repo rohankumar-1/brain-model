@@ -25,8 +25,8 @@ from brain.data.volumes import n_meta
 from brain.multitask.data import (SLAB_TASKS, TOKEN_MIL_TASKS, TYPE_ID, lr_swap_table, prepare, protected_tasks,
                                   sharp_tasks, task_loaders)
 from brain.multitask.evaluate import format_eval, run_eval
-from brain.multitask.losses import (Balancer, any_of_loss, slab_mil_loss, slot_losses, token_occupancy,
-                                    token_occupancy_loss)
+from brain.multitask.losses import (Balancer, any_of_loss, emphasis_table, slab_mil_loss, slot_losses,
+                                    token_occupancy, token_occupancy_loss)
 from brain.multitask.model import BrainQuery, TokenTraining
 from brain.multitask.registry import load_registry
 from brain.train import engine
@@ -209,6 +209,7 @@ class Trainer(engine.Trainer):
         # lesion tasks with true negatives (labels v11 empty masks): losses.negative_seg_loss
         neg = set(cfg["loss"].get("negative_tasks") or [])
         self.negatives = torch.tensor([t.id in neg for t in self.reg.tasks], device=dev) if neg else None
+        self.emphasis = emphasis_table(cfg["loss"], self.reg, dev)       # loss.dense_emphasis (synth_t1c, 2026-11-13)
         # token maps: mask tasks' token occupancy (token_weight) and RSNA slice labels (slice_weight)
         self.tok_w = float(cfg["loss"].get("token_weight", 0.0))
         self.slice_w = float(cfg["loss"].get("slice_weight", 0.0))
@@ -361,7 +362,7 @@ class Trainer(engine.Trainer):
         seg_tok, slab_pair = pairs
         loss, has = slot_losses(out, b["task"], b["y"], self.raw.task_type, b["seg"], b["seg_pair"], self.stride,
                                 dense=b, sparse=self.sparse, cell_zyx=self.cell_zyx, pos_weight=self.pos_weight,
-                                negatives=self.negatives)
+                                negatives=self.negatives, emphasis=self.emphasis)
         if out.get("tok") is not None:
             loss = self._token_losses(b, out["tok"], loss, len(seg_tok), slab_pair)
         for parent, child in self.any_of:

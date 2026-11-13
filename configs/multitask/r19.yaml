@@ -114,7 +114,9 @@ loss: {seg_stride: 2, uncertainty_clamp: [1.0, 0.25], token_weight: 0.5, slice_w
   # a subtype implies "any": hinge relu(z_subtype - z_any) on rows asked both (losses.any_of_loss)
   any_of: {hemorrhage_any: [hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular,
     hemorrhage_subarachnoid, hemorrhage_subdural], mass_effect: [midline_shift]},
-  any_of_weight: 0.1}
+  any_of_weight: 0.1,
+  # post-contrast synthesis: the brightest 3% of target voxels (enhancement, vessels, choroid plexus) weigh 5x
+  dense_emphasis: {synth_t1c: {quantile: 0.97, weight: 4.0}}}
 optim:
   lr: 0.0003                       # global batch 16 (4 GPUs x 4); smoke 28589306: stable, gnorm falling
   enc_lr_mult: 1.0                 # from scratch: the encoder trains at the full LR
@@ -126,6 +128,9 @@ optim:
   schedule: wsd
   decay_steps: 12000
   betas: [0.9, 0.95]             # from scratch: a faster second moment recovers from loss spikes
-train: {max_steps: 136500, log_every: 50, eval_every: 1000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
-  ema_decay: 0.999, keep_full: false}
+train: {max_steps: 136500, log_every: 50, eval_every: 5000, ckpt_every: 500, keep_every: 10000, stop_poll: 20, best_metric: score,
+  ema_decay: 0.999, keep_full: false,
+  # ref_score: R18's 63 validated tasks (runs/multitask/r18/metrics.json) on the scans R18's rule picks without MR-RATE
+  ref_score: {config: configs/multitask/r18.yaml, exclude_families: [mr_rate],
+    tasks: [age, sex, neuro_diagnosis, infant_abnormal, tumor_type, hemorrhage_any, hemorrhage_epidural, hemorrhage_intraparenchymal, hemorrhage_intraventricular, hemorrhage_subarachnoid, hemorrhage_subdural, hemorrhage_segmentation, brain_volume, brain_mask, brain_asymmetry, intensity_asymmetry, ct_csf_fraction, ct_brain_density, ct_calcification, ct_skull_density, seg_ct_skull, seg_ct_csf, evans_index, vol_wmh, ventriculomegaly, whole_tumor, tumor_core, enhancing_tumor, resection_cavity, tumor_volume, glioma_survival_12m, glioma_mgmt, synth_t1, synth_t1c, synth_t2, synth_flair, synth_ct, mri_normal_for_age, mri_small_vessel_disease, mri_wm_lesion, mri_postop, mri_mass, mri_edema, mri_enlarged_ventricles, mri_infarct, mri_artifact, seg_ventricles, seg_hippocampus, seg_amygdala, seg_thalamus, seg_caudate, seg_putamen, seg_pallidum, seg_cortex, seg_white_matter, seg_cerebellum, seg_brainstem, seg_csf, vol_deep_gm, vol_parenchymal_fraction, vol_log_ventricle_brain_ratio, vol_gm_wm_ratio, vol_ventricle_asym]}}
 output: {out_dir: runs/multitask/r19, resume_from: runs/multitask/r18/last.pt}   # DRAFT: start not decided

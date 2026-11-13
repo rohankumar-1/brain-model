@@ -90,6 +90,36 @@ def sparse_seg_loss(logits: torch.Tensor, target: torch.Tensor, cell_zyx: tuple[
     return bce + dice * has.float() + cell + scan
 
 
+def emphasis_table(loss_cfg: dict | None, reg, device=None) -> torch.Tensor | None:
+    """(n_tasks, 2) float ``loss.dense_emphasis`` ({task: {quantile, weight}}): per synthesis task, the target
+    brightness quantile above which voxels weigh ``weight`` times more (e.g. synth_t1c, 2026-11-13: enhancement,
+    vessels and choroid plexus are the brightest post-contrast voxels, and a voxel-wise loss otherwise lets the model
+    copy the plain T1 and skip them). Zero rows: no emphasis. None when the config sets none."""
+    em = (loss_cfg or {}).get("dense_emphasis") or {}
+    if not em:
+        return None
+    unknown = [k for k in em if k not in reg.index]
+    if unknown:
+        raise SystemExit(f"loss.dense_emphasis: unknown tasks {unknown}")
+    tab = torch.zeros(len(reg.tasks), 2)
+    for k, v in em.items():
+        tab[reg.index[k]] = torch.tensor([float(v.get("quantile", 0.97)), float(v.get("weight", 4.0))])
+    return tab.to(device) if device is not None else tab
+
+
+def emphasize(target: torch.Tensor, w: torch.Tensor, q: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    """Voxel weights ``w`` (D, 1, ...) times (1 + a) where the target is above its weighted-foreground quantile ``q``
+    (per slot; a = 0 leaves the slot unchanged)."""
+    out = w.clone()
+    for i in torch.nonzero(a > 0).flatten().tolist():
+        fg = w[i] > 0
+        if int(fg.sum()) < 10:
+            continue
+        thr = torch.quantile(target[i][fg].float(), float(q[i]))
+        out[i] = w[i] * (1.0 + float(a[i]) * (target[i] > thr).float())
+    return out
+
+
 def dense_loss(pred: torch.Tensor, target: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
     """(D,) Huber between predicted and target intensities (window units), averaged over each slot's weighted voxels;
     a slot with no weight (nothing hidden / an empty target) scores 0."""
@@ -174,11 +204,13 @@ def any_of_loss(logits: torch.Tensor, task: torch.Tensor, has: torch.Tensor, par
 def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch.Tensor, seg: torch.Tensor,
                 seg_pair: torch.Tensor, stride: int = 2, dense: dict | None = None, sparse: torch.Tensor | None = None,
                 cell_zyx: tuple[int, int, int] | None = None, pos_weight: float = 20.0,
-                negatives: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+                negatives: torch.Tensor | None = None,
+                emphasis: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Per-slot loss (B, K) and a mask of slots that carry one. ``dense``: the prepared batch (``dense_pair``,
     ``dense_tgt``, ``dense_w``) when it has dense slots. ``sparse`` (n_tasks bool, registry ``sparse``) with
     ``cell_zyx`` (output voxels per encoder token): those segmentation slots take ``sparse_seg_loss``.
-    ``negatives`` (n_tasks bool, registry ``negatives``): those take ``negative_seg_loss``."""
+    ``negatives`` (n_tasks bool, registry ``negatives``): those take ``negative_seg_loss``. ``emphasis``
+    (``emphasis_table``): dense slots of those tasks weigh their brightest target voxels more."""
     tt = torch.where(task >= 0, task_type[task.clamp_min(0)], torch.full_like(task, -1))
     loss = torch.zeros_like(y, dtype=torch.float32)
     has = torch.zeros_like(task, dtype=torch.bool)
@@ -216,7 +248,12 @@ def slot_losses(out: dict, task: torch.Tensor, y: torch.Tensor, task_type: torch
         has = has.index_put((seg_pair[:, 0], seg_pair[:, 1]), torch.ones_like(sl, dtype=torch.bool))
     if out.get("dense") is not None and dense is not None and len(dense["dense_pair"]):
         dp = dense["dense_pair"]
-        dl = dense_loss(out["dense"], dense["dense_tgt"], dense["dense_w"])
+        w = dense["dense_w"]
+        if emphasis is not None:
+            e = emphasis.to(task.device)[task[dp[:, 0], dp[:, 1]]]
+            if bool((e[:, 1] > 0).any()):
+                w = emphasize(dense["dense_tgt"], w, e[:, 0], e[:, 1])
+        dl = dense_loss(out["dense"], dense["dense_tgt"], w)
         loss = loss.index_put((dp[:, 0], dp[:, 1]), dl)
         has = has.index_put((dp[:, 0], dp[:, 1]), torch.ones_like(dl, dtype=torch.bool))
     return loss, has
