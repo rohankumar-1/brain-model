@@ -825,7 +825,9 @@ tasks:
     descriptions:
       - "Is there a midline shift of 5 mm or more?"
       - "Are the midline structures displaced by mass effect?"
-    sources: [{<<: *midline, threshold: 5.0}]
+    # MR-RATE: the report's midline shift (NeuroVFM brain_midline_shift) instead of the measure on those scans
+    sources: [{<<: *midline, threshold: 5.0, exclude_datasets: ["mr_rate*"]},
+              {source: mr_rate, positive: ["nv:brain_midline_shift"]}]
 
   # ================================================================ held out (never trained; few-shot evaluation)
   - id: cq500_hemorrhage
