@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from brain.common.windowing import floors
 from brain.data.augment import appearance
 from brain.data.crops3d import raw_views
+from brain.models.window_bank import bank_cfg
 
 
 def length_plan(counts: torch.Tensor, buckets: int) -> tuple[torch.Tensor, list[int], list[int]]:
@@ -87,15 +88,47 @@ def sample_views(chunks: list[dict], groups, device: torch.device) -> dict[str, 
     return out
 
 
+def native_aug(cfg: dict) -> dict | None:
+    """The SSL appearance config when the encoder has a learned window bank (``model.window_bank``), else None.
+
+    With the bank the encoder windows inside the model (``ViewNet`` applies ``encoder.window_bank`` per view), so the
+    views stay in native units (CT HU, MRI robust z; one channel) and every appearance augmentation runs there:
+    ``window.mode: native`` (``augment._appearance_native``), exactly the multitask path's recipe. The SSL ``aug``
+    keys keep their values; ``ct_physical`` / ``kernel`` (CT's physical augmentations, which the canonical-window SSL
+    recipe never had) come from ``aug.appearance`` when the SSL block does not set them. The contrast re-rendering
+    (``curve``, ``histmatch``) and the window jitter exist only for windowed views, so they are off and
+    ``tie_views`` has nothing to tie."""
+    if bank_cfg(cfg.get("model")) is None:
+        return None
+    aug = dict(cfg["aug"])
+    for k in ("ct_physical", "kernel"):
+        if k not in aug and k in (aug.get("appearance") or {}):
+            aug[k] = aug["appearance"][k]
+    aug["window"] = {"mode": "native"}
+    return aug
+
+
 def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 4) -> dict:
     """Join worker chunks on ``device``, draw appearance there, and plan the length buckets.
 
     The large crop tensors are never concatenated on the CPU: each chunk is copied to the GPU and joined
     there. Views stay in (Z, Y, X) order, which is what the patch embed convolves in. The window pair is
     one crop that gets two independent appearances.
+
+    With a window bank (``native_aug``) the views are native units for the encoder's bank, and the window pair is
+    left out (it asks two windowings of one crop to agree, which a learned bank makes meaningless): a config that
+    still weights it (``loss.win_weight`` > 0) is refused.
     """
     first, aug = chunks[0], cfg["aug"]
+    nat = native_aug(cfg)
+    if nat is not None:
+        if float(cfg["loss"].get("win_weight", 1.0)) > 0:
+            raise ValueError("model.window_bank: the SSL window pair (loss.win_weight > 0) needs fixed windows; "
+                             "set loss.win_weight: 0")
+        aug = nat
     d: dict = {k: v for k, v in first.items() if not torch.is_tensor(v)}
+    if nat is not None:
+        d["groups"] = [g for g in d["groups"] if g != "win"]
     d["modality"] = torch.cat([c["modality"].to(device, non_blocking=True) for c in chunks])
     mod = d["modality"]
     d["thick_mm"] = torch.cat([c["thick_mm"].to(device, non_blocking=True) for c in chunks])
@@ -113,10 +146,10 @@ def prepare(chunks: list[dict], cfg: dict, device: torch.device, buckets: int = 
     d["plans"] = {}
     # aug.tie_views: every view of a volume (all groups but the window pair) draws the same contrast, so the SSL
     # agreement terms ask for invariance to crop / degradation, not to contrast (R15, 2026-11-06)
-    tie = int(torch.randint(0, 2**30, (1,))) if aug.get("tie_views") else None
+    tie = int(torch.randint(0, 2**30, (1,))) if aug.get("tie_views") and nat is None else None
     if "volume_full" in first:
-        d.update(sample_views(chunks, first["groups"], device))
-    for g in first["groups"]:
+        d.update(sample_views(chunks, d["groups"], device))
+    for g in d["groups"]:
         for k in _ROW_KEYS:
             if k == "view" and f"{g}_view" in d:
                 continue

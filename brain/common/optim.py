@@ -31,11 +31,13 @@ def lr_at(step: int, total: int, peak: float, warmup: int, floor: float = 0.01, 
 
 
 def param_groups(model: torch.nn.Module, wd: float, layer_decay: float | None = None,
-                 lr: float = 1.0) -> list[dict]:
+                 lr: float = 1.0, bank_mult: float = 1.0) -> list[dict]:
     """Decay matrices only; biases, norms and learned tokens/positions get no weight decay.
 
     With ``layer_decay`` the ViT backbone's blocks get geometrically smaller LR scales (deepest = 1).
-    Every group carries ``lr_scale`` so the schedule sets ``group["lr"] = lr_t * lr_scale``.
+    Every group carries ``lr_scale`` so the schedule sets ``group["lr"] = lr_t * lr_scale``. A learned window bank
+    (``model.window_bank``) is its own group at ``bank_mult`` (``window_bank.lr_mult``), no weight decay, as in the
+    multitask trainer; models without one are grouped exactly as before.
     """
     n_blocks = getattr(getattr(model, "backbone", None), "depth", 0)
     buckets: dict[tuple[float, float], list] = {}
@@ -43,6 +45,9 @@ def param_groups(model: torch.nn.Module, wd: float, layer_decay: float | None = 
         if not p.requires_grad:
             continue
         scale = 1.0
+        if ".window_bank." in f".{name}":
+            buckets.setdefault((float(bank_mult), 0.0), []).append(p)
+            continue
         if layer_decay is not None and n_blocks:
             if name.startswith("backbone.blocks."):
                 scale = layer_decay ** (n_blocks - 1 - int(name.split(".")[2]))

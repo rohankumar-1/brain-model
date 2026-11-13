@@ -179,16 +179,14 @@ class Trainer(engine.Trainer):
             self.val_iter = forever_loader(store, "val", cfg, batch_size=val_batch, shuffle=False, seed=0,
                                            distributed=False) if rt.main else None
 
-        if bank_cfg(cfg["model"]) is not None:
-            raise SystemExit("model.window_bank: the SSL view pipeline (brain.data.batch3d) windows outside the model; "
-                             "the bank is supported by the multitask trainer only")
         raw = build_encoder(cfg, dev)
         if rt.world > 1:
             raw = torch.nn.SyncBatchNorm.convert_sync_batchnorm(raw)
         self.raw, self.module = raw, raw
         self.core = viewnet_from_config(raw, cfg)
         self.sigreg = SIGReg(n_proj=int(lc.get("n_proj", 256))).to(dev)
-        self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"])), lr=float(o["lr"]),
+        bank_mult = float((bank_cfg(cfg["model"]) or {}).get("lr_mult", 1.0))
+        self.opt = torch.optim.AdamW(param_groups(raw, float(o["weight_decay"]), bank_mult=bank_mult), lr=float(o["lr"]),
                                      betas=tuple(o.get("betas", (0.9, 0.95))), fused=dev.type == "cuda")
         if ckpt is not None:
             raw.load_state_dict(ckpt["model"])
