@@ -6,6 +6,9 @@ was fixed (commit 5e53b1a, 2026-10-25: it used to leave ITK's identity direction
 image 180 degrees about the superior axis). They were never re-prepped. As stored, their hyperdense blood overlaps the
 DICOM CQ500 copy of the same study 0.02 (0.05 mirrored) vs 0.89 for the untilted studies; re-prepared with the
 current code, 0.99 (5 tilted studies). Fix: re-prep seg_cq500 (jobs/prep_seg_cq500.sbatch).
+DONE 2026-11-13: candidate store verified (tilted 0.89, untilted 0.96; ICH-mask side matches the readers' unilateral
+BleedLocation 33/33 vs 13/33 before), swapped in: STORE/seg_cq500 is the re-prep (manifest_v6_seg_cq500_r2.jsonl,
+newer rows win in the index), the old copies are in STORE/seg_cq500_stored_2026-10-18 (delete once accepted).
 
 ``compare``: per Seg-CQ500 study on the store grid (or ``--root`` for a candidate store), the overlap of hyperdense
 blood (55-90 HU in the eroded brain) with the DICOM copy, as stored and mirrored, by tilt. ``reprep``: prepares
@@ -29,12 +32,11 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from brain.common.paths import DATASETS  # noqa: E402
 from brain.downstream.tasks import DEFAULT_VOLUMES  # noqa: E402
 from brain.prep import store  # noqa: E402
 
 ROOT = DEFAULT_VOLUMES.parent
-PACK = DATASETS / "seg_cq500" / "seg_cq500.raw.zip"
+PACK = Path("/home/roku/orcd/pool/datasets/seg_cq500/seg_cq500.raw.zip")   # the pool pack, also when BRAIN_DATASETS points at a staged copy
 
 
 def tilted_cases() -> dict[str, str]:
