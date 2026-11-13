@@ -4,6 +4,8 @@
 # images and mark it DONE. Loops until the fetch has finished and nothing is left; before the 6 h limit it resubmits
 # itself (pending chunks continue in the next job). Owner-only files (umask 077).
 #   sbatch jobs/prep_mr_rate.sbatch
+#   SBATCH_EXTRA="-p mit_preemptable --gres=gpu:a100:1" sbatch -p mit_preemptable --gres=gpu:a100:1 --export=ALL jobs/prep_mr_rate.sbatch
+#   (B200 / RTX PRO 6000 Blackwell nodes: our torch build has no sm_100 / sm_120 kernels; pin the GPU type)
 #SBATCH -p mit_normal_gpu
 #SBATCH --job-name=prep-mr-rate
 #SBATCH -N 1
@@ -45,4 +47,4 @@ while true; do
   touch "$next/DONE"
 done
 echo "[prep-mr-rate] time budget reached $(date -Is); resubmitting"
-sbatch "${BRAIN_REPO:-/home/roku/brain-model}/jobs/prep_mr_rate.sbatch"
+sbatch ${SBATCH_EXTRA:-} --export=ALL "${BRAIN_REPO:-/home/roku/brain-model}/jobs/prep_mr_rate.sbatch"
