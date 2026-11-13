@@ -26,16 +26,23 @@ import build_literature as bl  # noqa: E402
 from datasets_figure import dataset_data  # noqa: E402
 
 DIAG = ROOT / "runs/diagnostics"
-NEW, NEW_EMA = "BQ-FISO", "BQ-FISO-EMA"
-NEW_NAME = "New run (R14-F + window bank)"
+NEW, NEW_EMA = "BQ-R18", "BQ-R18-EMA"
+NEW_NAME = "R18 (ViT-B)"
+PREV, PREV_EMA = "BQ-FISO", "BQ-FISO-EMA"          # full_iso_bank: the ViT-S chain R18 is compared against
 
 # ---- own-head test results of the new run (paired with R14-F on the same scans when available) ---------------------
 TE = {k: dict(v) for k, v in bp.TE.items()}
-_new = DIAG / "te_full_iso/test_eval_heads.csv"
-NEW_TE = _new.exists()
-if NEW_TE:
-    d = pd.read_csv(_new)
-    pairs = {"full_iso_bank/last": NEW, "full_iso_bank/last_ema": NEW_EMA, "r14f/last": "BQ-R14F"}
+# te_full_iso: full_iso_bank (+ EMA) and R14-F; te_r17 / te_r18: R17 cooldown and R18 (+ EMA), each against
+# full_iso_bank on the same scans (te_r18's full_iso_bank rows win: R18 and full_iso_bank on identical scans)
+TE_FILES = [("te_full_iso", {"full_iso_bank/last": PREV, "full_iso_bank/last_ema": PREV_EMA, "r14f/last": "BQ-R14F"}),
+            ("te_r17", {"r17_cool/last": "BQ-R17", "r17_cool/last_ema": "BQ-R17-EMA"}),
+            ("te_r18", {"r18/last": NEW, "r18/last_ema": NEW_EMA, "full_iso_bank/last": PREV})]
+NEW_TE = (DIAG / "te_r18/test_eval_heads.csv").exists()
+for sub, pairs in TE_FILES:
+    f = DIAG / sub / "test_eval_heads.csv"
+    if not f.exists():
+        continue
+    d = pd.read_csv(f)
     for r in d[(d.kind == "heads") & (d.metric != "fp")].itertuples():
         if r.model in pairs:
             TE.setdefault(r.task, {})[pairs[r.model]] = {"v": r.score, "lo": r.ci_lo, "hi": r.ci_hi, "n": int(r.n),
@@ -49,11 +56,14 @@ def last_val(run: str, step=None):
     h = [r for r in json.load(open(p))["history"] if isinstance(r, dict) and "val_score" in r]
     if step is not None:
         h = [r for r in h if r["step"] <= step]
-    return h[-1] if h else None
+    if not h:
+        return None
+    r = h[-1]                                     # the weight average's scores where the run kept one (as reported)
+    return {**r, **r["ema"], "step": r["step"]} if isinstance(r.get("ema"), dict) and "val_score" in r["ema"] else r
 
 
-VAL = {"R16 (stopped before cooldown)": last_val("r16"), NEW_NAME: last_val("full_iso_bank"),
-       "Native-CT twin (training)": last_val("full_ngeo_bank")}
+VAL = {"full_iso_bank (ViT-S)": last_val("full_iso_bank"), "R17 cooldown (ViT-B)": last_val("r17_cool"),
+       NEW_NAME: last_val("r18")}
 
 
 # ---- helpers -------------------------------------------------------------------------------------------------------
@@ -78,10 +88,9 @@ def table(cols, groups, getter, ncol=True):
 
 # ---- frozen benchmark ------------------------------------------------------------------------------------------------
 FCOLS = [("BQ-random", "Random init"), ("ct_fm", "CT-FM"), ("brainiac", "BrainIAC"), ("brainfm", "BrainFM"),
-         ("hlip", "HLIP"), ("BQ-R14F", "R14-F"), (NEW, "New run")]
+         ("hlip", "HLIP"), ("BQ-R14F", "R14-F"), (PREV, "full_iso_bank"), ("BQ-R17", "R17"), (NEW, "R18")]
 have_new_frozen = any(NEW in v for v in bp.S.values() if isinstance(v, dict))
-if not have_new_frozen:
-    FCOLS = FCOLS[:-1]
+FCOLS = [c for c in FCOLS if any(c[0] in v for v in bp.S.values() if isinstance(v, dict))]
 
 
 def frozen_get(key):
@@ -110,9 +119,10 @@ skill_row = ("<tr class=sum><td colspan=3>Mean skill over the tasks every model 
                        for k, _ in FCOLS) + "</tr>")
 
 # ---- trained tasks, own heads ----------------------------------------------------------------------------------------
-OCOLS = [("BQ-random", "Random init"), ("SPEC", "Single-task, scratch"), ("BQ-R14F", "R14-F")]
-if NEW_TE:
-    OCOLS += [(NEW, "New run"), (NEW_EMA, "New run, EMA")]
+OCOLS = [("BQ-random", "Random init"), ("SPEC", "Single-task, scratch"), ("BQ-R14F", "R14-F"),
+         (PREV, "full_iso_bank"), (PREV_EMA, "full_iso_bank, EMA"), ("BQ-R17", "R17"), (NEW, "R18"),
+         (NEW_EMA, "R18, EMA")]
+OCOLS = [c for c in OCOLS if c[0] == "SPEC" or any(c[0] in v for v in TE.values())]
 
 
 def own_get(key):
@@ -127,14 +137,14 @@ CHIL = {"ICH": .942, "IPH": .954, "IVH": .931, "SDH": .952, "SAH": .957, "EDH": 
 FROZEN_KEY = {"ICH": "cq500:ICH", "IPH": "cq500:IPH", "IVH": "cq500:IVH", "SDH": "cq500:SDH", "SAH": "cq500:SAH",
               "EDH": "cq500_edh"}
 zs = {}
-for m in ("BQ-R14F", "BQ-FISO", "BQ-FNGEO"):
+for m in ("BQ-R14F", "BQ-FISO", "BQ-R17", "BQ-R18"):
     p = DIAG / f"head_init_cq500/{m}_cv.csv"
     if p.exists():
         c = pd.read_csv(p)
         for r in c[c.arm == "zero_shot"].itertuples():
             zs.setdefault(r.target, {})[m] = {"v": r.auc, "lo": r.lo, "hi": r.hi, "n": int(r.n), "pos": int(r.pos)}
-zcols = [m for m in ("BQ-R14F", "BQ-FISO", "BQ-FNGEO") if any(m in v for v in zs.values())]
-zname = {"BQ-R14F": "R14-F", "BQ-FISO": "New run", "BQ-FNGEO": "Native-CT twin"}
+zcols = [m for m in ("BQ-R14F", "BQ-FISO", "BQ-R17", "BQ-R18") if any(m in v for v in zs.values())]
+zname = {"BQ-R14F": "R14-F", "BQ-FISO": "full_iso_bank", "BQ-R17": "R17", "BQ-R18": "R18"}
 zrows = []
 for t, label in [("ICH", "Any bleed"), ("IPH", "Intraparenchymal"), ("IVH", "Intraventricular"), ("SDH", "Subdural"),
                  ("SAH", "Subarachnoid"), ("EDH", "Epidural")]:
@@ -162,7 +172,8 @@ def best_readout(model_dir: str, task: str = "cq500"):
     return None
 
 
-BR = {name: best_readout(d) for name, d in (("New run", "full_iso_bank_last"), ("R14-F", "r14f_last"))}
+BR = {name: best_readout(d) for name, d in (("R14-F", "r14f_last"), ("full_iso_bank", "full_iso_bank_last"),
+                                            ("R17", "r17_cool_last"), ("R18", "r18_last"))}
 BR = {k: v for k, v in BR.items() if v}
 LAB = [("ICH", "Any bleed"), ("IPH", "Intraparenchymal"), ("IVH", "Intraventricular"), ("SDH", "Subdural"),
        ("SAH", "Subarachnoid"), ("CalvarialFracture", "Calvarial fracture"), ("MassEffect", "Mass effect"),
@@ -208,22 +219,21 @@ def picked(model_dir: str, task: str):
 
 labels_by_key = {k: l for _, ts in bp.G for k, l in ts}
 labels_by_key.update({"cq500_chronic_bleed": "CQ500 chronic bleed"})
-rtasks = sorted({p.parts[-4] for p in (ROOT / "runs/downstream").glob("*/full_iso_bank_last/*/metrics.json")}
-                | {p.parts[-4] for p in (ROOT / "runs/downstream").glob("*/r14f_last/*/metrics.json")})
+RDIRS = [("full_iso_bank", "full_iso_bank_last"), ("R17", "r17_cool_last"), ("R18", "r18_last")]
+rtasks = sorted({p.parts[-4] for _, d in RDIRS for p in (ROOT / "runs/downstream").glob(f"*/{d}/*/metrics.json")})
 rrows = []
 for t in rtasks:
-    a, b = picked("full_iso_bank_last", t), picked("r14f_last", t)
-    if not (a or b):
+    got = [picked(d, t) for _, d in RDIRS]
+    if not any(got):
         continue
-    old = (bp.S.get(t, {}) or {}).get("BQ-R14F")
-    metric = "R²" if (a or b)[3] == "r2" else "AUC"
-    fmt = lambda x: (f"<td class=num>{x[2]:.3f}<span class=pos> {HEADNAME.get(x[0], x[0])}</span></td>"  # noqa: E731
-                     if x else "<td class=num quiet>–</td>")
-    rrows.append(f"<tr><td>{labels_by_key.get(t, t)}</td><td>{metric}</td>{tcell(old, '')}{fmt(b)}{fmt(a)}</tr>")
-rtable = ('<div class="tablebox"><table class="narrow"><thead><tr><th>Task</th><th>Metric</th>'
-          '<th class=num>R14-F, pinned readout (before)</th><th class=num>R14-F, best readout</th>'
-          '<th class=num>New run, best readout</th></tr></thead><tbody>' + "".join(rrows) + "</tbody></table></div>"
-          ) if rrows else '<p class="pending">Readout runs in progress.</p>'
+    metric = "R²" if next(x for x in got if x)[3] == "r2" else "AUC"
+    best = max((x[2] for x in got if x), default=None)
+    fmt = lambda x: (f"<td class=\"num{' best' if x[2] == best else ''}\">{x[2]:.3f}"  # noqa: E731
+                     f"<span class=pos> {HEADNAME.get(x[0], x[0])}</span></td>" if x else "<td class=\"num quiet\">–</td>")
+    rrows.append(f"<tr><td>{labels_by_key.get(t, t)}</td><td>{metric}</td>{''.join(fmt(x) for x in got)}</tr>")
+rtable = ('<div class="tablebox"><table class="narrow"><thead><tr><th>Task</th><th>Metric</th>' + "".join(
+          f"<th class=num>{n}, best readout</th>" for n, _ in RDIRS) + '</tr></thead><tbody>' + "".join(rrows)
+          + "</tbody></table></div>") if rrows else '<p class="pending">Readout runs in progress.</p>'
 
 # ---- validation summary ----------------------------------------------------------------------------------------------
 vgroups = sorted({k for v in VAL.values() if v for k in v if k.startswith("val_group_")})
@@ -248,9 +258,10 @@ chart_notes = tpl[tpl.index('<div class="notes">'):tpl.index("<details>")]
 
 pending = []
 if not NEW_TE:
-    pending.append("the new run's own-head test evaluation (job te-full-iso)")
-if not have_new_frozen:
-    pending.append("the new run's frozen benchmark (job eval-full_iso_bank)")
+    pending.append("R18's own-head test evaluation")
+missing18 = sorted(k for k in bp.COMMON if NEW not in (bp.S.get(k, {}) or {}))
+if missing18:
+    pending.append("R18 frozen benchmark tasks not finished: " + ", ".join(missing18))
 pend = (f'<p class="pending">Still running, shown as soon as it lands (re-run the generator): {"; ".join(pending)}.</p>'
         if pending else "")
 
@@ -282,7 +293,7 @@ ol.refs {{ font-size: 13px; color: var(--soft); max-width: 90ch; padding-left: 2
 </style>
 
 <div class="page">
-  <h1>BrainQuery: results for the 9 November meeting</h1>
+  <h1>BrainQuery: results through R18 (13 November)</h1>
   <p class="date">Generated from the benchmark records, the test-split evaluations and the training logs</p>
   <nav class="toc"><a href="#data">Datasets</a><a href="#eval">How we evaluate</a><a href="#val">Training runs</a>
     <a href="#frozen">Frozen benchmark</a><a href="#own">Trained tasks</a><a href="#cq500">CQ500 zero-shot</a>
@@ -291,7 +302,7 @@ ol.refs {{ font-size: 13px; color: var(--soft); max-width: 90ch; padding-left: 2
     <div class="kpi"><b>{DS["tot"]["train"]:,}</b><span>training scans, {DS["tot"]["n_train_sets"]} cohorts</span></div>
     <div class="kpi"><b>{DS["tot"]["n_ext_sets"]}</b><span>external test cohorts ({DS["tot"]["ext"]:,} scans)</span></div>
     <div class="kpi"><b>{len(bp.COMMON)}</b><span>frozen-benchmark tasks shared by all models</span></div>
-    <div class="kpi"><b>{nv["val_score"]:.3f}</b><span>validation score, new run (R16: {VAL["R16 (stopped before cooldown)"]["val_score"]:.3f})</span></div>
+    <div class="kpi"><b>{nv["val_score"]:.3f}</b><span>validation score, R18 (full_iso_bank: {VAL["full_iso_bank (ViT-S)"]["val_score"]:.3f})</span></div>
   </div>
   {pend}
 
@@ -311,7 +322,7 @@ ol.refs {{ font-size: 13px; color: var(--soft); max-width: 90ch; padding-left: 2
   </div>
 
   <h2 id="val">Training runs: validation</h2>
-  <p class="sub">Same validation set (labels v12). The new run continues R14-F with R16's recipe plus the learned window bank on the re-encoded store; the native-CT twin reads CT at native geometry and is still training.</p>
+  <p class="sub">Same validation set (labels v12), averaged-weight (EMA) heads where the run kept them. full_iso_bank: ViT-S, the R10 → R14-F chain (self-supervised start) plus 30k steps. R17: ViT-B from scratch, 76.5k steps + a 10k-step cooldown. R18: R17 at 76.5k + 60k steps with all CT read at 1 mm (native-geometry stem removed), depthwise convolutions, left-right mirror mixing and the hemorrhage any-of loss.</p>
   {vtable}
 
   <h2 id="frozen">Frozen benchmark: new tasks, frozen encoders</h2>
@@ -326,7 +337,7 @@ ol.refs {{ font-size: 13px; color: var(--soft); max-width: 90ch; padding-left: 2
   {rtable}
 
   <h2 id="own">Trained tasks: the model's own heads on held-out test splits</h2>
-  <p class="sub">Single-task: the best of three from-scratch architectures per task family. R14-F and the new run are scored on the same scans when the new run's evaluation is in.</p>
+  <p class="sub">Single-task: the best of three from-scratch architectures per task family. full_iso_bank, R17 and R18 are scored on the same test scans; R14-F on the scans of its own evaluation.</p>
   {table(OCOLS, bp.IND, own_get)}
 
   <h2 id="cq500">CQ500, read by the RSNA heads with no CQ500 labels</h2>
@@ -349,15 +360,14 @@ ol.refs {{ font-size: 13px; color: var(--soft); max-width: 90ch; padding-left: 2
   <ol class="notes">
     <li>Test sets of 40-130 cases carry ±0.05-0.10 AUC intervals; small differences are noise.</li>
     <li>Published numbers use their own splits and often more labelled data or several sequences.</li>
-    <li>The new run changed several things at once (window bank, re-encoded store, batch 12, fresh optimizer); its gains over R16 cannot be attributed to one of them. R16 was stopped before its learning-rate cooldown.</li>
-    <li>The native-CT twin starts its CT stem from random weights; its CT groups are still catching up and a stem warm-up is planned before judging native geometry.</li>
+    <li>R14-F and full_iso_bank trained on the eight benchmark cohorts that R17 / R18 exclude (ABIDE, IXI, OASIS-1/2, Pixar, NKI, HBN, RSNA-ICA) for ~115k steps of their chain; only full_iso_bank's last 30k steps excluded them. Their IXI and Pixar age scores are therefore not clean transfers, and their anatomy-volume lead partly reflects that data.</li>
+    <li>R17 / R18 read CT through the 1 mm stem on the frozen benchmark; R17 trained CT at native geometry, so its CT rows understate it.</li>
+    <li>R18 is not a pure size test: it differs from full_iso_bank in size, initialisation (no self-supervised start) and training data.</li>
     <li>Single training seed per model.</li>
     <li>Brain-volume regression test rows (62 scans) give negative R² for every model, including R14-F in its earlier
       evaluation: that split is too narrow to measure; read volumes from validation. Tiny test sets (e.g. glioma IDH, 9
       cases) are shown but carry no weight.</li>
-    <li>Paired on the same test scans, over the 48 tasks both runs trained with at least 50 test scans, the new run
-      averages 0.828 against R14-F's 0.814 (17 wins, 6 losses at |Δ| &gt; 0.01). The CT skull / CSF masks were
-      redefined in labels v12, so R14-F is not scored on them.</li>
+    <li>The CT skull / CSF masks were redefined in labels v12, so R14-F is not scored on them.</li>
   </ol>
 </div>
 '''
