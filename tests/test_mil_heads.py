@@ -15,7 +15,8 @@ CPU = torch.device("cpu")
 REG = load_registry()
 MIL = ["hemorrhage_any", "hemorrhage_epidural", "hemorrhage_intraparenchymal", "hemorrhage_intraventricular",
        "hemorrhage_subarachnoid", "hemorrhage_subdural", "mri_mass", "mri_edema", "mri_infarct", "mri_wm_lesion",
-       "mri_postop", "mri_small_vessel_disease"]
+       "mri_postop", "mri_small_vessel_disease",
+       "cerebral_microbleeds", "cavernoma", "arachnoid_cyst", "pineal_cyst"]   # MR-RATE focal findings (2026-11-12)
 
 
 def _model(mil: bool):
