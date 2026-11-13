@@ -94,50 +94,61 @@ tasks:
     sources:
       - {source: family_class, map: {brats_gli: glioma, brats_men: meningioma, brats_ped: "pediatric brain tumor",
                                      fomo_yale_mets: "brain metastasis"}}
+      # MR-RATE clinical studies with exactly one tumour type in the report: the type is no longer the cohort
+      - {source: mr_rate, classes: {"Glioma": glioma, "Intracranial meningioma": meningioma,
+                                    "Metastatic malignant neoplasm to brain": "brain metastasis"}}
 
-  # ---------------------------------------------------------------- CT hemorrhage (RSNA, study level)
+  # ---------------------------------------------------------------- hemorrhage (RSNA head CT; MR-RATE brain MRI)
   # The six findings share one task token (``token``, used with model.task_tokens.share): one token answers them all,
-  # each read through its own offset.
+  # each read through its own offset. MR-RATE (2026-11-12, source mr_rate): the first MRI haematoma labels, from
+  # LLM-read clinical reports (37 report categories + NeuroVFM diagnoses ``nv:``); a study whose report is silent is a
+  # soft negative (0.05). MRI "haemorrhage" includes subacute / chronic blood products that CT reads as old.
   - id: hemorrhage_any
     pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions:
-      - "Is there any intracranial hemorrhage on this head CT?"
+      - "Is there any intracranial hemorrhage on this head CT or MRI?"
       - "Detect bleeding inside the skull."
-    sources: [{source: rsna, subtype: any}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
+    sources: [{source: rsna, subtype: any}, {source: const, families: [pedi_cranial_ct], value: 0},   # healthy children (v12)
+              {source: mr_rate, positive: ["Cerebral hemorrhage", "Subdural intracranial hemorrhage", "nv:intracranial_hemorrhage", "nv:subdural_hematoma", "nv:epidural_hematoma", "nv:intraparenchymal_hemorrhage", "nv:intraventricular_hemorrhage", "nv:traumatic_subarachnoid_hemorrhage", "nv:aneurysmal_subarachnoid_hemorrhage"]}]
   - id: hemorrhage_epidural
     pool: mil
     fine: true
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an epidural hematoma?", "Detect blood between the skull and the dura."]
-    sources: [{source: rsna, subtype: epidural}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
+    sources: [{source: rsna, subtype: epidural}, {source: const, families: [pedi_cranial_ct], value: 0},   # healthy children (v12)
+              {source: mr_rate, positive: ["nv:epidural_hematoma"]}]
   - id: hemorrhage_intraparenchymal
     pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there an intraparenchymal hemorrhage?", "Detect bleeding within the brain tissue."]
-    sources: [{source: rsna, subtype: intraparenchymal}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
+    sources: [{source: rsna, subtype: intraparenchymal}, {source: const, families: [pedi_cranial_ct], value: 0},   # healthy children (v12)
+              {source: mr_rate, positive: ["nv:intraparenchymal_hemorrhage"]}]
   - id: hemorrhage_intraventricular
     pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there intraventricular hemorrhage?", "Detect blood inside the ventricles."]
-    sources: [{source: rsna, subtype: intraventricular}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
+    sources: [{source: rsna, subtype: intraventricular}, {source: const, families: [pedi_cranial_ct], value: 0},   # healthy children (v12)
+              {source: mr_rate, positive: ["nv:intraventricular_hemorrhage"]}]
   - id: hemorrhage_subarachnoid
     pool: mil
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there subarachnoid hemorrhage?", "Detect blood in the subarachnoid space and sulci."]
-    sources: [{source: rsna, subtype: subarachnoid}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
+    sources: [{source: rsna, subtype: subarachnoid}, {source: const, families: [pedi_cranial_ct], value: 0},   # healthy children (v12)
+              {source: mr_rate, positive: ["nv:traumatic_subarachnoid_hemorrhage", "nv:aneurysmal_subarachnoid_hemorrhage"]}]
   - id: hemorrhage_subdural
     pool: mil
     fine: true
     token: hemorrhage_findings
     type: binary
     descriptions: ["Is there a subdural hematoma?", "Detect a crescent of blood between the dura and the brain."]
-    sources: [{source: rsna, subtype: subdural}, {source: const, families: [pedi_cranial_ct], value: 0}]   # healthy children (v12)
+    sources: [{source: rsna, subtype: subdural}, {source: const, families: [pedi_cranial_ct], value: 0},   # healthy children (v12)
+              {source: mr_rate, positive: ["Subdural intracranial hemorrhage", "nv:subdural_hematoma"]}]
 
   # ---------------------------------------------------------------- intracranial aneurysm (RSNA-ICA, 2026-10-29)
   # CTA, TOF MRA, T2 and post-contrast T1 series; train split only (the test split is the downstream
@@ -439,7 +450,8 @@ tasks:
     descriptions:
       - "Is this a lower-grade glioma rather than a glioblastoma?"
       - "Grade the glioma: WHO grade 2-3 versus grade 4."
-    sources: [{source: downstream, task: gli_lgg}]
+    sources: [{source: downstream, task: gli_lgg},
+              {source: mr_rate, positive: ["nv:low_grade_glioma"], negative: ["nv:high_grade_glioma"]}]
 
   - id: glioma_idh
     type: binary
@@ -513,7 +525,8 @@ tasks:
     descriptions:
       - "Are there chronic small-vessel ischemic white-matter changes?"
       - "Is there global chronic white matter ischemic change?"
-    sources: [{source: fastmri_findings, finding: mri_small_vessel_disease}]
+    sources: [{source: fastmri_findings, finding: mri_small_vessel_disease},
+              {source: mr_rate, positive: ["nv:small_vessel_ischemic_disease"]}]
   - id: mri_wm_lesion
     pool: mil
     group: radiology
@@ -523,7 +536,9 @@ tasks:
     descriptions:
       - "Are there focal white-matter lesions?"
       - "Find nonspecific white matter hyperintensities or lesions."
-    sources: [{source: fastmri_findings, finding: mri_wm_lesion}]
+    # MR-RATE "Gliosis" = the Turkish reports' "gliotik odak": nonspecific white-matter foci (check in the spot-check)
+    sources: [{source: fastmri_findings, finding: mri_wm_lesion},
+              {source: mr_rate, positive: ["Gliosis", "Demyelinating disease of central nervous system", "nv:multiple_sclerosis"]}]
   - id: mri_postop
     pool: mil
     group: radiology
@@ -533,7 +548,8 @@ tasks:
     descriptions:
       - "Has this patient had brain surgery or treatment (craniotomy, resection, post-treatment change)?"
       - "Are there post-surgical or post-treatment changes?"
-    sources: [{source: fastmri_findings, finding: mri_postop}]
+    sources: [{source: fastmri_findings, finding: mri_postop},
+              {source: mr_rate, positive: ["nv:postsurgical_changes", "nv:craniotomy_craniectomy", "nv:tumor_resection_cavity"]}]
   - id: mri_mass
     pool: mil
     group: radiology
@@ -542,7 +558,8 @@ tasks:
     descriptions:
       - "Is there an intra- or extra-axial mass?"
       - "Detect a mass lesion in or around the brain."
-    sources: [{source: fastmri_findings, finding: mri_mass}]
+    sources: [{source: fastmri_findings, finding: mri_mass},
+              {source: mr_rate, positive: ["nv:brain_tumor", "nv:brain_metastasis", "nv:meningioma", "nv:glioma", "Metastatic malignant neoplasm to brain", "Intracranial meningioma", "Glioma", "Schwannoma", "Pituitary adenoma"]}]
   - id: mri_edema
     pool: mil
     group: radiology
@@ -551,7 +568,8 @@ tasks:
     descriptions:
       - "Is there brain edema?"
       - "Detect vasogenic or cytotoxic edema."
-    sources: [{source: fastmri_findings, finding: mri_edema}]
+    sources: [{source: fastmri_findings, finding: mri_edema},
+              {source: mr_rate, positive: ["Cerebral edema", "nv:cerebral_edema"]}]
   - id: mri_enlarged_ventricles
     group: radiology
     token: radiology_findings
@@ -559,7 +577,8 @@ tasks:
     descriptions:
       - "Are the ventricles enlarged?"
       - "Is there ventriculomegaly on this MRI?"
-    sources: [{source: fastmri_findings, finding: mri_enlarged_ventricles}]
+    sources: [{source: fastmri_findings, finding: mri_enlarged_ventricles},
+              {source: mr_rate, positive: ["Ventriculomegaly", "nv:ventriculomegaly", "nv:obstructive_hydrocephalus", "nv:hydrocephalus_ex_vacuo"]}]
   - id: mri_infarct
     pool: mil
     group: radiology
@@ -569,7 +588,8 @@ tasks:
     descriptions:
       - "Is there an old infarct (lacune or encephalomalacia)?"
       - "Detect lacunar infarcts or encephalomalacia."
-    sources: [{source: fastmri_findings, finding: mri_infarct}]
+    sources: [{source: fastmri_findings, finding: mri_infarct},
+              {source: mr_rate, positive: ["Lacunar infarct", "Encephalomalacia", "nv:chronic_ischemic_stroke", "nv:lacunar_stroke"], unknown: ["Cerebral infarction", "Watershed infarct", "nv:acute_ischemic_stroke"]}]
   - id: mri_artifact
     group: radiology
     token: radiology_findings

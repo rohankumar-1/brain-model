@@ -1012,7 +1012,7 @@ def pick_val_volumes(labels: pd.DataFrame, volumes: pd.DataFrame, reg: Registry,
     for t, g in val.groupby("task"):
         g = g.sort_values("h")
         if types.get(t) == "binary":
-            pos, neg = g[g["value"] == 1], g[g["value"] == 0]
+            pos, neg = g[g["value"] > 0.5], g[g["value"] <= 0.5]     # soft negatives (MR-RATE 0.05) count
             k = min(len(pos), n // 2)
             g = pd.concat([pos.head(k), neg.head(n - k)])
         else:

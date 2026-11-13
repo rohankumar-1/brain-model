@@ -743,6 +743,14 @@ def synthrad(root: Path = SYNTHRAD_ROOT) -> list[Case]:
                 cases.append(Case(sec_ds, d.name, "ct", sec, ref=ref))
     return cases
 
+def mr_rate(root: Path = DATASETS / "mr_rate" / "nifti") -> list[Case]:
+    """MR-RATE head studies (Hugging Face Forithmus/MR-RATE, gated, CC BY-NC-SA 4.0; brain.prep.mr_rate): one series
+    per contrast, ``<root>/mr_rate_<contrast>/<study>-<contrast>.nii.gz`` as staged by ``brain.prep.mr_rate fetch``
+    (chunks in a home holding folder; BRAIN_DATASETS points at the chunk). Defaced at source, skull on."""
+    return [Case(d.name, p.name.removesuffix(".nii.gz"), "mri", p)
+            for d in sorted(Path(root).glob("mr_rate_*")) if d.is_dir() for p in sorted(d.glob("*.nii.gz"))]
+
+
 def pedi_cranial_ct(root: Path = DATASETS / "pedi_cranial_ct" / "nifti") -> list[Case]:
     """Pedi-Cranial-CT-Healthy (TCIA doi:10.7937/MQ33-AJ18, CC BY 4.0): 100 healthy children aged 0-9.9 years, one
     non-contrast head CT each (int16 HU), a pretraining-pool healthy CT cohort. ``<NNNNN>_CT.nii.gz`` as staged by

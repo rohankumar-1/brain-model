@@ -92,6 +92,8 @@ def dataset_family(dataset: str) -> str:
         return "rsna_ica"
     if ds.startswith("synthrad"):                # SynthRAD2023 brain: one patient's CT + MR (task 1) or CT + CBCT (task 2)
         return "synthrad"
+    if ds.startswith("mr_rate"):                 # MR-RATE: T1 / T1 post-contrast / T2 / FLAIR series of one study
+        return "mr_rate"
     return ds
 
 
@@ -260,6 +262,25 @@ def load_fastmri_patients(root: Path) -> None:
 
 
 _FASTMRI_PATIENTS: dict[str, str] = {}
+_MR_RATE: dict[str, tuple[str, str]] = {}
+
+
+def load_mr_rate_studies(root: Path) -> None:
+    """MR-RATE study -> (anonymised patient, official split) (``labels/mr_rate_studies.csv``, written by
+    ``brain.prep.mr_rate select``): a patient's studies and sequences share a dedup_key, and the release's
+    patient-level split is kept (``pin_official_splits``)."""
+    global _MR_RATE
+    f = root / "labels" / "mr_rate_studies.csv"
+    if f.exists():
+        t = pd.read_csv(f, dtype=str)
+        _MR_RATE = dict(zip(t["study_uid"], zip(t["patient_uid"], t["split"])))
+    else:
+        _MR_RATE = {}
+
+
+def mr_rate_study(case_id: str) -> str:
+    """``<study>-<contrast>`` -> study."""
+    return str(case_id).rsplit("-", 1)[0]
 
 
 def dedup_key(dataset: str, case_id: str) -> str:
@@ -281,6 +302,9 @@ def dedup_key(dataset: str, case_id: str) -> str:
         return f"{fam}:" + ida_subjects(fam).get(case_id, case_id)
     if fam == "fastmri":
         return "fastmri:" + _FASTMRI_PATIENTS.get(case_id, case_id)
+    if fam == "mr_rate":
+        study = mr_rate_study(case_id)
+        return "mr_rate:" + _MR_RATE.get(study, (study, ""))[0]
     if fam == "ixi":
         return "ixi:" + ixi_subject(case_id)
     if fam == "isles22":
@@ -450,10 +474,19 @@ def inherit_current_splits(vols: pd.DataFrame, old_vols: pd.DataFrame) -> pd.Dat
 
 
 def pin_official_splits(vols: pd.DataFrame) -> pd.DataFrame:
-    """AISD published a 52-case test set; do not let stratified assignment reshuffle it."""
+    """AISD published a 52-case test set and MR-RATE patient-level train / val / test splits; do not let stratified
+    assignment reshuffle them."""
     from brain.datasets.download_aisd import splits_for
     from brain.prep.sources import aisd_id
 
+    r = vols["dataset_family"].astype(str).eq("mr_rate")
+    if r.any():
+        vols = vols.copy()
+        split = [_MR_RATE.get(mr_rate_study(c), ("", ""))[1] for c in vols.loc[r, "case_id"].astype(str)]
+        if not all(split):
+            raise SystemExit("MR-RATE volumes without an official split: run brain.prep.mr_rate select first")
+        vols.loc[r, "split"] = split
+        print(f"[split] mr_rate official {pd.Series(split).value_counts().to_dict()}", flush=True)
     m = vols["dataset_family"].astype(str).eq("aisd")
     if not m.any():
         return vols
@@ -499,6 +532,7 @@ def build(root: Path, manifests: str = "manifest_*.jsonl", inherit_splits: Path 
     print(f"[bhsd] {len(bhsd)} RSNA studies with hemorrhage masks", flush=True)
     load_rsna_patients(root)
     load_fastmri_patients(root)
+    load_mr_rate_studies(root)
     man = load_ok_manifests(root, manifests)
     recs = []
     for r in man.itertuples(index=False):

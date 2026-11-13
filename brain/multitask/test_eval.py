@@ -40,6 +40,7 @@ def score(kind: str, y: np.ndarray, p: np.ndarray) -> float:
     if len(y) < 3:
         return float("nan")
     if kind == "binary":
+        y = (y > 0.5).astype(float)              # soft labels (MR-RATE "not reported" = 0.05) score as negatives
         return float(roc_auc_score(y, p)) if len(np.unique(y)) == 2 else float("nan")
     if kind == "regression":
         return float(r2_score(y, p))

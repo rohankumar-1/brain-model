@@ -90,6 +90,8 @@ def run_eval(model, loader, cfg: dict, reg, stats: dict, device, patch_xyz, amp:
         y, p = y[ok], p[ok]
         if len(y) < 2:
             continue
+        if task.type == "binary":
+            y = (y > 0.5).astype(float)          # soft labels (MR-RATE "not reported" = 0.05) score as negatives
         if task.type == "binary" and len(np.unique(y)) == 2:
             res[f"{task.id}_auc"] = float(roc_auc_score(y, p))
             skills.append((task.group, skill("auc", res[f"{task.id}_auc"])))

@@ -15,6 +15,8 @@ from the train rows of each trained task; live targets' from a random sample of 
 
 from __future__ import annotations
 
+import functools
+
 import argparse
 import json
 from concurrent.futures import ProcessPoolExecutor
@@ -206,6 +208,51 @@ def src_fastmri_findings(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     lab = pd.read_csv(f)[["case_id", s["finding"]]]
     rows = v[v["dataset"].astype(str).str.startswith("fastmri")].astype({"case_id": str}).merge(lab, on="case_id")
     return _rows(rows, rows[s["finding"]].astype(float))
+
+
+@functools.cache
+def _mr_rate_labels() -> pd.DataFrame:
+    from brain.prep.mr_rate import load_labels
+
+    return load_labels()
+
+
+MR_RATE_NEGATIVE = 0.05     # report silent on the finding: "not reported", not "read absent" (soft negative)
+
+
+def src_mr_rate(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """MR-RATE study labels on every stored series of the study (brain.prep.mr_rate; LLM-read reports, 37 report
+    categories by name, NeuroVFM diagnoses as ``nv:<name>``).
+
+    binary   ``positive``: columns any of which makes the study positive (1). ``negative``: columns that make it an
+             explicit negative (0; e.g. high-grade for the lower-grade glioma task); without them every study with no
+             positive column is a soft negative (``soft``, default MR_RATE_NEGATIVE: the report is silent, which is
+             weaker than a radiologist marking it absent). ``unknown``: columns that, with no positive, drop the study
+             (an acute infarct for the old-infarct task).
+    multiclass ``classes``: {column: class name}; studies with exactly one of the columns positive."""
+    lab = _mr_rate_labels()
+    rows = v[v["dataset_family"] == "mr_rate"].copy()
+    if rows.empty:
+        return _rows(rows, [])
+    rows["study_uid"] = rows["case_id"].astype(str).str.rsplit("-", n=1).str[0]
+    rows = rows.merge(lab, on="study_uid", how="inner")
+    if task.type == "multiclass":
+        cls = {c: i for i, c in enumerate(task.classes)}
+        cols = list(s["classes"])
+        hit = rows[cols].fillna(0).to_numpy() == 1
+        one = hit.sum(1) == 1
+        rows = rows[one]
+        return _rows(rows, [cls[s["classes"][cols[j]]] for j in hit[one].argmax(1)])
+    pos = rows[list(s["positive"])].fillna(0).eq(1).any(axis=1)
+    if s.get("negative"):
+        neg = rows[list(s["negative"])].fillna(0).eq(1).any(axis=1) & ~pos
+        keep = pos | neg
+        return _rows(rows[keep], np.where(pos[keep], 1.0, 0.0))
+    have = rows[list(s["positive"])].notna().any(axis=1)        # the study is in a table that has the columns
+    unk = rows[list(s["unknown"])].fillna(0).eq(1).any(axis=1) if s.get("unknown") \
+        else pd.Series(False, index=rows.index)
+    keep = have & (pos | ~unk)
+    return _rows(rows[keep], np.where(pos[keep], 1.0, float(s.get("soft", MR_RATE_NEGATIVE))))
 
 
 def src_family_class(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
@@ -603,7 +650,7 @@ def src_synth(v: pd.DataFrame, task: Task, s: dict, workers: int = 8, cache_dir:
 
 SOURCES = {
     "ssl_recon": src_ssl_recon, "synth": src_synth,
-    "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings,
+    "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings, "mr_rate": src_mr_rate,
     "family_class": src_family_class,
     "brain_volume": src_brain_volume, "brain_mask": src_brain_mask, "live": src_live, "hu": src_hu, "const": src_const,
     "brats_seg": src_brats_seg, "brats_seg_volume": src_brats_seg_volume, "mask_column": src_mask_column, "store_mask": src_store_mask,

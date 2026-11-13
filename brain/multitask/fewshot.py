@@ -116,7 +116,8 @@ def draw(pool: pd.DataFrame, k: int, seed: int, kind: str) -> list[str]:
         return pool["volume_id"].tolist()
     strata = None
     if kind in ("binary", "multiclass"):
-        strata = pool["value"].astype(int).to_numpy()
+        strata = (pool["value"].astype(float) > 0.5).astype(int).to_numpy() if kind == "binary" \
+            else pool["value"].astype(int).to_numpy()
     elif kind == "regression":
         strata = pd.qcut(pool["value"].astype(float), q=min(5, max(1, k // 4)), labels=False, duplicates="drop").to_numpy()
     try:
@@ -139,6 +140,8 @@ def linear_probe(kind: str, xtr, ytr, xte, yte) -> float | None:
         return float(r2_score(yte, RidgeCV(alphas=np.logspace(-2, 4, 13)).fit(xtr, ytr).predict(xte)))
     if len(np.unique(ytr)) < 2:
         return None
+    if kind == "binary":                         # soft labels (MR-RATE "not reported" = 0.05) are negatives
+        ytr, yte = (np.asarray(ytr) > 0.5).astype(int), (np.asarray(yte) > 0.5).astype(int)
     clf = LogisticRegression(C=0.1, max_iter=2000).fit(xtr, ytr.astype(int))
     if kind == "binary":
         return float(roc_auc_score(yte, clf.predict_proba(xte)[:, 1])) if len(np.unique(yte)) == 2 else None

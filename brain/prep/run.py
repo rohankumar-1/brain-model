@@ -52,7 +52,8 @@ def discover(names: list[str]) -> list[sources.Case]:
              "msd": sources.msd, "ucsf_pdgm": sources.ucsf_pdgm,
              "upenn_gbm": sources.upenn_gbm, "adni": lambda: sources.ida("adni"),
              "ppmi": lambda: sources.ida("ppmi"), "synthrad": sources.synthrad,
-             "fastmri": sources.fastmri, "pedi_cranial_ct": sources.pedi_cranial_ct}  # SinoCT dropped: ~36 mm slabs that cannot be placed in a whole-head template
+             "fastmri": sources.fastmri, "pedi_cranial_ct": sources.pedi_cranial_ct,
+             "mr_rate": sources.mr_rate}  # SinoCT dropped: ~36 mm slabs that cannot be placed in a whole-head template
     return sorted((c for n in names for c in found[n]()), key=lambda c: (c.dataset, c.case_id))
 
 
