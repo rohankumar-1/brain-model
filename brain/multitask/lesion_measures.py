@@ -172,3 +172,81 @@ def ventricles_synthseg(synthseg_mask: np.ndarray) -> np.ndarray:
     from brain.prep.synthseg import LABELS
 
     return np.isin(LABELS[np.asarray(synthseg_mask).astype(int)], LATERAL_VENTRICLES)
+
+
+# ------------------------------------------------------------------------------------------------ location (own anatomy)
+# The template priors place convexity blood "hemispheric" (EDH / SDH 87% inside the intracranial prior) and miss most
+# ventricular blood (IVH 19%): heads differ more than the priors allow at the brain surface and the ventricles. On
+# head CT the scan itself shows both: blood against the inner table of the skull is extra-axial, and the ventricles
+# are the CSF-density spaces inside the (generously dilated) ventricle prior.
+# NOT REGISTERED as a task (2026-11-12, analysis/lesion_location_validate.py on 190 BHSD scans, bar >= 80% per class):
+# extra-axial by >= 40% of the blood within 10 mm of bone catches EDH 87% / SDH 81% but calls 22% of IPH extra-axial;
+# intraventricular by >= 20% within 4 mm of deep CSF catches 77% of IVH at 15% of IPH (prior-based: AUC 0.71). The
+# component-touch rule fails outright (98% of IPH in components reaching bone). Kept for analysis only.
+BONE_HU = 300.0
+SKULL_TOUCH_MM = 3.0                # a lesion component reaching within this distance of bone lies on the inner table
+VENT_REACH_MM = 4                   # ventricle prior dilated by this much before looking for CSF in it
+VENT_GROW_MM = 2                    # own ventricles grown by this much (blood layering against CSF)
+
+
+def ct_anatomy(hu: np.ndarray, brain: np.ndarray, priors: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Head-CT anatomy of one scan: distance to bone (mm) and the scan's own ventricles."""
+    from scipy.ndimage import binary_dilation, distance_transform_edt, maximum_filter
+
+    bone = hu >= BONE_HU
+    dist_bone = distance_transform_edt(~bone).astype(np.float32) if bone.any() \
+        else np.full(hu.shape, np.inf, np.float32)
+    reg = maximum_filter(priors["ventricles"], size=2 * VENT_REACH_MM + 1)
+    csf = reg & brain & (hu > CT_CSF_HU[0]) & (hu < CT_CSF_HU[1])
+    vent = binary_dilation(csf, iterations=VENT_GROW_MM) & reg
+    deep_csf = brain & (dist_bone > 15) & (hu > CT_CSF_HU[0]) & (hu < CT_CSF_HU[1])   # CSF away from the convexity
+    dist_csf = distance_transform_edt(~deep_csf).astype(np.float32) if deep_csf.any() \
+        else np.full(hu.shape, np.inf, np.float32)
+    dist_vprior = distance_transform_edt(~priors["ventricles"]).astype(np.float32)
+    return {"dist_bone": dist_bone, "vent": vent, "dist_csf": dist_csf, "dist_vprior": dist_vprior}
+
+
+def _touching(mask: np.ndarray, near: np.ndarray) -> np.ndarray:
+    """Voxels of ``mask`` in connected components that reach ``near``."""
+    from scipy.ndimage import label
+
+    lab, n = label(mask, structure=np.ones((3, 3, 3), bool))
+    if not n:
+        return np.zeros_like(mask)
+    hit = np.unique(lab[near & mask])
+    return np.isin(lab, hit[hit > 0])
+
+
+def location_features(mask: np.ndarray, anat: dict[str, np.ndarray], priors: dict[str, np.ndarray]) -> dict[str, float]:
+    n = max(int(mask.sum()), 1)
+    d = anat["dist_bone"][mask]
+    f = {f"share_bone{k}": float((d <= k).sum() / n) for k in (3, 6, 10)}
+    f["share_touch"] = float(_touching(mask, anat["dist_bone"] <= SKULL_TOUCH_MM).sum() / n)
+    f["share_ventown"] = float((mask & anat["vent"]).sum() / n)
+    for k in (2, 4):
+        f[f"share_csf{k}"] = float((anat["dist_csf"][mask] <= k).sum() / n)
+    for k in (5, 10, 15):
+        f[f"share_vprior{k}"] = float((anat["dist_vprior"][mask] <= k).sum() / n)
+    f["share_ventprior"] = float((mask & priors["ventricles"]).sum() / n)
+    f["share_deep"] = float((mask & priors["deep_grey"]).sum() / n)
+    f["share_infra"] = float((mask & priors["posterior_fossa"]).sum() / n)
+    return f
+
+
+def location_ml_ct(mask: np.ndarray, anat: dict[str, np.ndarray], priors: dict[str, np.ndarray]) -> dict[str, float]:
+    """Millilitres per ``LOCATION_CLASSES`` compartment, voxels assigned in priority order: extra-axial (components
+    on the inner table), intraventricular (own ventricles), infratentorial, deep grey (priors), else hemispheric."""
+    rest = mask.copy()
+    out = {}
+    for name, region in (("extra-axial", _touching(mask, anat["dist_bone"] <= SKULL_TOUCH_MM)),
+                         ("intraventricular", anat["vent"]), ("infratentorial", priors["posterior_fossa"]),
+                         ("deep grey matter", priors["deep_grey"])):
+        inside = rest & region
+        out[f"{name}_ml"] = float(inside.sum() / 1000.0)
+        rest &= ~inside
+    out["hemispheric_ml"] = float(rest.sum() / 1000.0)
+    return out
+
+
+def location_class_ct(mask: np.ndarray, anat: dict[str, np.ndarray], priors: dict[str, np.ndarray]) -> int:
+    return location_class(location_ml_ct(mask, anat, priors))
