@@ -27,6 +27,7 @@ tasks:
       - {source: fomo_participants, field: age,
          families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian,
                     fomo_infant, fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_abd, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland, pedi_cranial_ct]}
+      - {source: mr_rate_meta, field: age}            # MR-RATE clinical patients, 13-102 years (DICOM PatientAge)
       - {source: downstream, task: ms3seg_age, use: eval}
       - {source: downstream, task: oasis1_age, use: eval}
       - {source: downstream, task: ixi_age, use: eval}
@@ -40,6 +41,7 @@ tasks:
       - {source: fomo_participants, field: sex, map: {M: 1, F: 0, m: 1, f: 0, male: 1, female: 0},
          families: [fomo_hbn, fomo_nki, fomo_corr, fomo_brainlat, fomo_yale_mets, fomo_nigerian,
                     fomo_slim, fomo_wand, fomo_wayne, fomo_yale_highres, fomo_chbmp, fomo_hbnssi, fomo_acpi, fomo_ageility, fomo_cunmet, fomo_taowu, fomo_cleveland, fomo_ahead, fomo_beijing, pedi_cranial_ct]}
+      - {source: mr_rate_meta, field: sex, map: {M: 1, F: 0}}
 
   # ---------------------------------------------------------------- diagnosis
   - id: neuro_diagnosis
@@ -838,6 +840,95 @@ tasks:
       - "Is there mass effect compressing or displacing brain structures?"
       - "Do sulcal effacement, ventricular compression or herniation indicate mass effect?"
     sources: [{source: mr_rate, positive: ["nv:brain_mass_effect", "nv:brain_midline_shift", "nv:brain_herniation"]}]
+
+
+  # ---------------------------------------------------------------- MR-RATE report findings without an earlier task
+  # (2026-11-12): structural and incidental findings read from LLM-structured clinical reports; MRI only, one shared
+  # token; report-silent studies are soft negatives (0.05). Kept: >= ~150 training and >= ~20 test studies in the
+  # selected subset. Group mri_findings (weight it in the run config).
+  - id: cerebral_atrophy
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    descriptions: ["Is there cerebral atrophy?", "Is the brain volume loss beyond what is expected for age?"]
+    sources: [{source: mr_rate, positive: ["Cerebral atrophy", "nv:cerebral_atrophy"]}]
+  - id: cerebellar_atrophy
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    descriptions: ["Is there cerebellar atrophy or degeneration?", "Are the cerebellar folia and volume reduced?"]
+    sources: [{source: mr_rate, positive: ["Cerebellar degeneration"]}]
+  - id: cerebral_microbleeds
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    pool: mil
+    fine: true
+    descriptions: ["Are there cerebral microbleeds?", "Find small foci of old blood products (microhaemorrhages)."]
+    sources: [{source: mr_rate, positive: ["Silent micro-hemorrhage of brain"]}]
+  - id: cavernoma
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    pool: mil
+    fine: true
+    descriptions: ["Is there a cavernous malformation (cavernoma)?", "Find a cavernous haemangioma."]
+    sources: [{source: mr_rate, positive: ["Cavernous hemangioma", "nv:cavernous_malformation_cavernoma"]}]
+  - id: arachnoid_cyst
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    pool: mil
+    descriptions: ["Is there an arachnoid cyst?", "Find a CSF-filled extra-axial cyst."]
+    sources: [{source: mr_rate, positive: ["Arachnoid cyst", "nv:arachnoid_cyst"]}]
+  - id: pineal_cyst
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    pool: mil
+    fine: true
+    descriptions: ["Is there a pineal cyst?", "Is the pineal gland cystic?"]
+    sources: [{source: mr_rate, positive: ["Cyst of pineal gland", "nv:pineal_cyst"]}]
+  - id: mega_cisterna_magna
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    descriptions: ["Is there a mega cisterna magna?", "Is the posterior fossa CSF space enlarged?"]
+    sources: [{source: mr_rate, positive: ["Mega cisterna magna", "nv:mega_cisterna_magna"]}]
+  - id: cavum_septum_pellucidum
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    fine: true
+    descriptions: ["Is there a cavum septum pellucidum?", "Is there a CSF space between the leaves of the septum pellucidum?"]
+    sources: [{source: mr_rate, positive: ["Structure of cave of septum pellucidum", "nv:cavum_septum_pellucidum"]}]
+  - id: empty_sella
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    fine: true
+    descriptions: ["Is there an empty or partially empty sella?", "Is the pituitary fossa filled with CSF?"]
+    sources: [{source: mr_rate, positive: ["Empty sella syndrome"]}]
+  - id: chiari_malformation
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    descriptions: ["Is there a Chiari malformation?", "Do the cerebellar tonsils descend below the foramen magnum?"]
+    sources: [{source: mr_rate, positive: ["Chiari malformation", "nv:chiari_malformation"]}]
+  - id: mastoiditis
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    needs_skull: true
+    descriptions: ["Is there mastoid fluid or mastoiditis?", "Are the mastoid air cells opacified?"]
+    sources: [{source: mr_rate, positive: ["Mastoiditis", "Chronic mastoiditis"]}]
+  - id: skull_hyperostosis
+    group: mri_findings
+    token: mri_findings
+    type: binary
+    needs_skull: true
+    descriptions: ["Is there hyperostosis of the skull (e.g. frontalis interna)?", "Is the inner table of the skull thickened?"]
+    sources: [{source: mr_rate, positive: ["Hyperostosis of skull"]}]
 
   # ================================================================ held out (never trained; few-shot evaluation)
   - id: cq500_hemorrhage

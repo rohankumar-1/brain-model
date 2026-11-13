@@ -255,6 +255,38 @@ def src_mr_rate(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     return _rows(rows[keep], np.where(pos[keep], 1.0, float(s.get("soft", MR_RATE_NEGATIVE))))
 
 
+def dicom_age_years(v) -> float:
+    """DICOM AgeString (``045Y``, ``006M``, ``010W``, ``003D``) -> years; NaN when unparsable."""
+    import re
+
+    g = re.fullmatch(r"(\d+)([YMWD])", str(v).strip())
+    return int(g.group(1)) / {"Y": 1, "M": 12, "W": 52.18, "D": 365.25}[g.group(2)] if g else float("nan")
+
+
+@functools.cache
+def _mr_rate_meta() -> pd.DataFrame:
+    """study_uid -> age (years, median over the study's series; DICOM PatientAge ``045Y`` / ``006M`` / ...) and sex
+    (the study's most common PatientSex), from META/series_index.parquet (brain.prep.mr_rate)."""
+    from brain.prep.mr_rate import META
+
+    m = pd.read_parquet(META / "series_index.parquet", columns=["study_uid", "Patient'sAge", "Patient'sSex"])
+    m["age"] = m["Patient'sAge"].map(dicom_age_years)
+    sex = m.dropna(subset=["Patient'sSex"]).groupby("study_uid")["Patient'sSex"].agg(lambda x: x.mode().iloc[0])
+    return pd.DataFrame({"age": m.groupby("study_uid")["age"].median(), "sex": sex}).reset_index()
+
+
+def src_mr_rate_meta(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
+    """MR-RATE age / sex (``field``) on every stored series of the study; sex through ``map`` (M -> 1)."""
+    rows = v[v["dataset_family"] == "mr_rate"].copy()
+    if rows.empty:
+        return _rows(rows, [])
+    rows["study_uid"] = rows["case_id"].astype(str).str.rsplit("-", n=1).str[0]
+    rows = rows.merge(_mr_rate_meta(), on="study_uid", how="inner")
+    val = rows[s["field"]].map(s["map"]) if s.get("map") else pd.to_numeric(rows[s["field"]], errors="coerce")
+    ok = val.notna().to_numpy()
+    return _rows(rows[ok], val[ok].astype(float))
+
+
 def src_family_class(v: pd.DataFrame, task: Task, s: dict) -> pd.DataFrame:
     cls = {c: i for i, c in enumerate(task.classes)}
     rows = v[v["dataset_family"].isin(list(s["map"]))]
@@ -824,7 +856,7 @@ def src_midline_shift(v: pd.DataFrame, task: Task, s: dict, workers: int = 8) ->
 
 SOURCES = {
     "ssl_recon": src_ssl_recon, "synth": src_synth,
-    "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings, "mr_rate": src_mr_rate,
+    "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings, "mr_rate": src_mr_rate, "mr_rate_meta": src_mr_rate_meta,
     "family_class": src_family_class,
     "brain_volume": src_brain_volume, "brain_mask": src_brain_mask, "live": src_live, "hu": src_hu, "const": src_const,
     "brats_seg": src_brats_seg, "brats_seg_volume": src_brats_seg_volume, "mask_column": src_mask_column, "store_mask": src_store_mask,

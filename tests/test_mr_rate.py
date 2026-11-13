@@ -112,3 +112,17 @@ def test_soft_binary_labels_score_as_negatives():
     y = np.array([1.0, 0.05, 0.05, 1.0, 0.05])
     p = np.array([0.9, 0.1, 0.2, 0.8, 0.3])
     assert score("binary", y, p) == pytest.approx(1.0)
+
+
+def test_mr_rate_meta_age_sex(monkeypatch):
+    from brain.multitask import labels as L
+
+    assert L.dicom_age_years("045Y") == 45 and L.dicom_age_years("006M") == 0.5 and np.isnan(L.dicom_age_years("x"))
+    monkeypatch.setattr(L, "_mr_rate_meta", lambda: pd.DataFrame({"study_uid": ["s1", "s2"], "age": [45.0, np.nan],
+                                                                  "sex": ["M", "F"]}))
+    v = pd.DataFrame({"case_id": ["s1-t1w", "s2-flair", "s3-t2w"], "dataset_family": "mr_rate"})
+    v["volume_id"] = "x:" + v.case_id
+    age = L.src_mr_rate_meta(v, Task("age", "regression", ["?"], []), {"field": "age"})
+    assert age.value.tolist() == [45.0]
+    sex = L.src_mr_rate_meta(v, Task("sex", "binary", ["?"], []), {"field": "sex", "map": {"M": 1, "F": 0}})
+    assert sex.value.tolist() == [1.0, 0.0]
