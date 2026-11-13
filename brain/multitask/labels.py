@@ -601,6 +601,180 @@ def src_synth(v: pd.DataFrame, task: Task, s: dict, workers: int = 8, cache_dir:
     return _rows(pairs, np.nan, ref.to_numpy())
 
 
+# ------------------------------------------------------------------------------------------------ mask-derived lesion
+# labels (2026-11-12, brain.multitask.lesion_measures): side, compartment, volume of a lesion mask; midline shift
+LESION_DIR = STORE / "labels" / "lesion_measures"
+
+
+def lesion_priors():
+    """Compartment priors on the store grid (IXI T1 SynthSeg, built once; ``lesion_measures.compartment_priors``)."""
+    from brain.downstream.tasks import LABEL_SOURCES
+    from brain.multitask import lesion_measures as LM
+
+    path = LABEL_SOURCES / "priors" / "ixi_synthseg_compartments.npz"
+    if path.exists():
+        return LM.compartment_priors(path)
+    v = pd.read_csv(DEFAULT_VOLUMES, low_memory=False, usecols=["dataset", "folder", "case_id"])
+    ixi = v[v["dataset"] == "ixi_t1"].sample(60, random_state=0)
+    return LM.compartment_priors(path, [store.path_for(STORE, f, str(c), "synthseg")
+                                        for f, c in zip(ixi["folder"], ixi["case_id"])])
+
+
+def _lesion_frame(v: pd.DataFrame, s: dict) -> pd.DataFrame:
+    """Volumes of ``families`` with their lesion mask (``mask``: ``{column: <volumes column>}``, ``brats`` (the
+    subject's ``.seg.zip``) or ``{store: <name>}`` (``<case>.<name>.zip``)), plus ``key`` = ``<mask>|<ids>`` (the
+    cache key: one computation per mask and id set, shared by the subject's sequences)."""
+    m = s["mask"]
+    if m == "brats":
+        rows = _brats_frame(v, s)
+    else:
+        rows = v[v["dataset_family"].isin(list(s["families"]))].copy()
+        if "column" in m:
+            rows = rows[rows[m["column"]].notna() & (rows[m["column"]].astype(str) != "")]
+            rows["mask"] = rows[m["column"]].astype(str)
+        else:
+            rows["mask"] = [store.path_for(Path(""), f, c, m["store"]).as_posix()
+                            for f, c in zip(rows["folder"], rows["case_id"].astype(str))]
+            rows = rows[[(STORE / p).exists() for p in rows["mask"]]]
+    rows = rows.copy()
+    rows["key"] = rows["mask"] + "|" + _ids(s) + (f"|ign{','.join(map(str, s['ignore']))}" if s.get("ignore") else "")
+    return rows
+
+
+def _lesion_one(args) -> dict:
+    from brain.multitask import lesion_measures as LM
+
+    key, image_path, mask, ids, ignore = args
+    try:
+        brain = store.read_image(STORE / image_path, "brain") > 0
+        m = np.asarray(store.read_image(STORE / mask, "mask"))
+        out = {"key": key, **LM.lesion_stats(np.isin(m, ids), brain, _LESION_PRIORS)}
+        out["has_ignore"] = bool(np.isin(m, ignore).any()) if ignore else False
+        return out
+    except Exception as e:   # noqa: BLE001  one unreadable mask should not stop the build
+        return {"key": key, "error": str(e)[:200]}
+
+
+_LESION_PRIORS: dict = {}
+
+
+def _lesion_init() -> None:
+    _LESION_PRIORS.update(lesion_priors())
+
+
+def lesion_stats_table(rows: pd.DataFrame, s: dict, workers: int = 8) -> pd.DataFrame:
+    """``lesion_measures.lesion_stats`` per ``key`` of ``rows`` (``_lesion_frame``), cached in
+    ``labels/lesion_measures/stats.parquet`` (new keys computed and appended)."""
+    path = LESION_DIR / "stats.parquet"
+    have = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=["key"])
+    todo = rows.drop_duplicates("key")
+    todo = todo[~todo["key"].isin(set(have["key"]))]
+    if len(todo):
+        ids, ign = [int(i) for i in s["ids"]], [int(i) for i in s.get("ignore") or []]
+        args = [(k, ip, mk, ids, ign) for k, ip, mk in zip(todo["key"], todo["image_path"], todo["mask"])]
+        lesion_priors()                                    # built once here, before the workers read it
+        with ProcessPoolExecutor(workers, initializer=_lesion_init) as ex:
+            new = pd.DataFrame(list(ex.map(_lesion_one, args, chunksize=4)))
+        print(f"[labels] lesion stats: {len(new)} masks computed "
+              f"({int(new['error'].notna().sum()) if 'error' in new else 0} errors)", flush=True)
+        have = pd.concat([have, new], ignore_index=True)
+        LESION_DIR.mkdir(parents=True, exist_ok=True)
+        have.to_parquet(path, index=False)
+    return have.drop_duplicates("key", keep="last").set_index("key")
+
+
+def src_lesion(v: pd.DataFrame, task: Task, s: dict, workers: int = 8) -> pd.DataFrame:
+    """A measure of a lesion mask (``lesion_measures``): ``measure`` = ``side`` (class index into
+    ``lesion_measures.SIDE_CLASSES``), ``location`` (``LOCATION_CLASSES``: the compartment holding most of it),
+    ``volume`` (log(1 + ml)), ``count`` (foci, capped at ``cap``). Masks with no target voxel are skipped (no side / place); ``complete`` drops masks
+    carrying ignored voxels (``ignore``: RSNA pseudo-masks of studies with unsegmented subdural / subarachnoid /
+    epidural blood, whose side and volume the mask does not capture). ``negatives: rsna`` (volume only) adds RSNA
+    studies read bleed-free with volume 0, ``per_positive`` x the training rows (stable hash; ``eval_n`` per val /
+    test split)."""
+    from brain.multitask import lesion_measures as LM
+
+    rows = _lesion_frame(v, s)
+    st = lesion_stats_table(rows, s, workers)
+    rows = rows[rows["key"].isin(st.index)]
+    st = st.loc[rows["key"]]
+    ok = (st["ml"].fillna(0) > 0).to_numpy().copy()
+    if s.get("complete"):
+        ok = ok & ~st["has_ignore"].fillna(False).astype(bool).to_numpy()
+    rows, st = rows[ok], st[ok]
+    meas = s["measure"]
+    if meas == "side":
+        val = [LM.side_class(l, r) for l, r in zip(st["left_ml"], st["right_ml"])]
+    elif meas == "location":
+        val = [LM.location_class(r) for r in st.to_dict("records")]
+    elif meas == "volume":
+        val = np.log1p(st["ml"].to_numpy(np.float64))
+    elif meas == "count":                 # foci >= lesion_measures.MIN_COMPONENT_ML, capped (a count past 5 is noise)
+        val = np.minimum(st["components"].to_numpy(np.float64), float(s.get("cap", 5)))
+    else:
+        raise ValueError(f"lesion source: unknown measure {meas}")
+    out = _rows(rows, val)
+    out = out[out["value"] >= 0]
+    if s.get("negatives") == "rsna" and meas == "volume":
+        lab = build_rsna_volume_labels()
+        neg_ids = set(lab.loc[lab["any"] == 0, "volume_id"].astype(str))
+        neg = v[(v["dataset_family"] == "rsna_ich") & v["volume_id"].astype(str).isin(neg_ids)]
+        neg = _rows(neg, 0.0).assign(split=neg["split"].astype(str).to_numpy())
+        n_pos = int(v.set_index("volume_id").reindex(out["volume_id"])["split"].eq("train").sum())
+        neg = empty_cap(neg, n_pos, s)
+        out = pd.concat([out, neg.drop(columns="split")], ignore_index=True)
+    return out
+
+
+def _midline_one(args) -> dict:
+    from brain.multitask import lesion_measures as LM
+    from brain.multitask.measures import head_shell, symmetry_plane
+
+    vid, image_path, modality, seg_path, ref = args
+    try:
+        a = store.read_many(STORE / image_path, ("image", "brain"))
+        brain = store.squeeze_channel(a["brain"]) > 0
+        img = store.squeeze_channel(a["image"]).astype(np.float32)
+        vent = LM.ventricles_ct(img, brain) if seg_path is None else \
+            LM.ventricles_synthseg(store.read_image(STORE / seg_path, "mask"))
+        x0 = LM.GRID_MID_X
+        if ref == "plane":
+            x0 = symmetry_plane(head_shell(img, modality)) or LM.GRID_MID_X
+        return {"volume_id": vid, **LM.midline_shift(vent, _LESION_PRIORS, x0)}
+    except Exception as e:   # noqa: BLE001
+        return {"volume_id": vid, "error": str(e)[:200]}
+
+
+def src_midline_shift(v: pd.DataFrame, task: Task, s: dict, workers: int = 8) -> pd.DataFrame:
+    """Midline shift (mm, unsigned: flip-invariant) of every non-contrast head CT of ``ct_families`` (ventricles from
+    CSF density) and every MRI with a QC-passed SynthSeg (lateral ventricles from SynthSeg), measured from the
+    reference ``ref`` (``grid``: the registered grid's midsagittal plane; ``plane``: the skull / head-outline symmetry
+    plane, ``measures.symmetry_plane``); cached in ``labels/lesion_measures/midline_<ref>.parquet``. With
+    ``threshold`` (``refine``) it becomes the binary shift task."""
+    ref = s.get("ref", "grid")
+    ct = v[v["dataset_family"].isin(list(s.get("ct_families") or [])) & v["modality"].astype(str).str.lower().eq("ct")]
+    mri, _ = _synthseg_rows(v[v["modality"].astype(str).str.lower().eq("mri")], structure="ventricles")
+    path = LESION_DIR / f"midline_{ref}.parquet"
+    have = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=["volume_id"])
+    done = set(have["volume_id"].astype(str))
+    args = [(str(r.volume_id), r.image_path, "ct", None, ref) for r in ct.itertuples() if str(r.volume_id) not in done]
+    args += [(str(r.volume_id), r.image_path, "mri",
+              store.path_for(Path(""), r.folder, str(r.case_id), "synthseg").as_posix(), ref)
+             for r in mri.itertuples() if str(r.volume_id) not in done]
+    if args:
+        lesion_priors()
+        with ProcessPoolExecutor(workers, initializer=_lesion_init) as ex:
+            new = pd.DataFrame(list(ex.map(_midline_one, args, chunksize=8)))
+        print(f"[labels] midline shift ({ref}): {len(new)} scans measured "
+              f"({int(new['error'].notna().sum()) if 'error' in new else 0} errors)", flush=True)
+        have = pd.concat([have, new], ignore_index=True)
+        LESION_DIR.mkdir(parents=True, exist_ok=True)
+        have.to_parquet(path, index=False)
+    mm = have.drop_duplicates("volume_id", keep="last").set_index("volume_id")["mls_mm"].dropna()
+    rows = pd.concat([ct, mri])
+    rows = rows[rows["volume_id"].astype(str).isin(mm.index)]
+    return _rows(rows, mm.loc[rows["volume_id"].astype(str)].to_numpy())
+
+
 SOURCES = {
     "ssl_recon": src_ssl_recon, "synth": src_synth,
     "fomo_participants": src_fomo_participants, "rsna": src_rsna, "rsna_ica": src_rsna_ica, "fastmri_findings": src_fastmri_findings,
@@ -610,6 +784,7 @@ SOURCES = {
     "cq500": src_cq500, "downstream": src_downstream, "empty": src_empty,
     "synthseg_seg": src_synthseg_seg, "synthseg_measure": src_synthseg_measure,
     "synthseg_scan_measure": src_synthseg_scan_measure, "wmh": src_wmh,
+    "lesion": src_lesion, "midline_shift": src_midline_shift,
 }
 
 
@@ -620,7 +795,8 @@ REG_DICE_MIN = 0.85     # brain mask vs registered template brain (OASIS-1-style
 # Targets that are only right when the registration is: template-space volumes (registration scale) and left-right
 # asymmetries (grid midline). Registration QC drops a failing scan's rows for these tasks only; its study-level labels
 # (hemorrhage, age, diagnosis, ...) and image-space masks (brain, tumour, SynthSeg structures) still train.
-REG_SENSITIVE = ("brain_volume", "brain_asymmetry", "intensity_asymmetry", "tumor_volume")
+REG_SENSITIVE = ("brain_volume", "brain_asymmetry", "intensity_asymmetry", "tumor_volume", "hemorrhage_volume",
+                 "lesion_side", "lesion_location", "midline_shift", "midline_shift_mm")   # + mask-derived (2026-11-12)
 REG_SENSITIVE_PREFIXES = ("vol_",)
 
 
@@ -750,7 +926,7 @@ def refine(f: pd.DataFrame, s: dict, volumes: pd.DataFrame) -> pd.DataFrame:
 # measures taken inside it): wrong whenever the scan or its processing is broken. Human and study-level labels
 # (radiologist reads, expert masks, demographics) stay on such scans.
 TOOL_SOURCES = {"synthseg_seg", "synthseg_measure", "synthseg_scan_measure", "wmh", "live", "brain_volume", "brain_mask",
-                "hu"}
+                "hu", "midline_shift"}
 
 
 def _mirror_synthrad_ct(f: pd.DataFrame, volumes: pd.DataFrame) -> pd.DataFrame:
@@ -780,7 +956,7 @@ def build(reg: Registry, volumes: pd.DataFrame, workers: int = 8, qc: pd.DataFra
             use = s.get("use", "train" if t.trained else "eval")
             fn = SOURCES[s["source"]]
             src = pool if use == "train" else volumes
-            kw = {"workers": workers} if fn is src_brats_seg_volume else \
+            kw = {"workers": workers} if fn in (src_brats_seg_volume, src_lesion, src_midline_shift) else \
                 {"workers": workers, "cache_dir": cache_dir} if fn is src_synth else {}
             f = refine(fn(src, t, s, **kw), s, src)
             if s.get("mirror_synthrad_ct"):       # after refine, so a ``modality: mri`` filter does not drop the copies

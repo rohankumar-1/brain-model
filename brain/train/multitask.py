@@ -22,7 +22,8 @@ from brain.models.vit3d import drop_legacy_ngeo
 from brain.models.window_bank import (add_bank, attach_bank, bank_cfg, bank_of, describe, encoder_in_chans, is_bank_param,
                                      tissue_channel, warm_start_state)
 from brain.data.volumes import n_meta
-from brain.multitask.data import SLAB_TASKS, TOKEN_MIL_TASKS, TYPE_ID, prepare, protected_tasks, sharp_tasks, task_loaders
+from brain.multitask.data import (SLAB_TASKS, TOKEN_MIL_TASKS, TYPE_ID, lr_swap_table, prepare, protected_tasks,
+                                  sharp_tasks, task_loaders)
 from brain.multitask.evaluate import format_eval, run_eval
 from brain.multitask.losses import (Balancer, any_of_loss, slab_mil_loss, slot_losses, token_occupancy,
                                     token_occupancy_loss)
@@ -198,6 +199,7 @@ class Trainer(engine.Trainer):
         self.t_cnt = torch.zeros(len(TYPE_ID), device=dev)
         self.fov_unsafe, self.aug_unsafe = (t.to(dev) for t in protected_tasks(self.reg))
         self.sharp = sharp_tasks(self.reg, cfg)
+        self.lr_swap = lr_swap_table(self.reg)         # side targets follow the left-right flip (None: no sided task)
         # tiny targets (registry ``sparse``): losses.sparse_seg_loss, with the token grid in output voxels
         self.sparse = torch.tensor([t.sparse for t in self.reg.tasks], device=dev) \
             if any(t.sparse for t in self.reg.tasks) else None
@@ -338,7 +340,7 @@ class Trainer(engine.Trainer):
     # the step in parts, so brain.train.joint adds its SSL branch without a second copy of the task side
     def task_batch(self) -> dict:
         return prepare(self._next(), self.cfg, self.rt.device, self.patch, train=True, fov_unsafe=self.fov_unsafe,
-                       aug_unsafe=self.aug_unsafe, sharp=self.sharp)
+                       aug_unsafe=self.aug_unsafe, sharp=self.sharp, lr_swap=self.lr_swap)
 
     def task_inputs(self, b: dict, step: int) -> tuple[tuple, dict, tuple]:
         """(positional args, keyword args) of BrainQuery's forward, and the token-map pairs ``task_loss`` needs."""

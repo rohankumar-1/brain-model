@@ -60,6 +60,8 @@ class Task:
     fine: bool = False               # small target (aneurysm, vessel, thin bleed): with ``aug.task_aware`` no blur,
                                      # field-of-view cut or skull stripping on a scan asked it
     sparse: bool = False             # tiny segmentation target many scans lack: losses.sparse_seg_loss
+    lr_swap: list = field(default_factory=list)   # multiclass: class pairs a left-right mirror flip exchanges (side
+                                     # tasks: [[0, 1]] = left <-> right); the loader swaps flipped scans' targets
     pool: str = "token"              # binary readout: "token" (the task token) or "mil" (multiple-instance: the task
                                      # token's per-location logits, soft-max pooled, plus the token logit; BrainQuery)
 
@@ -134,8 +136,12 @@ def load_registry(path: str | Path | None = None) -> Registry:
                     token=t.get("token"), ssl=bool(t.get("ssl", False)),
                     role=str(t.get("role", "train")), analog=t.get("analog"),
                     needs_skull=bool(t.get("needs_skull", False)), fine=bool(t.get("fine", False)),
-                    sparse=bool(t.get("sparse", False)), pool=str(t.get("pool", "token")))
+                    sparse=bool(t.get("sparse", False)), pool=str(t.get("pool", "token")),
+                    lr_swap=[[int(a), int(b)] for a, b in t.get("lr_swap") or []])
         task.group = str(t.get("group") or default_group(task.id, task.role))
+        if task.lr_swap and (task.type != "multiclass" or
+                             any(not (0 <= i < len(task.classes)) for p in task.lr_swap for i in p)):
+            raise ValueError(f"task {task.id}: lr_swap pairs index its multiclass classes")
         if task.type not in TYPES:
             raise ValueError(f"task {task.id}: unknown type {task.type}")
         if task.pool not in ("token", "mil") or (task.pool == "mil" and task.type != "binary"):

@@ -838,6 +838,32 @@ def dense_targets(batch: dict, x: torch.Tensor, raw_dense: torch.Tensor, hide: t
     return tgt, w
 
 
+def lr_swap_table(reg) -> torch.Tensor | None:
+    """(n_tasks, n_classes) long: a multiclass target's class after a left-right mirror flip (registry ``lr_swap``:
+    the left / right classes of side tasks exchange; every other class and task maps to itself). None when no task
+    has a sided target, so ``prepare`` leaves targets untouched (mask targets flip with the image already)."""
+    if not any(t.lr_swap for t in reg.tasks):
+        return None
+    tab = torch.arange(max(reg.max_classes(), 2)).repeat(len(reg.tasks), 1)
+    for i, t in enumerate(reg.tasks):
+        for a, b in t.lr_swap:
+            tab[i, a], tab[i, b] = b, a
+    return tab
+
+
+def swap_flipped(y: torch.Tensor, task: torch.Tensor, flip: torch.Tensor, table: torch.Tensor) -> torch.Tensor:
+    """``y`` (B, S) with the sided multiclass targets of flipped rows (``flip`` (B,) bool) remapped by ``table``
+    (``lr_swap_table``)."""
+    table = table.to(y.device)
+    sided = (table != torch.arange(table.shape[1], device=y.device)).any(1)
+    sw = flip[:, None] & (task >= 0) & sided[task.clamp_min(0)] & torch.isfinite(y) & (y >= 0)
+    if not sw.any():
+        return y
+    y = y.clone()
+    y[sw] = table[task[sw], y[sw].long()].to(y.dtype)
+    return y
+
+
 def sharp_tasks(reg, cfg: dict) -> torch.Tensor | None:
     """Per registry task, whether a scan asked it must stay sharp (``Task.fine`` under ``aug.task_aware``): no
     through-plane or isotropic blur and no field-of-view cut (``prepare``); None when task-aware augmentation is off."""
@@ -880,9 +906,11 @@ def _warp(x: torch.Tensor, grid: torch.Tensor, background: bool = True) -> torch
 
 
 def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: torch.Tensor | None = None,
-            aug_unsafe: torch.Tensor | None = None, sharp: torch.Tensor | None = None) -> dict:
+            aug_unsafe: torch.Tensor | None = None, sharp: torch.Tensor | None = None,
+            lr_swap: torch.Tensor | None = None) -> dict:
     """Raw batch -> encoder input (B, C, Z, Y, X) windowed, foreground keep (B, N), and float segmentation targets
-    moved with their image. Training: flip, rotation / shift (not on rows asking a task in ``aug_unsafe``), a
+    moved with their image. Training: flip (sided multiclass targets follow it through ``lr_swap``,
+    ``lr_swap_table``), rotation / shift (not on rows asking a task in ``aug_unsafe``), a
     field-of-view cut on rows asking no task in ``fov_unsafe`` (n_tasks bool: targets that need the whole brain in
     view; see ``protected_tasks``; None = every row is unsafe, no cut), then appearance augmentation
     (``aug.appearance``: bias / through-plane blur / noise / blur / drift, ``brain.data.augment``) with the window
@@ -921,8 +949,11 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
     praw = batch["study_img"].to(device, non_blocking=True).float().unsqueeze(1) if len(prow) else None
     has_dense = raw_dense is not None and len(raw_dense) > 0
     flip = None
+    y = batch["y"].to(device)
     if train and float(aug.get("flip_lr", 0.0)) > 0:
         flip = torch.rand(b, device=device) < float(aug["flip_lr"])
+        if lr_swap is not None:
+            y = swap_flipped(y, task, flip, lr_swap)
         raw = _flip(raw, flip)
         if praw is not None:
             praw = _flip(praw, flip[prow])
@@ -987,7 +1018,7 @@ def prepare(batch: dict, cfg: dict, device, patch_xyz, train: bool, fov_unsafe: 
                                            stride, rec_src=_canonical_window(x, mod) if bank else None)
     if hide is not None and not bank:         # after the reconstruction target: blank voxels (0 in every channel)
         x = x.masked_fill(hide.unsqueeze(1), 0.0)
-    return {"x": x, "keep": keep, "modality": mod, "task": task, "y": batch["y"].to(device),
+    return {"x": x, "keep": keep, "modality": mod, "task": task, "y": y,
             "seg": seg, "seg_pair": batch["seg_pair"].to(device),
             "dense_pair": dense_pair, "dense_tgt": dense_tgt, "dense_w": dense_w,
             "meta": batch["meta"].to(device) if "meta" in batch else None, "slab": slab, "study": study,
