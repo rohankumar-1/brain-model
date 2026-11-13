@@ -786,6 +786,26 @@ tasks:
     sources:
       - {source: lesion, measure: count, families: [bhsd], mask: {column: mask_ich}, ids: [2]}
       - {source: lesion, measure: count, families: [brats_gli, brats_men, brats_ped], mask: brats, ids: [1, 3]}
+  # Midline shift: the septum pellucidum's distance from the skull / head-outline symmetry plane (ventricles from CSF
+  # density on non-contrast CT, from SynthSeg on MRI). Against the CQ500 readers (468 scans, 63 shifted): AUC 0.935,
+  # coverage 98%; >= 5 mm sensitivity 0.52 / specificity 0.99 (>= 3 mm 0.68 / 0.96). Healthy controls: IXI and
+  # Pedi-Cranial-CT p95 <= 1.9 mm, none >= 5 mm. cq500_midline_shift stays held out (now the analog of a trained task).
+  - id: midline_shift_mm
+    type: regression
+    group: lesion
+    descriptions:
+      - "How far is the septum pellucidum displaced from the midline (mm)?"
+      - "Measure the midline shift."
+    sources:
+      - &midline {source: midline_shift, ref: plane, ct_families: [rsna_ich, bhsd, hemseg, pedi_cranial_ct, synthrad],
+                  exclude_datasets: ["synthrad_cbct", "*_cta"]}
+  - id: midline_shift
+    type: binary
+    group: lesion
+    descriptions:
+      - "Is there a midline shift of 5 mm or more?"
+      - "Are the midline structures displaced by mass effect?"
+    sources: [{<<: *midline, threshold: 5.0}]
 
   # ================================================================ held out (never trained; few-shot evaluation)
   - id: cq500_hemorrhage
