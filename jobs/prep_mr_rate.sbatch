@@ -14,6 +14,7 @@
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --mem=64G
 #SBATCH -t 06:00:00
+#SBATCH --requeue
 #SBATCH --exclude=node3006,node4207
 #SBATCH -o logs/prep_mr_rate_%j.out
 #SBATCH -e logs/prep_mr_rate_%j.out
@@ -26,13 +27,32 @@ BUDGET_S=${BUDGET_S:-18000}            # stop taking new chunks after 5 h; a chu
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 T0=$(date +%s)
 echo "[prep-mr-rate] $(date -Is) host=$(hostname)"
+# Several of these jobs may run at once: a job claims a chunk with an atomic mkdir (CLAIM/<job id>). Claims of jobs
+# no longer running, or of this job before a requeue, are released first.
+release_stale() {
+  for c in "$HOLD"/chunk_*/CLAIM; do
+    [[ -d "$c" && ! -f "$(dirname "$c")/DONE" ]] || continue
+    owner=$(ls "$c" 2>/dev/null | head -1)
+    if [[ -z "$owner" || "$owner" == "${SLURM_JOB_ID:-local}" ]] || ! squeue -h -j "$owner" 2>/dev/null | grep -q .; then
+      rm -rf "$c"
+    fi
+  done
+}
+release_stale
 while true; do
   next=""
   for d in $(ls -d "$HOLD"/chunk_* 2>/dev/null | sort); do
-    [[ -f "$d/READY" && ! -f "$d/DONE" ]] && { next=$d; break; }
+    if [[ -f "$d/READY" && ! -f "$d/DONE" ]] && mkdir "$d/CLAIM" 2>/dev/null; then
+      touch "$d/CLAIM/${SLURM_JOB_ID:-local}"; next=$d; break
+    fi
   done
   if [[ -z "$next" ]]; then
-    [[ -f "$HOLD/FETCH_DONE" ]] && { echo "[prep-mr-rate] all chunks done $(date -Is)"; exit 0; }
+    if [[ -f "$HOLD/FETCH_DONE" ]]; then
+      left=0
+      for d in "$HOLD"/chunk_*; do [[ -f "$d/DONE" ]] || left=1; done
+      (( left == 0 )) && { echo "[prep-mr-rate] all chunks done $(date -Is)"; exit 0; }
+      echo "[prep-mr-rate] remaining chunks are claimed by other jobs; exiting $(date -Is)"; exit 0
+    fi
     (( $(date +%s) - T0 > BUDGET_S )) && break
     sleep 120; continue
   fi
