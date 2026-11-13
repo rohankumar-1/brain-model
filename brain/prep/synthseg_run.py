@@ -42,6 +42,23 @@ def select(n: int, cap_frac: float = 0.15, seed: int = 0) -> pd.DataFrame:
     return pick[["volume_id", "folder", "case_id", "image_path", "modality", "dataset_family", "split"]]
 
 
+def add_families(families: list[str]) -> pd.DataFrame:
+    """Append every train / val pretraining-pool volume of ``families`` (a dataset added after the selection, e.g.
+    MR-RATE 2026-11-13) to select.csv, whole (no family cap); volumes already selected are skipped."""
+    v = pd.read_csv(ROOT / "volumes.csv", low_memory=False)
+    v = v[v.pretrain.astype(bool) & ~v.held_out.astype(bool) & v.split.isin(["train", "val"])
+          & v.dataset_family.isin(families)]
+    sel = pd.read_csv(OUT / "select.csv")
+    new = v[~v.volume_id.astype(str).isin(set(sel.volume_id.astype(str)))]
+    cols = ["volume_id", "folder", "case_id", "image_path", "modality", "dataset_family", "split"]
+    out = pd.concat([sel, new[cols]], ignore_index=True)
+    tmp = OUT / "select.csv.partial"
+    out.to_csv(tmp, index=False)
+    tmp.replace(OUT / "select.csv")
+    print(f"[synthseg] select.csv: +{len(new)} volumes of {families} (now {len(out)})", flush=True)
+    return out
+
+
 def run_shard(shard: int, n_shards: int, batch: int = 1, amp: bool = False) -> None:
     """Three overlapped stages: loader threads read + normalise into pinned memory; the GPU segments batch i + 1
     while the CPU takes batch i's largest connected component; label zips are written by threads (checked)."""
@@ -129,7 +146,12 @@ def main() -> None:
     ap.add_argument("--redo-families", default="",
                     help="comma list of dataset_family whose volumes were re-prepped (new geometry): their rows are "
                          "removed from volumes_*.csv first, so this run segments them again")
+    ap.add_argument("--add-families", default="",
+                    help="comma list of dataset_family added to the index after the selection: append their train / "
+                         "val volumes to select.csv (whole)")
     a = ap.parse_args()
+    if a.add_families:
+        add_families(a.add_families.split(","))
     if a.redo_families:
         forget(a.redo_families.split(","))
     if a.select:
