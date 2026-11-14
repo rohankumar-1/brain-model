@@ -315,7 +315,8 @@ def smoke_config(cfg: dict[str, Any]) -> dict[str, Any]:
     v["patch_xyz"] = [8, 8, 4]
     v["global"] = {"n": 2, "size_xyz": [16, 16, 8]}
     v["local"] = {"n": 2, "size_xyz": [16, 16, 8]}
-    v["fine"] = {"n": 2, "size_xyz": [16, 16, 8], "patch_xyz": [4, 4, 2]}
+    # a conv stem (model.conv_stem) needs every patch side divisible by 4
+    v["fine"] = {"n": 2, "size_xyz": [16, 16, 8], "patch_xyz": [4, 4, 4] if m.get("conv_stem") else [4, 4, 2]}
     v["fg_min"] = 0.05
     v["gate"] = {"ct_hu": [-5.0, 200.0], "mri_lo": -1.0}
     out["optim"]["batch_size"] = 2

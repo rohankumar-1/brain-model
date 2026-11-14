@@ -6,8 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from brain.common.windowing import canonical_window
 from brain.objectives.dense import parent_mean
 from brain.models.vit3d import BrainEncoder
+from brain.models.window_bank import bank_of
 
 
 def batch_meta(batch: dict) -> dict:
@@ -33,6 +35,11 @@ class ViewNet(nn.Module):
     view also reports an embedding per coarse grid position it covers (fine crops average into the parent cell).
     With a predictor, hidden blocks of each global crop are filled from the visible tokens: the target is that crop's
     own unmasked token-head embeddings (no gradient) and the cell means of every kept patch's voxels.
+
+    With a learned window bank on the encoder (``encoder.window_bank``) the views arrive in native units, one channel
+    (``batch3d.prepare``), and each goes through the bank with its volume's modality before the patch embedding, as in
+    BrainQuery; the pixel target is then the canonical window of the native crop (as the multitask reconstruction
+    target), and there is no window pair (``win`` is None).
     """
 
     def __init__(self, enc: BrainEncoder, *, dense: bool = True, predict: bool = False,
@@ -42,6 +49,11 @@ class ViewNet(nn.Module):
         self.dense = bool(dense) and enc.token_head is not None
         self.predict = bool(predict) and self.dense and enc.predictor is not None
         self.cells_xyz = tuple(int(c) for c in cells_xyz)
+
+    def _input(self, x: torch.Tensor, mod: torch.Tensor) -> torch.Tensor:
+        """A view's encoder input: through the encoder's window bank when it has one (native-unit views)."""
+        bank = bank_of(self.enc)
+        return x if bank is None else bank(x, mod)
 
     def forward(self, v: dict) -> dict[str, torch.Tensor | dict]:
         b = v["modality"].shape[0]
@@ -54,7 +66,8 @@ class ViewNet(nn.Module):
             keep = rows(v[f"{g}_fg"])
             meta = v["meta"].repeat(n) if "meta" in v else None              # (V*B,): row = view * B + volume
             pooled[g], tokens = self.enc.encode_rows(
-                rows(v[f"{g}_view"]), rows(v[f"{g}_coords"]), rows(v[f"{g}_patch_mm"]), keep,
+                self._input(rows(v[f"{g}_view"]), v["modality"].repeat(n)), rows(v[f"{g}_coords"]),
+                rows(v[f"{g}_patch_mm"]), keep,
                 v["plans"][g], v["patch"][g], tokens=self.dense, meta=meta,
             )
             if self.dense:
@@ -65,17 +78,20 @@ class ViewNet(nn.Module):
                 entries["emb"] += list(emb.view(n, b, *emb.shape[1:]).unbind(0))
                 entries["valid"] += list(valid.view(n, b, -1).unbind(0))
         proj = self.enc.projector(pooled["global"]).view(-1, b, self.enc.proj_dim)
-        win = self.enc.projector(pooled["win"]).view(2, b, self.enc.proj_dim)
+        win = self.enc.projector(pooled["win"]).view(2, b, self.enc.proj_dim) if "win" in pooled else None
         return {"proj": proj, "win": win, "dense": entries if self.dense else None, "predict": predicted}
 
     def _predict(self, v: dict, rows, head: torch.Tensor, keep: torch.Tensor, meta: torch.Tensor | None) -> dict:
         """The global crops' hidden blocks (``ctx_keep`` visible, ``tgt_mask`` predicted)."""
         view, coords, patch = rows(v["global_view"]), rows(v["global_coords"]), v["patch"]["global"]
+        mod = v["modality"].repeat(v["global_view"].shape[0])
         ctx = rows(v["ctx_keep"])
         _, ctx_tokens = self.enc.encode_rows(
-            view, coords, rows(v["global_patch_mm"]), ctx, v["plans"]["ctx"], patch, tokens=True, meta=meta)
+            self._input(view, mod), coords, rows(v["global_patch_mm"]), ctx, v["plans"]["ctx"], patch, tokens=True,
+            meta=meta)
         latent, pixel = self.enc.predictor(ctx_tokens, ctx, keep, coords, v["plans"]["global"])
         return {
             "latent": latent, "target": head.detach(), "tgt": rows(v["tgt_mask"]), "fg": keep, "pixel": pixel,
-            "pixel_target": cell_means(view[:, :1], patch, self.cells_xyz) if pixel is not None else None,
+            "pixel_target": cell_means(view[:, :1] if bank_of(self.enc) is None else canonical_window(view[:, :1], mod),
+                                       patch, self.cells_xyz) if pixel is not None else None,
         }

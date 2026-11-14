@@ -32,7 +32,8 @@ def lejepa_loss(
     """``out`` is ``ViewNet`` output (globals first in ``proj``); ``meta`` is ``batch_meta`` of the batch."""
     proj = gather_batch(out["proj"].float(), gather_ddp)
     inv, reg = prediction_loss(proj, n_global=meta["n_global"]), sigreg(proj)
-    win = prediction_loss(out["win"].float())
+    # no window pair with a learned window bank (``batch3d.prepare`` leaves it out; its weight must be 0 there)
+    win = prediction_loss(out["win"].float()) if out["win"] is not None else proj.new_zeros(())
     total = (1.0 - lamb) * inv + lamb * reg + win_weight * win
     parts = {"inv": inv, "win": win, "sigreg": reg}
     dense = out.get("dense")

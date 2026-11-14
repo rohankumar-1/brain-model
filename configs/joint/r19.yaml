@@ -112,6 +112,10 @@ model:
   proj_dim: 128
   proj_hidden: 2048
   proj_norm: batch
+  qk_norm: true                  # R18's encoder (the multitask builder set these at run time; joint reads the config)
+  n_cls: 1
+  dense_dim: 128                 # LeJEPA token head (R15): without it loss.dense / loss.predict are silently off
+  dense_hidden: 1024
 views:
   patch_xyz:
   - 16
